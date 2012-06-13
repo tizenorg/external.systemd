@@ -1,0 +1,39 @@
+From 17860355fe8401140c15bfe207c3f925eb88db6c Mon Sep 17 00:00:00 2001
+From: William Douglas <william.douglas@intel.com>
+Date: Fri, 20 Apr 2012 14:25:58 -0700
+Subject: [PATCH 2/3] update login path for emergency in tizen distro
+
+---
+ units/emergency.service |    2 +-
+ units/rescue.service.m4 |    2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/units/emergency.service b/units/emergency.service
+index 234bafc..b1afa68 100644
+--- a/units/emergency.service
++++ b/units/emergency.service
+@@ -18,7 +18,7 @@ Environment=HOME=/root
+ WorkingDirectory=/root
+ ExecStartPre=-/bin/plymouth quit
+ ExecStartPre=-/bin/echo 'Welcome to emergency mode. Use "systemctl default" or ^D to activate default mode.'
+-ExecStart=-/sbin/sulogin
++ExecStart=-/bin/login
+ ExecStopPost=/bin/systemctl --fail --no-block default
+ StandardInput=tty-force
+ StandardOutput=inherit
+diff --git a/units/rescue.service.m4 b/units/rescue.service.m4
+index 7dd8a22..7f60aca 100644
+--- a/units/rescue.service.m4
++++ b/units/rescue.service.m4
+@@ -31,7 +31,7 @@ ExecStart=-/bin/bash -c "exec ${SINGLE}"',
+ m4_ifdef(`TARGET_MEEGO',
+ `EnvironmentFile=/etc/sysconfig/init
+ ExecStart=-/bin/bash -c "exec ${SINGLE}"',
+-`ExecStart=-/sbin/sulogin'))))
++`ExecStart=-/bin/login'))))
+ ExecStopPost=-/bin/systemctl --fail --no-block default
+ StandardInput=tty-force
+ StandardOutput=inherit
+-- 
+1.7.10
+

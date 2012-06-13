@@ -1,0 +1,65 @@
+From 3a1ebb879b113370519e657aff3275c48ac50e7f Mon Sep 17 00:00:00 2001
+From: William Douglas <william.douglas@intel.com>
+Date: Fri, 20 Apr 2012 14:28:58 -0700
+Subject: [PATCH 3/3] update random-seed-load and tmpfile-setup services
+
+---
+ Makefile.am                               |    2 ++
+ units/systemd-random-seed-load.service.in |    2 +-
+ units/systemd-tmpfiles-clean.service.in   |    2 +-
+ units/systemd-tmpfiles-setup.service.in   |    2 +-
+ 4 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/Makefile.am b/Makefile.am
+index d24649e..045dbd9 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -2433,6 +2433,8 @@ if TARGET_MEEGO
+ 	$(MKDIR_P) -m 0755 $(DESTDIR)$(systemunitdir)/final.target.wants
+ 	( cd $(DESTDIR)$(systemunitdir)/multi-user.target.wants && \
+ 		rm -f network.target && \
++		$(LN_S) $(systemunitdir)/systemd-random-seed-load.service systemd-random-seed-load.service && \
++		$(LN_S) $(systemunitdir)/systemd-tmpfiles-setup.service systemd-tmpfiles-setup.service && \
+ 		$(LN_S) $(systemunitdir)/network.target network.target )
+ 	( cd $(DESTDIR)$(pkgsysconfdir)/system/sysinit.target.wants && \
+ 		rm -f * )
+diff --git a/units/systemd-random-seed-load.service.in b/units/systemd-random-seed-load.service.in
+index a2b6a55..867fcd1 100644
+--- a/units/systemd-random-seed-load.service.in
++++ b/units/systemd-random-seed-load.service.in
+@@ -11,7 +11,7 @@ DefaultDependencies=no
+ Wants=local-fs.target
+ Conflicts=shutdown.target
+ After=systemd-readahead-collect.service systemd-readahead-replay.service local-fs.target
+-Before=sysinit.target shutdown.target
++##Before=sysinit.target shutdown.target
+ 
+ [Service]
+ Type=oneshot
+diff --git a/units/systemd-tmpfiles-clean.service.in b/units/systemd-tmpfiles-clean.service.in
+index 3c8e72e..14cd18a 100644
+--- a/units/systemd-tmpfiles-clean.service.in
++++ b/units/systemd-tmpfiles-clean.service.in
+@@ -18,5 +18,5 @@ ConditionDirectoryNotEmpty=|/run/tmpfiles.d
+ 
+ [Service]
+ Type=oneshot
+-ExecStart=@rootbindir@/systemd-tmpfiles --clean
++ExecStart=@rootbindir@/systemd-tmpfiles --clean --remove
+ IOSchedulingClass=idle
+diff --git a/units/systemd-tmpfiles-setup.service.in b/units/systemd-tmpfiles-setup.service.in
+index f90121e..dec3f6d 100644
+--- a/units/systemd-tmpfiles-setup.service.in
++++ b/units/systemd-tmpfiles-setup.service.in
+@@ -10,7 +10,7 @@ Description=Recreate Volatile Files and Directories
+ DefaultDependencies=no
+ Wants=local-fs.target
+ After=systemd-readahead-collect.service systemd-readahead-replay.service local-fs.target
+-Before=sysinit.target shutdown.target
++##Before=sysinit.target shutdown.target
+ ConditionDirectoryNotEmpty=|/usr/lib/tmpfiles.d
+ ConditionDirectoryNotEmpty=|/usr/local/lib/tmpfiles.d
+ ConditionDirectoryNotEmpty=|/etc/tmpfiles.d
+-- 
+1.7.10
+
