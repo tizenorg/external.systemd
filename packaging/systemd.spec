@@ -7,12 +7,12 @@ Group:      System/System Control
 License:    GPLv2
 URL:        http://www.freedesktop.org/wiki/Software/systemd
 Source0:    http://www.freedesktop.org/software/systemd/%{name}-%{version}.tar.xz
-Source1:    packaging/pamconsole-tmp.conf
-Source1001: packaging/systemd.manifest
-Patch1:     packaging/0002-systemd-fsck-disable-l-until-linux.patch
-Patch2:     packaging/add-tmp.mount-as-tmpfs.patch
-Patch3:     packaging/tizen-login-location.patch
-Patch4:     packaging/tizen-service-file-workaround.patch
+Source1:    pamconsole-tmp.conf
+Source1001: systemd.manifest
+Patch1:     0002-systemd-fsck-disable-l-until-linux.patch
+Patch2:     add-tmp.mount-as-tmpfs.patch
+Patch3:     tizen-login-location.patch
+Patch4:     tizen-service-file-workaround.patch
 
 BuildRequires:  pkgconfig(dbus-1) >= 1.4.0
 BuildRequires:  pkgconfig(dbus-glib-1)
