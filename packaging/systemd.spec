@@ -128,6 +128,8 @@ to replace sysvinit.
 Summary:   System and session manager - SysV links
 Group:     System/Startup Services
 Requires:  %{name} = %{version}-%{release}
+Obsoletes: sysvinit
+Provides:  sysvinit
 
 %description sysv
 Systemd is a replacement for sysvinit.  It is dependency-based and
