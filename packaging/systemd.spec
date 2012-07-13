@@ -106,6 +106,15 @@ Requires:   %{name}
 %description console-ttyMFD2
 This package will setup a serial getty for ttyMFD2 is desired.
 
+%package console-ttySAC2
+Summary:    Systemd console ttySAC2
+Group:      System/System Control
+Requires:   %{name}
+
+%description console-ttySAC2
+This package will setup a serial getty for ttySAC2 is desired.
+
+
 %package docs
 Summary:   System and session manager man pages
 Group:     Development/Libraries
@@ -205,6 +214,9 @@ mkdir -p %{buildroot}/etc/systemd/system/basic.target.wants
 #console-ttyMFD2
 ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyMFD2.service
 
+#console-ttySAC2
+ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttySAC2.service
+
 #console-ttyS0
 ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyS0.service
 
@@ -285,11 +297,16 @@ fi
 %{_mandir}/man8/*
 %exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@tty01.service
 %exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyMFD2.service
+%exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttySAC2.service
 %exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyO2.service
 %exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyS0.service
 %exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyS1.service
 %exclude %{_libdir}/systemd/system/sysinit.target.wants/systemd-vconsole-setup.service
 %exclude %{_libdir}/systemd/user/default.target
+
+%files console-ttySAC2
+%defattr(-,root,root,-)
+%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttySAC2.service
 
 %files console-ttyMFD2
 %defattr(-,root,root,-)
