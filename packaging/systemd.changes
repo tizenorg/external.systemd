@@ -1,3 +1,7 @@
+* Wed Jul 25 2012 William Douglas <william.douglas@intel.com> 20120702.1314@98c0af0
+[ William Douglas ]
+- Fix the default PATH environment variable.
+
 * Mon Jul 02 2012 Chris Ferron <chris.e.ferron@linux.intel.com> - 43
 - re-add Obsoletes/Provides for sysvinit so we can remove sysvinit.
 

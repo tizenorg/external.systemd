@@ -162,6 +162,7 @@ cp %{SOURCE1001} .
     --disable-gtk \
     --disable-selinux \
     --disable-tcpwrap \
+    --enable-split-usr \
     --enable-manpages \
     --with-pamlibdir="/%{_libdir}/security" \
     --with-udevrulesdir="%{_libdir}/udev/rules.d"
