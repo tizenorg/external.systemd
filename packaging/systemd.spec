@@ -210,24 +210,26 @@ ln -s ../systemd-readahead-replay.service %{buildroot}%{_libdir}/systemd/system/
 rm %{buildroot}/%{_docdir}/systemd/*
 
 mkdir -p %{buildroot}/etc/systemd/system/basic.target.wants
+mkdir -p %{buildroot}/etc/systemd/system/getty.target.wants
+mkdir -p %{buildroot}%{_libdir}/systemd/system/getty.target.wants
 
 #console-ttyMFD2
-ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyMFD2.service
+ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyMFD2.service
 
 #console-ttySAC2
-ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttySAC2.service
+ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/getty.target.wants/serial-getty@ttySAC2.service
 
 #console-ttyS0
-ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyS0.service
+ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyS0.service
 
 #console-ttyS1
-ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyS1.service
+ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyS1.service
 
 #console-tty01
-ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@tty01.service
+ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/getty.target.wants/serial-getty@tty01.service
 
 #console-ttyO2
-ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyO2.service
+ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyO2.service
 
 %fdupes  %{buildroot}/%{_datadir}/man/
 
@@ -295,38 +297,38 @@ fi
 %{_mandir}/man5/*
 %{_mandir}/man7/*
 %{_mandir}/man8/*
-%exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@tty01.service
-%exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyMFD2.service
-%exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttySAC2.service
-%exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyO2.service
-%exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyS0.service
-%exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyS1.service
+%exclude %{_libdir}/systemd/system/getty.target.wants/serial-getty@tty01.service
+%exclude %{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyMFD2.service
+%exclude %{_libdir}/systemd/system/getty.target.wants/serial-getty@ttySAC2.service
+%exclude %{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyO2.service
+%exclude %{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyS0.service
+%exclude %{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyS1.service
 %exclude %{_libdir}/systemd/system/sysinit.target.wants/systemd-vconsole-setup.service
 %exclude %{_libdir}/systemd/user/default.target
 
 %files console-ttySAC2
 %defattr(-,root,root,-)
-%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttySAC2.service
+%{_libdir}/systemd/system/getty.target.wants/serial-getty@ttySAC2.service
 
 %files console-ttyMFD2
 %defattr(-,root,root,-)
-%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyMFD2.service
+%{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyMFD2.service
 
 %files console-ttyS0
 %defattr(-,root,root,-)
-%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyS0.service
+%{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyS0.service
 
 %files console-ttyS1
 %defattr(-,root,root,-)
-%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyS1.service
+%{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyS1.service
 
 %files console-tty01
 %defattr(-,root,root,-)
-%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@tty01.service
+%{_libdir}/systemd/system/getty.target.wants/serial-getty@tty01.service
 
 %files console-ttyO2
 %defattr(-,root,root,-)
-%{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyO2.service
+%{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyO2.service
 
 
 %files tools
