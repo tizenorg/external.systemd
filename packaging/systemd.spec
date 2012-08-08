@@ -239,6 +239,7 @@ fi
 %manifest systemd.manifest
 /bin/systemctl
 %{_bindir}/*
+%exclude %{_bindir}/systemd-analyze
 /run
 %config %{_libdir}/sysctl.d/coredump.conf
 %config %{_sysconfdir}/dbus-1/system.d/org.freedesktop.systemd1.conf
@@ -278,11 +279,6 @@ fi
 %{_datadir}/dbus-1/interfaces/org.freedesktop.hostname1.xml
 %{_datadir}/dbus-1/interfaces/org.freedesktop.locale1.xml
 %{_datadir}/dbus-1/interfaces/org.freedesktop.timedate1.xml
-%{_mandir}/man1/*
-%{_mandir}/man3/*
-%{_mandir}/man5/*
-%{_mandir}/man7/*
-%{_mandir}/man8/*
 %exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@tty01.service
 %exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyMFD2.service
 %exclude %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyO2.service
@@ -310,7 +306,6 @@ fi
 %files console-ttyO2
 %defattr(-,root,root,-)
 %{_libdir}/systemd/system/sysinit.target.wants/serial-getty@ttyO2.service
-
 
 %files tools
 %defattr(-,root,root,-)
@@ -346,3 +341,11 @@ fi
 %{_sbindir}/runlevel
 %{_sbindir}/shutdown
 %{_sbindir}/telinit
+
+%files docs
+%defattr(-,root,root,-)
+%{_mandir}/man1/*
+%{_mandir}/man3/*
+%{_mandir}/man5/*
+%{_mandir}/man7/*
+%{_mandir}/man8/*
