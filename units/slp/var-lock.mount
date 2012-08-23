@@ -1,0 +1,9 @@
+[Unit]
+Description=/var/lock Mount Point
+Before=local-fs.target
+
+[Mount]
+What=/run/lock
+Where=/var/lock
+Type=bind
+Options=bind

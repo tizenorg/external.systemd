@@ -1,0 +1,436 @@
+systemd (37-1slp2+s1) unstable; urgency=low
+
+  * Merge with Debian.
+  * slp: use new M4_DEFINES variable in Makefile.am instead of M4_DISTRO_FLAG.
+
+ -- Rafal Krypa <r.krypa@samsung.com>  Fri, 14 Oct 2011 10:16:47 +0200
+
+systemd (37-1) unstable; urgency=low
+
+  [ Tollef Fog Heen ]
+  * New upstream version
+  * Change the type of the debian-fixup service to oneshot.
+    Closes: #642961
+  * Add ConditionPathIsDirectory to lib-init-rw.automount and
+    lib-init-rw.mount so we only activate the unit if the directory
+    exists.  Closes: #633059
+  * If a sysv service exists in both rcS and rcN.d runlevels, drop the
+    rcN.d ones to avoid loops.  Closes: #637037
+  * Blacklist fuse init script, we do the same work already internally.
+    Closes: #643700
+  * Update README.Debian slightly for /run rather than /lib/init/rw
+
+  [ Josh Triplett ]
+  * Do a one-time migration of the $TMPTIME setting from /etc/default/rcS to
+    /etc/tmpfiles.d/tmp.conf. If /etc/default/rcS has a TMPTIME setting of
+    "infinite" or equivalent, migrate it to an /etc/tmpfiles.d/tmp.conf that
+    overrides the default /usr/lib/tmpfiles.d/tmp.conf and avoids clearing
+    /tmp.  Closes: #643698
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Wed, 28 Sep 2011 20:04:13 +0200
+
+systemd (36-1slp2+s1) unstable; urgency=low
+
+  * Merge with Debian.
+  * Remove debian-fixup service.
+  * Versioned dependency on dh-autoreconf.
+
+ -- Rafal Krypa <r.krypa@samsung.com>  Thu, 29 Sep 2011 16:06:45 +0200
+
+systemd (36-1) unstable; urgency=low
+
+  [ Tollef Fog Heen ]
+  * New upstream release. Closes: #634618
+    - Various man page fixes. Closes: #623521
+  * Add debian-fixup service that symlinks mtab to /proc/mounts and
+    migrates /var/run and /var/lock to symlinks to /run
+
+  [ Michael Biebl ]
+  * Build for libnotify 0.7.
+  * Bump Build-Depends on libudev to (>= 172).
+  * Add Build-Depends on libacl1-dev. Required for building systemd-logind
+    with ACL support.
+  * Split libsystemd-login and libsystemd-daemon into separate binary
+    packages.
+  * As autoreconf doesn't like intltool, override dh_autoreconf and call
+    intltoolize and autoreconf ourselves.
+  * Add Build-Depends on intltool.
+  * Do a one-time migration of the hwclock configuration. If UTC is set to
+    "no" in /etc/default/rcS, create /etc/adjtime and add the "LOCAL" setting.
+  * Remove /cgroup cleanup code from postinst.
+  * Add Build-Depends on gperf.
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Wed, 14 Sep 2011 08:25:17 +0200
+
+systemd (29-1) unstable; urgency=low
+
+  [ Tollef Fog Heen ]
+  * New upstream version, Closes: #630510
+    - Includes typo fixes in documentation.  Closes: #623520
+  * Fall back to the init script reload function if a native .service file
+    doesn't know how to reload.  Closes: #628186
+  * Add hard dependency on udev.  Closes: #627921
+
+  [ Michael Biebl ]
+  * hwclock-load.service is no longer installed, so we don't need to remove it
+    anymore in debian/rules.
+  * Install /usr/lib directory for binfmt.d, modules-load.d, tmpfiles.d and
+    sysctl.d.
+  * Remove obsolete conffiles from /etc/tmpfiles.d on upgrades. Those files
+    are installed in /usr/lib/tmpfiles.d now.
+  * Depend on util-linux (>= 2.19.1-2) which provides whole-disk locking
+    support in fsck and remove our revert patch.
+  * Don't choke when systemd was compiled with a different CAP_LAST_CAP then
+    what it is run with. Patch cherry-picked from upstream Git.
+    Closes: #628081
+  * Enable dev-hugepages.automount and dev-mqueue.automount only when enabled
+    in kernel. Patch cherry-picked from upstream Git.  Closes: #624522
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Wed, 08 Jun 2011 16:14:31 +0200
+
+systemd (25-2slp2+s10) unstable; urgency=low
+
+  [ Rafal Krypa ]
+  * Allow disabling of documentation build by "--disable-docs" configure flag.
+
+  [ Mike McCormack ]
+  * Install the .pc file under libdir
+  * rpm: Add spec file
+
+  [ Karol Lewandowski ]
+  * slp: Start getty on board-agnostic serial device
+  * slp: Kill mkcompatdev hack
+  * slp: Kill mdev
+  * slp: Get rid of mnt-db.(auto)mount - it's c110-specific
+  * rpm: Start getty on board-agnostic serial device
+  * Move .pc files to proper location
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Tue, 27 Sep 2011 20:32:14 +0900
+
+systemd (25-2slp2+s9) unstable; urgency=low
+
+  * debian: Don't conflict with klogd
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Mon, 05 Sep 2011 15:33:26 +0200
+
+systemd (25-2slp2+s8) unstable; urgency=low
+
+  * slp: Re-add broken mmc devices faster in bootup sequence
+  * slp: Adjust mount points to new fs layout
+  * slp: Drop unused media.mount
+  * slp: Move SLP-specific rules back to proper place
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Wed, 31 Aug 2011 20:03:11 +0200
+
+systemd (25-2slp2+s7) unstable; urgency=low
+
+  * Add libsystemd-daemon library
+  * Expand few more variables for libsystemd-daemon.pc.in
+  * Add myself to list of maintainers
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Thu, 04 Aug 2011 14:59:48 +0200
+
+systemd (25-2slp2+s6) unstable; urgency=low
+
+  * Add /var/lock -> /run/lock bind mount point
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Thu, 14 Jul 2011 16:11:04 +0200
+
+systemd (25-2slp2+s5) unstable; urgency=low
+
+  * Limit amount of systemd-tagged ttys
+  * HACK: Decrease log level to avoid console lockups on Limo REV2.0
+    boards
+  * Kill SysV-compatibility runlevel directories
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Tue, 21 Jun 2011 13:33:54 +0200
+
+systemd (25-2slp2+s4) unstable; urgency=low
+
+  * Revert "Customize sysv-rc scripts path on SLP"
+  * Revert "Don't start readahead related services on slp"
+  * slp: Merge slp-specific parts in makefile
+  * slp: Make bind-mounting /var/run and /var/lock unconditional
+  * slp: Bind mount /var/{cache,lib,log} like it's done on SLP
+  * slp: Don't install Debian-specific /lib/init/rw auto mount point
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Thu, 09 Jun 2011 14:50:14 +0200
+
+systemd (25-2slp2+s3) unstable; urgency=low
+
+  * slp: Create compatibility /run directory
+  * Make sure we remount rootfs read-writable
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Wed, 08 Jun 2011 16:06:15 +0200
+
+systemd (25-2slp2+s2) unstable; urgency=low
+
+  * Add usr/etc once again
+  * debian: Don't try to delete LICENSE - it isn't installed anymore
+  * Add slp-compatible mount fstab replacements
+  * slp: Drop unit files for busybox logging deamons
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Fri, 27 May 2011 17:50:32 +0200
+
+systemd (25-2slp2+s1) unstable; urgency=low
+
+  * debian: Avoid using GNU-specific options in installation scripts
+  * Merge slp2-customizations for systemd
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Tue, 24 May 2011 17:00:39 +0200
+
+systemd (25-2) experimental; urgency=low
+
+  * Handle downgrades more gracefully by removing diversion of
+    /lib/lsb/init-functions on downgrades to << 25-1.
+  * Cherry-pick a133bf10d09f788079b82f63faa7058a27ba310b from upstream,
+    avoids assert when dumping properties.  Closes: #624094
+  * Remove "local" in non-function context in init-functions wrapper.
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Wed, 27 Apr 2011 22:20:04 +0200
+
+systemd (25-1) experimental; urgency=low
+
+  * New upstream release, target experimental due to initscripts
+    dependency.
+    - Fixes where to look for locale config.  Closes: #619166
+  * Depend on initscripts >= 2.88dsf-13.4 for /run transition.
+  * Add Conflicts on klogd, since it doesn't work correctly with the
+    kmg→/dev/log bridge.  Closes: #622555
+  * Add suggests on Python for systemd-analyze.
+  * Divert /lib/lsb/init-functions instead of (ab)using
+    /etc/lsb-base-logging.sh for diverting calls to /etc/init.d/*
+  * Remove obsolete conffile /etc/lsb-base-logging.sh.  Closes: #619093
+  * Backport 3a90ae048233021833ae828c1fc6bf0eeab46197 from master:
+    mkdir /run/systemd/system when starting up
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Sun, 24 Apr 2011 09:02:04 +0200
+
+systemd (24-0slp2+s4) unstable; urgency=low
+
+  * slp: Add service to generate slp-compatible devices at bootup
+  * slp: Tag slp-specific ttys
+  * slp: Use kernel tty device name
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Wed, 04 May 2011 14:56:35 +0200
+
+systemd (24-0slp2+s3) unstable; urgency=low
+
+  * Fix: Don't use const pointer for for const data
+  * slp: Fixup serial-getty@ once again
+  * slp: Don't mount binfmt_misc nor security fs; disable cryptsetup
+    target
+  * slp: Don't use accept4()
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Wed, 20 Apr 2011 19:35:24 +0200
+
+systemd (24-0slp2+s2) unstable; urgency=low
+
+  * debian: Update systemd.install to match upstream changes
+  * Fixup serial-getty@ service on slp
+  * Move busybox services to units/slp
+  * Automatically install busybox services for slp
+  * Install only serial-getty@ on slp
+  * Revert "debian: Don't try to remove service files which aren't
+    installed on slp"
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Fri, 15 Apr 2011 12:12:29 +0200
+
+systemd (24-0slp2+s1) unstable; urgency=low
+
+  * Sync with upstream
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Wed, 13 Apr 2011 19:28:40 +0200
+
+systemd (20-1) unstable; urgency=low
+
+  * New upstream version
+  * Install systemd-machine-id-setup
+  * Call systemd-machine-id-setup in postinst
+  * Cherry-pick b8a021c9e276adc9bed5ebfa39c3cab0077113c6 from upstream to
+    prevent dbus assert error.
+  * Enable TCP wrapper support.  Closes: #618409
+  * Enable SELinux support.  Closes: #618412
+  * Make getty start after Apache2 and OpenVPN (which are the only two
+    known users of X-Interactive: yes).  Closes: #618419
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Fri, 11 Mar 2011 19:14:21 +0100
+
+systemd (19-1slp2+s3) unstable; urgency=low
+
+  * debian: Don't remove doc/LICENSE - it isn't installed anymore
+  * Revert "debian/systemd.install: include SLP config directory
+    /usr/etc"
+  * debian: Don't try to remove service files which aren't installed on
+    slp
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Wed, 13 Apr 2011 19:09:28 +0200
+
+systemd (19-1slp2+s2) unstable; urgency=low
+
+  * Add missing piece to make --with-distro=slp really work
+  * Customize sysv-rc scripts path on SLP
+  * Install serial-getty by default on SLP
+  * Don't install getty@ services on SLP
+  * Add busybox klogd service for slp
+  * Add busybox syslogd service for slp
+  * Don't start readahead related services on slp
+  * Pretty print SLP name
+  * Change default log level to debug
+
+ -- Karol Lewandowski <k.lewandowsk@samsung.com>  Wed, 13 Apr 2011 11:54:03 +0200
+
+systemd (19-1slp2+s1) unstable; urgency=low
+
+  * Set myself as SLP maintainer.
+  * Disable GUI, PAM, AUDIT, cryptsetup.
+  * Add versioned build dependency on linux-libc-dev.
+  * debian/systemd.install: include SLP config directory /usr/etc
+  * Drop version specification from util-linux dependency in systemd package.
+  * Initial customization for SLP.
+
+ -- Rafal Krypa <r.krypa@samsung.com>  Fri, 04 Mar 2011 13:26:14 +0100
+
+systemd (19-1) UNRELEASED; urgency=low
+
+  * New upstream release
+  * Add systemd-tmpfiles to systemd package.
+  * Add ifup@.service for handling hotplugged interfaces from
+    udev.  Closes: #610871
+  * Mask mtab.service and udev-mtab.service as they are pointless when
+    /etc/mtab is a symlink to /proc/mounts
+  * Add breaks on lvm2 (<< 2.02.84-1) since older versions have udev rules
+    that don't work well with systemd causing delays on bootup.
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Thu, 17 Feb 2011 07:36:22 +0100
+
+systemd (17-1) experimental; urgency=low
+
+  [ Tollef Fog Heen ]
+  * New upstream release
+  * Clarify ifupdown instructions in README.Debian somewhat.
+    Closes: #613320
+  * Silently skip masked services in lsb-base-logging.sh instead of
+    failing.  Initial implementation by Michael Biebl.  Closes: #612551
+  * Disable systemd-vconsole-setup.service for now.
+
+  [ Michael Biebl ]
+  * Bump build dependency on valac-0.10 to (>= 0.10.3).
+  * Improve regex in lsb-base-logging.sh for X-Interactive scripts.
+    Closes: #613325
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Wed, 16 Feb 2011 21:06:16 +0100
+
+systemd (16-1) experimental; urgency=low
+
+  [ Tollef Fog Heen ]
+  * New upstream release.  Closes: #609611
+  * Get rid of now obsolete patches that are upstream.
+  * Use the built-in cryptsetup support in systemd, build-depend on
+    libcryptsetup-dev (>= 2:1.2.0-1) to get a libcryptsetup in /lib.
+  * Don't use systemctl redirect for init scripts with X-Interactive: true
+
+  [ Michael Biebl ]
+  * Update package description
+  * Use v8 debhelper syntax
+  * Make single-user mode work
+  * Run hwclock-save.service on shutdown
+  * Remove dependencies on legacy sysv mount scripts, as we use native
+    mounting.
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Sun, 16 Jan 2011 11:04:13 +0100
+
+systemd (15-1) UNRELEASED; urgency=low
+
+  [ Tollef Fog Heen ]
+  * New upstream version, thanks a lot to Michael Biebl for help with
+    preparing this version.
+    - This version handles cycle breaking better.  Closes: #609225
+  * Add libaudit-dev to build-depends
+  * /usr/share/systemd/session has been renamed to /usr/share/systemd/user
+    upstream, adjust build system accordingly.
+  * Remove -s from getty serial console invocation.
+  * Add dependency on new util-linux to make sure /sbin/agetty exists
+  * Don't mount /var/lock with gid=lock (Debian has no such group).
+  * Document problem with ifupdown's /etc/network/run being a normal
+    directory.
+
+  [ Michael Biebl ]
+  * Revert upstream change which requires libnotify 0.7 (not yet available in
+    Debian).
+  * Use dh-autoreconf for updating the build system.
+  * Revert upstream commit which uses fsck -l (needs a newer version of
+    util-linux).
+  * Explicitly disable cryptsetup support to not accidentally pick up a
+    libcryptsetup dependency in a tainted build environment, as the library
+    is currently installed in /usr/lib.
+  * Remove autogenerated man pages and vala C sources, so they are rebuilt.
+  * Use native systemd mount support:
+    - Use MountAuto=yes and SwapAuto=yes (default) in system.conf
+    - Mask SysV init mount, check and cleanup scripts.
+    - Create an alias (symlink) for checkroot (→ remount-rootfs.service) as
+      synchronization point for SysV init scripts.
+  * Mask x11-common, rmnologin, hostname, bootmisc and bootlogd.
+  * Create an alias for procps (→ systemd-sysctl.service) and
+    urandom (→ systemd-random-seed-load.service).
+  * Create an alias for module-init-tools (→ systemd-modules-load.service) and
+    a symlink from /etc/modules-load.d/modules.conf → /etc/modules.
+  * Install lsb-base hook which redirects calls to SysV init scripts to
+    systemctl: /etc/init.d/<foo> <action> → systemctl <action> <foo.service>
+  * Install a (auto)mount unit to mount /lib/init/rw early during boot.
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Sat, 20 Nov 2010 09:28:01 +0100
+
+systemd (11-2) UNRELEASED; urgency=low
+
+  * Tighten depends from systemd-* on systemd to ensure they're upgraded
+    in lockstep.  Thanks to Michael Biebl for the patch.
+  * Add missing #DEBHELPER# token to libpam-systemd
+  * Stop messing with runlevel5/multi-user.target symlink, this is handled
+    correctly upstream.
+  * Stop shipping /cgroup in the package.
+  * Remove tmpwatch services, Debian doesn't have or use tmpwatch.
+  * Make sure to enable GTK bits.
+  * Ship password agent
+  * Clean up cgroups properly on upgrades, thanks to Michael Biebl for the
+    patch.  Closes: #599577
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Tue, 02 Nov 2010 21:47:10 +0100
+
+systemd (11-1) experimental; urgency=low
+
+  * New upstream version.  Closes: #597284
+  * Add pam-auth-update calls to libpam-systemd's postinst and prerm
+  * Make systemd-sysv depend on systemd
+  * Now mounts the cgroup fs in /sys/fs/cgroup.  Closes: #595966
+  * Add libnotify-dev to build-depends (needed for systemadm)
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Thu, 07 Oct 2010 22:01:19 +0200
+
+systemd (8-2) experimental; urgency=low
+
+  * Hardcode udev rules dir in configure call.
+  * Remove README.source as it's no longer accurate.
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Mon, 30 Aug 2010 21:10:26 +0200
+
+systemd (8-1) experimental; urgency=low
+
+  * New upstream release
+  * Only ship the top /cgroup
+  * Pass --with-rootdir= to configure, to make it think / is / rather
+    than //
+  * Add PAM module package
+  * Fix up dependencies in local-fs.target.  Closes: #594420
+  * Move systemadm to its own package.  Closes: #588451
+  * Update standards-version (no changes needed)
+  * Update README.Debian to explain how to use systemd.
+  * Add systemd-sysv package that provides /sbin/init and friends.
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Sat, 07 Aug 2010 07:31:38 +0200
+
+systemd (0~git+20100605+dfd8ee-1) experimental; urgency=low
+
+  * Initial release, upload to experimental.  Closes: #580814
+
+ -- Tollef Fog Heen <tfheen@debian.org>  Fri, 30 Apr 2010 21:02:25 +0200

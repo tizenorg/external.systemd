@@ -24,9 +24,6 @@ After=rc-local.service
 m4_ifdef(`TARGET_MANDRIVA',
 After=rc-local.service
 )m4_dnl
-m4_ifdef(`TARGET_MAGEIA',
-After=rc-local.service
-)m4_dnl
 
 # If additional gettys are spawned during boot then we should make
 # sure that this is synchronized before getty.target, even though
@@ -35,7 +32,7 @@ Before=getty.target
 
 [Service]
 Environment=TERM=vt100
-ExecStart=-/sbin/agetty -s %I 115200,38400,9600
+m4_ifdef(`TARGET_SLP', `ExecStart=-/sbin/getty -L 115200 /dev/%I vt100', `ExecStart=-/sbin/agetty -s %I 115200,38400,9600')
 Restart=always
 RestartSec=0
 UtmpIdentifier=%I
@@ -43,8 +40,12 @@ TTYPath=/dev/%I
 TTYReset=yes
 TTYVHangup=yes
 KillMode=process
-IgnoreSIGPIPE=no
 
 # Some login implementations ignore SIGTERM, so we send SIGHUP
 # instead, to ensure that login terminates cleanly.
 KillSignal=SIGHUP
+
+m4_ifdef(`TARGET_SLP',
+[Install]
+Alias=getty.target.wants/serial-getty@s3c2410_serial2.service
+)m4_dnl

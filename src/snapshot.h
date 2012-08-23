@@ -34,7 +34,7 @@ typedef enum SnapshotState {
 } SnapshotState;
 
 struct Snapshot {
-        Unit meta;
+        Meta meta;
 
         SnapshotState state, deserialized_state;
 

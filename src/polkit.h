@@ -30,7 +30,6 @@ int verify_polkit(
                 DBusMessage *request,
                 const char *action,
                 bool interactive,
-                bool *challenge,
                 DBusError *error);
 
 #endif

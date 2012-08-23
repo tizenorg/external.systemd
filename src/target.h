@@ -34,7 +34,7 @@ typedef enum TargetState {
 } TargetState;
 
 struct Target {
-        Unit meta;
+        Meta meta;
 
         TargetState state, deserialized_state;
 };

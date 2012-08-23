@@ -155,11 +155,11 @@ static int write_entry_wtmp(const struct utmpx *store) {
         return -errno;
 }
 
-static int write_utmp_wtmp(const struct utmpx *store_utmp, const struct utmpx *store_wtmp) {
+static int write_entry_both(const struct utmpx *store) {
         int r, s;
 
-        r = write_entry_utmp(store_utmp);
-        s = write_entry_wtmp(store_wtmp);
+        r = write_entry_utmp(store);
+        s = write_entry_wtmp(store);
 
         if (r >= 0)
                 r = s;
@@ -172,14 +172,10 @@ static int write_utmp_wtmp(const struct utmpx *store_utmp, const struct utmpx *s
         return r;
 }
 
-static int write_entry_both(const struct utmpx *store) {
-        return write_utmp_wtmp(store, store);
-}
-
-int utmp_put_shutdown(void) {
+int utmp_put_shutdown(usec_t t) {
         struct utmpx store;
 
-        init_entry(&store, 0);
+        init_entry(&store, t);
 
         store.ut_type = RUN_LVL;
         strncpy(store.ut_user, "shutdown", sizeof(store.ut_user));
@@ -210,12 +206,12 @@ static const char *sanitize_id(const char *id) {
         return id + l - sizeof(((struct utmpx*) NULL)->ut_id);
 }
 
-int utmp_put_init_process(const char *id, pid_t pid, pid_t sid, const char *line) {
+int utmp_put_init_process(usec_t t, const char *id, pid_t pid, pid_t sid, const char *line) {
         struct utmpx store;
 
         assert(id);
 
-        init_timestamp(&store, 0);
+        init_timestamp(&store, t);
 
         store.ut_type = INIT_PROCESS;
         store.ut_pid = pid;
@@ -230,7 +226,7 @@ int utmp_put_init_process(const char *id, pid_t pid, pid_t sid, const char *line
 }
 
 int utmp_put_dead_process(const char *id, pid_t pid, int code, int status) {
-        struct utmpx lookup, store, store_wtmp, *found;
+        struct utmpx lookup, store, *found;
 
         assert(id);
 
@@ -246,7 +242,9 @@ int utmp_put_dead_process(const char *id, pid_t pid, int code, int status) {
         if (found->ut_pid != pid)
                 return 0;
 
-        memcpy(&store, found, sizeof(store));
+        zero(store);
+
+        memcpy(&store, &lookup, sizeof(store));
         store.ut_type = DEAD_PROCESS;
         store.ut_exit.e_termination = code;
         store.ut_exit.e_exit = status;
@@ -255,15 +253,11 @@ int utmp_put_dead_process(const char *id, pid_t pid, int code, int status) {
         zero(store.ut_host);
         zero(store.ut_tv);
 
-        memcpy(&store_wtmp, &store, sizeof(store_wtmp));
-        /* wtmp wants the current time */
-        init_timestamp(&store_wtmp, 0);
-
-        return write_utmp_wtmp(&store, &store_wtmp);
+        return write_entry_both(&store);
 }
 
 
-int utmp_put_runlevel(int runlevel, int previous) {
+int utmp_put_runlevel(usec_t t, int runlevel, int previous) {
         struct utmpx store;
         int r;
 
@@ -283,7 +277,7 @@ int utmp_put_runlevel(int runlevel, int previous) {
         if (previous == runlevel)
                 return 0;
 
-        init_entry(&store, 0);
+        init_entry(&store, t);
 
         store.ut_type = RUN_LVL;
         store.ut_pid = (runlevel & 0xFF) | ((previous & 0xFF) << 8);

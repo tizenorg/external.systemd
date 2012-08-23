@@ -10,3 +10,6 @@
 [Unit]
 Description=Remote File Systems (Pre)
 After=network.target
+
+[Install]
+WantedBy=multi-user.target

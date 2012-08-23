@@ -82,7 +82,6 @@ int verify_polkit(
                 DBusMessage *request,
                 const char *action,
                 bool interactive,
-                bool *_challenge,
                 DBusError *error) {
 
         DBusMessage *m = NULL, *reply = NULL;
@@ -95,7 +94,7 @@ int verify_polkit(
         uint64_t starttime_u64;
         DBusMessageIter iter_msg, iter_struct, iter_array, iter_dict, iter_variant;
         int r;
-        dbus_bool_t authorized = FALSE, challenge = FALSE;
+        dbus_bool_t authorized = FALSE;
 
         assert(c);
         assert(request);
@@ -177,21 +176,7 @@ int verify_polkit(
 
         dbus_message_iter_get_basic(&iter_struct, &authorized);
 
-        if (!dbus_message_iter_next(&iter_struct) ||
-            dbus_message_iter_get_arg_type(&iter_struct) != DBUS_TYPE_BOOLEAN) {
-                r = -EIO;
-                goto finish;
-        }
-
-        dbus_message_iter_get_basic(&iter_struct, &challenge);
-
-        if (authorized)
-                r = 1;
-        else if (_challenge) {
-                *_challenge = !!challenge;
-                r = 0;
-        } else
-                r = -EPERM;
+        r = authorized ? 0 : -EPERM;
 
 finish:
 

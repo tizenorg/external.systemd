@@ -1,4 +1,4 @@
-systemd System and Service Manager
+systemd System and Session Manager
 
 DETAILS:
         http://0pointer.de/blog/projects/systemd.html
@@ -7,11 +7,11 @@ WEB SITE:
         http://www.freedesktop.org/wiki/Software/systemd
 
 GIT:
-        git://anongit.freedesktop.org/systemd/systemd
-        ssh://git.freedesktop.org/git/systemd/systemd
+        git://anongit.freedesktop.org/systemd
+        ssh://git.freedesktop.org/git/systemd
 
 GITWEB:
-        http://cgit.freedesktop.org/systemd/systemd
+        http://cgit.freedesktop.org/systemd/
 
 MAILING LIST:
         http://lists.freedesktop.org/mailman/listinfo/systemd-devel
@@ -27,14 +27,10 @@ AUTHOR:
         Lennart Poettering with major support from Kay Sievers
 
 LICENSE:
-        GPLv2+ for all code, except sd-daemon.[ch] and
-        sd-readahead.[ch] which are MIT
+        GPLv2+ for all code, except sd-daemon.[ch] which is MIT
 
 REQUIREMENTS:
-        Linux kernel >= 2.6.39
-                with devtmpfs
-                with cgroups (but it's OK to disable all controllers)
-                optional but strongly recommended: autofs4, ipv6
+        Linux kernel >= 2.6.39 (with devtmpfs, cgroups; optional but strongly recommended: autofs4, ipv6)
         libudev >= 172
         dbus >= 1.4.0
         libcap

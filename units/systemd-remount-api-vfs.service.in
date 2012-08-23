@@ -17,3 +17,4 @@ Wants=local-fs-pre.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=@rootlibexecdir@/systemd-remount-api-vfs
+StandardOutput=syslog

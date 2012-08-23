@@ -1,0 +1,5 @@
+[Unit]
+Description=/var/log Automount Point
+
+[Automount]
+Where=/var/log

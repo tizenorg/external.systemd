@@ -30,12 +30,11 @@
 bool ratelimit_test(RateLimit *r) {
         usec_t ts;
 
-        assert(r);
-
-        if (r->interval <= 0 || r->burst <= 0)
-                return true;
-
         ts = now(CLOCK_MONOTONIC);
+
+        assert(r);
+        assert(r->interval > 0);
+        assert(r->burst > 0);
 
         if (r->begin <= 0 ||
             r->begin + r->interval < ts) {

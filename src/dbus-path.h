@@ -30,6 +30,4 @@ DBusHandlerResult bus_path_message_handler(Unit *u, DBusConnection *c, DBusMessa
 
 extern const char bus_path_interface[];
 
-extern const char bus_path_invalidating_properties[];
-
 #endif

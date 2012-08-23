@@ -15,4 +15,3 @@ Before=sockets.target
 [Socket]
 ListenDatagram=/run/systemd/shutdownd
 SocketMode=0600
-PassCredentials=yes

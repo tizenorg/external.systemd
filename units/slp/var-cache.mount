@@ -1,0 +1,9 @@
+[Unit]
+Description=/var/cache Mount Point
+Before=local-fs.target
+
+[Mount]
+What=/opt/var/cache
+Where=/var/cache
+Type=bind
+Options=bind

@@ -1,0 +1,5 @@
+[Unit]
+Description=/var/lib Automount Point
+
+[Automount]
+Where=/var/lib

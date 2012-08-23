@@ -1,0 +1,9 @@
+[Unit]
+Description=/var/log Mount Point
+Before=local-fs.target
+
+[Mount]
+What=/opt/var/log
+Where=/var/log
+Type=bind
+Options=bind

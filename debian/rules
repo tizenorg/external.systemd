@@ -1,0 +1,65 @@
+#! /usr/bin/make -f
+
+DISTRIBUTION := SLP
+
+#export DH_VERBOSE=1
+#export DEB_BUILD_OPTIONS="nostrip"
+
+ifeq ($(DISTRIBUTION),SLP)
+DH_OPTIONS += -Nlibpam-systemd -Nsystemd-gui
+export DH_OPTIONS
+endif
+
+override_dh_auto_configure:
+ifeq ($(DISTRIBUTION),SLP)
+	dh_auto_configure -- \
+		--with-rootdir= \
+		--with-rootlibdir=/lib \
+		--with-udevrulesdir=/lib/udev/rules.d \
+		--disable-gtk \
+		--disable-libcryptsetup \
+		--disable-audit \
+		--disable-pam \
+		--disable-tcpwrap \
+		--disable-selinux \
+		--with-distro=slp
+else
+	dh_auto_configure -- \
+		--with-rootdir= \
+		--with-rootlibdir=/lib \
+		--with-udevrulesdir=/lib/udev/rules.d \
+		--enable-gtk \
+		--enable-libcryptsetup \
+		--enable-tcpwrap \
+		--enable-selinux
+endif
+
+override_dh_auto_clean:
+	dh_auto_clean
+	rm -f man/*.[1358]
+	rm -f src/systemadm.c
+	rm -f src/gnome-ask-password-agent.c
+	rm -f src/systemd-interfaces.c
+
+override_dh_install:
+ifneq ($(DISTRIBUTION),SLP)
+	rm debian/tmp/lib/security/pam_systemd.la
+endif
+	rm debian/tmp/usr/lib/*.la
+	rm debian/tmp/lib/systemd/system/sysinit.target.wants/systemd-vconsole-setup.service
+	chmod +x debian/debian-fixup
+	dh_install -O--parallel --fail-missing
+ifneq ($(DISTRIBUTION),SLP)
+	dh_install -plibpam-systemd debian/pam-configs /usr/share
+endif
+	dh_install debian/ifup@.service /lib/systemd/system
+
+autoreconf:
+	intltoolize -f
+	autoreconf -f -i
+
+override_dh_autoreconf:
+	dh_autoreconf debian/rules -- autoreconf
+
+%:
+	dh $@ --parallel --with autoreconf

@@ -36,7 +36,7 @@ typedef enum DeviceState {
 } DeviceState;
 
 struct Device {
-        Unit meta;
+        Meta meta;
 
         char *sysfs;
 

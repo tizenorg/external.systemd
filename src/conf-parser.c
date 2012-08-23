@@ -454,7 +454,7 @@ int config_parse_unsigned(
         return 0;
 }
 
-int config_parse_bytes_size(
+int config_parse_size(
                 const char *filename,
                 unsigned line,
                 const char *section,
@@ -465,47 +465,20 @@ int config_parse_bytes_size(
                 void *userdata) {
 
         size_t *sz = data;
-        off_t o;
+        unsigned u;
+        int r;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
         assert(data);
 
-        if (parse_bytes(rvalue, &o) < 0 || (off_t) (size_t) o != o) {
-                log_error("[%s:%u] Failed to parse byte value, ignoring: %s", filename, line, rvalue);
+        if ((r = safe_atou(rvalue, &u)) < 0) {
+                log_error("[%s:%u] Failed to parse numeric value, ignoring: %s", filename, line, rvalue);
                 return 0;
         }
 
-        *sz = (size_t) o;
-        return 0;
-}
-
-
-int config_parse_bytes_off(
-                const char *filename,
-                unsigned line,
-                const char *section,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        off_t *bytes = data;
-
-        assert(filename);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        assert_cc(sizeof(off_t) == sizeof(uint64_t));
-
-        if (parse_bytes(rvalue, bytes) < 0) {
-                log_error("[%s:%u] Failed to parse bytes value, ignoring: %s", filename, line, rvalue);
-                return 0;
-        }
-
+        *sz = (size_t) u;
         return 0;
 }
 
@@ -528,36 +501,6 @@ int config_parse_bool(
         assert(data);
 
         if ((k = parse_boolean(rvalue)) < 0) {
-                log_error("[%s:%u] Failed to parse boolean value, ignoring: %s", filename, line, rvalue);
-                return 0;
-        }
-
-        *b = !!k;
-        return 0;
-}
-
-int config_parse_tristate(
-                const char *filename,
-                unsigned line,
-                const char *section,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
-
-        int k;
-        int *b = data;
-
-        assert(filename);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
-
-        /* Tristates are like booleans, but can also take the 'default' value, i.e. "-1" */
-
-        k = parse_boolean(rvalue);
-        if (k < 0) {
                 log_error("[%s:%u] Failed to parse boolean value, ignoring: %s", filename, line, rvalue);
                 return 0;
         }

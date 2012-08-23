@@ -96,21 +96,13 @@ typedef int (*BusPropertyCallback)(DBusMessageIter *iter, const char *property, 
 typedef int (*BusPropertySetCallback)(DBusMessageIter *iter, const char *property);
 
 typedef struct BusProperty {
+        const char *interface;           /* interface of the property */
         const char *property;            /* name of the property */
         BusPropertyCallback append;      /* Function that is called to serialize this property */
         const char *signature;
-        const uint16_t offset;           /* Offset from BusBoundProperties::base address to the property data.
-                                          * uint16_t is sufficient, because we have no structs too big.
-                                          * -Werror=overflow will catch it if this does not hold. */
-        bool indirect;                   /* data is indirect, ie. not base+offset, but *(base+offset) */
+        const void *data;                /* The data of this property */
         BusPropertySetCallback set;      /* Optional: Function that is called to set this property */
 } BusProperty;
-
-typedef struct BusBoundProperties {
-        const char *interface;           /* interface of the properties */
-        const BusProperty *properties;   /* array of properties, ended by a NULL-filled element */
-        const void *const base;          /* base pointer to which the offset must be added to reach data */
-} BusBoundProperties;
 
 DBusHandlerResult bus_send_error_reply(
                 DBusConnection *c,
@@ -123,12 +115,11 @@ DBusHandlerResult bus_default_message_handler(
                 DBusMessage *message,
                 const char *introspection,
                 const char *interfaces,
-                const BusBoundProperties *bound_properties);
+                const BusProperty *properties);
 
 int bus_property_append_string(DBusMessageIter *i, const char *property, void *data);
 int bus_property_append_strv(DBusMessageIter *i, const char *property, void *data);
 int bus_property_append_bool(DBusMessageIter *i, const char *property, void *data);
-int bus_property_append_tristate_false(DBusMessageIter *i, const char *property, void *data);
 int bus_property_append_int32(DBusMessageIter *i, const char *property, void *data);
 int bus_property_append_uint32(DBusMessageIter *i, const char *property, void *data);
 int bus_property_append_uint64(DBusMessageIter *i, const char *property, void *data);

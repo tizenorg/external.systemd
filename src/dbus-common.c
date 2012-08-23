@@ -177,11 +177,11 @@ int bus_connect_system_ssh(const char *user, const char *host, DBusConnection **
         assert(user || host);
 
         if (user && host)
-                asprintf(&p, "unixexec:path=ssh,argv1=-xT,argv2=%s@%s,argv3=systemd-stdio-bridge", user, host);
+                asprintf(&p, "exec:path=ssh,argv1=-xT,argv2=%s@%s,argv3=systemd-stdio-bridge", user, host);
         else if (user)
-                asprintf(&p, "unixexec:path=ssh,argv1=-xT,argv2=%s@localhost,argv3=systemd-stdio-bridge", user);
+                asprintf(&p, "exec:path=ssh,argv1=-xT,argv2=%s@localhost,argv3=systemd-stdio-bridge", user);
         else if (host)
-                asprintf(&p, "unixexec:path=ssh,argv1=-xT,argv2=%s,argv3=systemd-stdio-bridge", host);
+                asprintf(&p, "exec:path=ssh,argv1=-xT,argv2=%s,argv3=systemd-stdio-bridge", host);
 
         if (!p) {
                 dbus_set_error_const(error, DBUS_ERROR_NO_MEMORY, NULL);
@@ -222,8 +222,7 @@ int bus_connect_system_polkit(DBusConnection **_bus, DBusError *error) {
         if (geteuid() == 0)
                 return bus_connect(DBUS_BUS_SYSTEM, _bus, NULL, error);
 
-        bus = dbus_connection_open_private("unixexec:path=pkexec,argv1=" SYSTEMD_STDIO_BRIDGE_BINARY_PATH, error);
-        if (!bus)
+        if (!(bus = dbus_connection_open_private("exec:path=pkexec,argv1=" SYSTEMD_STDIO_BRIDGE_BINARY_PATH, error)))
                 return -EIO;
 
         dbus_connection_set_exit_on_disconnect(bus, FALSE);
@@ -260,7 +259,7 @@ DBusHandlerResult bus_default_message_handler(
                 DBusMessage *message,
                 const char *introspection,
                 const char *interfaces,
-                const BusBoundProperties *bound_properties) {
+                const BusProperty *properties) {
 
         DBusError error;
         DBusMessage *reply = NULL;
@@ -279,12 +278,9 @@ DBusHandlerResult bus_default_message_handler(
                 if (!dbus_message_append_args(reply, DBUS_TYPE_STRING, &introspection, DBUS_TYPE_INVALID))
                         goto oom;
 
-        } else if (dbus_message_is_method_call(message, "org.freedesktop.DBus.Properties", "Get") && bound_properties) {
+        } else if (dbus_message_is_method_call(message, "org.freedesktop.DBus.Properties", "Get") && properties) {
                 const char *interface, *property;
-                const BusBoundProperties *bp;
                 const BusProperty *p;
-                void *data;
-                DBusMessageIter iter, sub;
 
                 if (!dbus_message_get_args(
                             message,
@@ -294,51 +290,43 @@ DBusHandlerResult bus_default_message_handler(
                             DBUS_TYPE_INVALID))
                         return bus_send_error_reply(c, message, &error, -EINVAL);
 
-                for (bp = bound_properties; bp->interface; bp++) {
-                        if (!streq(bp->interface, interface))
-                                continue;
+                for (p = properties; p->property; p++)
+                        if (streq(p->interface, interface) && streq(p->property, property))
+                                break;
 
-                        for (p = bp->properties; p->property; p++)
-                                if (streq(p->property, property))
-                                        goto get_prop;
-                }
+                if (p->property) {
+                        DBusMessageIter iter, sub;
 
-                /* no match */
-                if (!nulstr_contains(interfaces, interface))
-                        dbus_set_error_const(&error, DBUS_ERROR_UNKNOWN_INTERFACE, "Unknown interface");
-                else
-                        dbus_set_error_const(&error, DBUS_ERROR_UNKNOWN_PROPERTY, "Unknown property");
-
-                return bus_send_error_reply(c, message, &error, -EINVAL);
-
-get_prop:
-                reply = dbus_message_new_method_return(message);
-                if (!reply)
-                        goto oom;
-
-                dbus_message_iter_init_append(reply, &iter);
-
-                if (!dbus_message_iter_open_container(&iter, DBUS_TYPE_VARIANT, p->signature, &sub))
-                        goto oom;
-
-                data = (char*)bp->base + p->offset;
-                if (p->indirect)
-                        data = *(void**)data;
-                r = p->append(&sub, property, data);
-                if (r < 0) {
-                        if (r == -ENOMEM)
+                        if (!(reply = dbus_message_new_method_return(message)))
                                 goto oom;
 
-                        dbus_message_unref(reply);
-                        return bus_send_error_reply(c, message, NULL, r);
+                        dbus_message_iter_init_append(reply, &iter);
+
+                        if (!dbus_message_iter_open_container(&iter, DBUS_TYPE_VARIANT, p->signature, &sub))
+                                goto oom;
+
+                        if ((r = p->append(&sub, property, (void*) p->data)) < 0) {
+
+                                if (r == -ENOMEM)
+                                        goto oom;
+
+                                dbus_message_unref(reply);
+                                return bus_send_error_reply(c, message, NULL, r);
+                        }
+
+                        if (!dbus_message_iter_close_container(&iter, &sub))
+                                goto oom;
+                } else {
+                        if (!nulstr_contains(interfaces, interface))
+                                dbus_set_error_const(&error, DBUS_ERROR_UNKNOWN_INTERFACE, "Unknown interface");
+                        else
+                                dbus_set_error_const(&error, DBUS_ERROR_UNKNOWN_PROPERTY, "Unknown property");
+
+                        return bus_send_error_reply(c, message, &error, -EINVAL);
                 }
 
-                if (!dbus_message_iter_close_container(&iter, &sub))
-                        goto oom;
-
-        } else if (dbus_message_is_method_call(message, "org.freedesktop.DBus.Properties", "GetAll") && bound_properties) {
+        } else if (dbus_message_is_method_call(message, "org.freedesktop.DBus.Properties", "GetAll") && properties) {
                 const char *interface;
-                const BusBoundProperties *bp;
                 const BusProperty *p;
                 DBusMessageIter iter, sub, sub2, sub3;
 
@@ -362,46 +350,36 @@ get_prop:
                 if (!dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &sub))
                         goto oom;
 
-                for (bp = bound_properties; bp->interface; bp++) {
-                        if (interface[0] && !streq(bp->interface, interface))
+                for (p = properties; p->property; p++) {
+                        if (interface[0] && !streq(p->interface, interface))
                                 continue;
 
-                        for (p = bp->properties; p->property; p++) {
-                                void *data;
+                        if (!dbus_message_iter_open_container(&sub, DBUS_TYPE_DICT_ENTRY, NULL, &sub2) ||
+                            !dbus_message_iter_append_basic(&sub2, DBUS_TYPE_STRING, &p->property) ||
+                            !dbus_message_iter_open_container(&sub2, DBUS_TYPE_VARIANT, p->signature, &sub3))
+                                goto oom;
 
-                                if (!dbus_message_iter_open_container(&sub, DBUS_TYPE_DICT_ENTRY, NULL, &sub2) ||
-                                    !dbus_message_iter_append_basic(&sub2, DBUS_TYPE_STRING, &p->property) ||
-                                    !dbus_message_iter_open_container(&sub2, DBUS_TYPE_VARIANT, p->signature, &sub3))
+                        if ((r = p->append(&sub3, p->property, (void*) p->data)) < 0) {
+
+                                if (r == -ENOMEM)
                                         goto oom;
 
-                                data = (char*)bp->base + p->offset;
-                                if (p->indirect)
-                                        data = *(void**)data;
-                                r = p->append(&sub3, p->property, data);
-                                if (r < 0) {
-                                        if (r == -ENOMEM)
-                                                goto oom;
-
-                                        dbus_message_unref(reply);
-                                        return bus_send_error_reply(c, message, NULL, r);
-                                }
-
-                                if (!dbus_message_iter_close_container(&sub2, &sub3) ||
-                                    !dbus_message_iter_close_container(&sub, &sub2))
-                                        goto oom;
+                                dbus_message_unref(reply);
+                                return bus_send_error_reply(c, message, NULL, r);
                         }
+
+                        if (!dbus_message_iter_close_container(&sub2, &sub3) ||
+                            !dbus_message_iter_close_container(&sub, &sub2))
+                                goto oom;
                 }
 
                 if (!dbus_message_iter_close_container(&iter, &sub))
                         goto oom;
 
-        } else if (dbus_message_is_method_call(message, "org.freedesktop.DBus.Properties", "Set") && bound_properties) {
+        } else if (dbus_message_is_method_call(message, "org.freedesktop.DBus.Properties", "Set") && properties) {
                 const char *interface, *property;
                 DBusMessageIter iter;
-                const BusBoundProperties *bp;
                 const BusProperty *p;
-                DBusMessageIter sub;
-                char *sig;
 
                 if (!dbus_message_iter_init(message, &iter) ||
                     dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_STRING)
@@ -420,52 +398,45 @@ get_prop:
                     dbus_message_iter_has_next(&iter))
                         return bus_send_error_reply(c, message, NULL, -EINVAL);
 
-                for (bp = bound_properties; bp->interface; bp++) {
-                        if (!streq(bp->interface, interface))
-                                continue;
+                for (p = properties; p->property; p++)
+                        if (streq(p->interface, interface) && streq(p->property, property))
+                                break;
 
-                        for (p = bp->properties; p->property; p++)
-                                if (streq(p->property, property))
-                                        goto set_prop;
-                }
+                if (p->set) {
+                        DBusMessageIter sub;
+                        char *sig;
 
-                /* no match */
-                if (!nulstr_contains(interfaces, interface))
-                        dbus_set_error_const(&error, DBUS_ERROR_UNKNOWN_INTERFACE, "Unknown interface");
-                else
-                        dbus_set_error_const(&error, DBUS_ERROR_UNKNOWN_PROPERTY, "Unknown property");
+                        dbus_message_iter_recurse(&iter, &sub);
 
-                return bus_send_error_reply(c, message, &error, -EINVAL);
+                        if (!(sig = dbus_message_iter_get_signature(&sub)))
+                                goto oom;
 
-set_prop:
-                if (!p->set) {
-                        dbus_set_error_const(&error, DBUS_ERROR_PROPERTY_READ_ONLY, "Property read-only");
+                        if (!streq(sig, p->signature)) {
+                                dbus_free(sig);
+                                return bus_send_error_reply(c, message, NULL, -EINVAL);
+                        }
+
+                        dbus_free(sig);
+
+                        if ((r = p->set(&sub, property)) < 0) {
+                                if (r == -ENOMEM)
+                                        goto oom;
+                                return bus_send_error_reply(c, message, NULL, r);
+                        }
+
+                        if (!(reply = dbus_message_new_method_return(message)))
+                                goto oom;
+                } else {
+                        if (p->property)
+                                dbus_set_error_const(&error, DBUS_ERROR_PROPERTY_READ_ONLY, "Property read-only");
+                        else if (!nulstr_contains(interfaces, interface))
+                                dbus_set_error_const(&error, DBUS_ERROR_UNKNOWN_INTERFACE, "Unknown interface");
+                        else
+                                dbus_set_error_const(&error, DBUS_ERROR_UNKNOWN_PROPERTY, "Unknown property");
+
                         return bus_send_error_reply(c, message, &error, -EINVAL);
                 }
 
-                dbus_message_iter_recurse(&iter, &sub);
-
-                sig = dbus_message_iter_get_signature(&sub);
-                if (!sig)
-                        goto oom;
-
-                if (!streq(sig, p->signature)) {
-                        dbus_free(sig);
-                        return bus_send_error_reply(c, message, NULL, -EINVAL);
-                }
-
-                dbus_free(sig);
-
-                r = p->set(&sub, property);
-                if (r < 0) {
-                        if (r == -ENOMEM)
-                                goto oom;
-                        return bus_send_error_reply(c, message, NULL, r);
-                }
-
-                reply = dbus_message_new_method_return(message);
-                if (!reply)
-                        goto oom;
         } else {
                 const char *interface = dbus_message_get_interface(message);
 
@@ -527,22 +498,6 @@ int bus_property_append_bool(DBusMessageIter *i, const char *property, void *dat
         assert(b);
 
         db = *b;
-
-        if (!dbus_message_iter_append_basic(i, DBUS_TYPE_BOOLEAN, &db))
-                return -ENOMEM;
-
-        return 0;
-}
-
-int bus_property_append_tristate_false(DBusMessageIter *i, const char *property, void *data) {
-        int *b = data;
-        dbus_bool_t db;
-
-        assert(i);
-        assert(property);
-        assert(b);
-
-        db = *b > 0;
 
         if (!dbus_message_iter_append_basic(i, DBUS_TYPE_BOOLEAN, &db))
                 return -ENOMEM;

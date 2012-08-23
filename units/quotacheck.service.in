@@ -16,4 +16,5 @@ ConditionPathExists=/sbin/quotacheck
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=@rootlibexecdir@/systemd-quotacheck
+StandardOutput=syslog
 TimeoutSec=0

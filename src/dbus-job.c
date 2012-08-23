@@ -71,7 +71,7 @@ static int bus_job_append_unit(DBusMessageIter *i, const char *property, void *d
         if (!(p = unit_dbus_path(j->unit)))
                 return -ENOMEM;
 
-        if (!dbus_message_iter_append_basic(&sub, DBUS_TYPE_STRING, &j->unit->id) ||
+        if (!dbus_message_iter_append_basic(&sub, DBUS_TYPE_STRING, &j->unit->meta.id) ||
             !dbus_message_iter_append_basic(&sub, DBUS_TYPE_OBJECT_PATH, &p)) {
                 free(p);
                 return -ENOMEM;
@@ -85,15 +85,15 @@ static int bus_job_append_unit(DBusMessageIter *i, const char *property, void *d
         return 0;
 }
 
-static const BusProperty bus_job_properties[] = {
-        { "Id",      bus_property_append_uint32, "u", offsetof(Job, id)    },
-        { "State",   bus_job_append_state,       "s", offsetof(Job, state) },
-        { "JobType", bus_job_append_type,        "s", offsetof(Job, type)  },
-        { "Unit",    bus_job_append_unit,     "(so)", 0 },
-        { NULL, }
-};
-
 static DBusHandlerResult bus_job_message_dispatch(Job *j, DBusConnection *connection, DBusMessage *message) {
+        const BusProperty properties[] = {
+                { "org.freedesktop.systemd1.Job", "Id",      bus_property_append_uint32, "u",    &j->id    },
+                { "org.freedesktop.systemd1.Job", "State",   bus_job_append_state,       "s",    &j->state },
+                { "org.freedesktop.systemd1.Job", "JobType", bus_job_append_type,        "s",    &j->type  },
+                { "org.freedesktop.systemd1.Job", "Unit",    bus_job_append_unit,        "(so)", j         },
+                { NULL, NULL, NULL, NULL, NULL }
+        };
+
         DBusMessage *reply = NULL;
 
         if (dbus_message_is_method_call(message, "org.freedesktop.systemd1.Job", "Cancel")) {
@@ -102,13 +102,8 @@ static DBusHandlerResult bus_job_message_dispatch(Job *j, DBusConnection *connec
 
                 job_finish_and_invalidate(j, JOB_CANCELED);
 
-        } else {
-                const BusBoundProperties bps[] = {
-                        { "org.freedesktop.systemd1.Job", bus_job_properties, j },
-                        { NULL, }
-                };
-                return bus_default_message_handler(connection, message, INTROSPECTION, INTERFACES_LIST, bps);
-        }
+        } else
+                return bus_default_message_handler(connection, message, INTROSPECTION, INTERFACES_LIST, properties);
 
         if (reply) {
                 if (!dbus_connection_send(connection, reply, NULL))
