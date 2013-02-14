@@ -1,0 +1,27 @@
+From 888c7102355af1450aa26253d60cc2cb46eeb71d Mon Sep 17 00:00:00 2001
+From: Lennart Poettering <lennart@poettering.net>
+Date: Mon, 16 Apr 2012 18:54:45 +0200
+Subject: [PATCH] util: introduce memdup()
+
+Backported-by: Łukasz Stelmach <l.stelmach@samsung.com>
+Signed-off-by: Łukasz Stelmach <l.stelmach@samsung.com>
+---
+ src/util.h |    2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/shared/util.h b/src/shared/util.h
+index c487b70..efb2c7d 100644
+--- a/src/util.h
++++ b/src/util.h
+@@ -100,6 +100,8 @@ bool streq_ptr(const char *a, const char *b);
+ 
+ #define new0(t, n) ((t*) calloc((n), sizeof(t)))
+ 
++#define newdup(t, p, n) ((t*) memdup(p, sizeof(t)*(n)))
++
+ #define malloc0(n) (calloc((n), 1))
+ 
+ static inline const char* yes_no(bool b) {
+-- 
+1.7.9.5
+
