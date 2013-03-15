@@ -1,3 +1,7 @@
+* Wed Feb 06 2013 Brad Peters <brad.t.peters@intel.com> 
+- Explicitly mounting rootfs as read/write. Without this, it is mounted as RO, 
+  and services fail to load all over the place
+
 * Wed Jul 25 2012 William Douglas <william.douglas@intel.com> 20120702.1314@98c0af0
 [ William Douglas ]
 - Fix the default PATH environment variable.

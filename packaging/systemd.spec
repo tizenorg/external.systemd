@@ -2,7 +2,7 @@
 Name:       systemd
 Summary:    System and Session Manager
 Version:    43
-Release:    1
+Release:    2
 Group:      System/System Control
 License:    GPLv2
 URL:        http://www.freedesktop.org/wiki/Software/systemd
@@ -14,6 +14,12 @@ Patch2:     add-tmp.mount-as-tmpfs.patch
 Patch3:     tizen-login-location.patch
 Patch4:     tizen-service-file-workaround.patch
 Patch5:     journal-make-sure-to-refresh-window-position-and-poi.patch
+Patch6:     tizen-preserve-hostname.patch
+Patch7:     util-never-follow-symlinks-in-rm_rf_children.patch
+Patch8:     util-introduce-memdup.patch
+Patch9:     main-allow-system-wide-limits-for-services.patch
+Patch10:    enable-core-dumps-globally.patch
+Patch11:    SMACK-Add-configuration-options.-v3.patch
 
 BuildRequires:  pkgconfig(dbus-1) >= 1.4.0
 BuildRequires:  pkgconfig(dbus-glib-1)
@@ -55,7 +61,7 @@ control logic. It can work as a drop-in replacement for sysvinit.
 %package devel
 Summary:    Development tools for systemd
 Group:      Development/Libraries
-Requires:   %{name} = %{version}-%{release}
+Requires:   %{name} = %{?epoch:%{epoch}:}%{version}-%{release}
 Requires(post): %{_sbindir}/ldconfig
 Requires(postun): %{_sbindir}/ldconfig
 
@@ -118,7 +124,7 @@ This package will setup a serial getty for ttySAC2 is desired.
 %package docs
 Summary:   System and session manager man pages
 Group:     Development/Libraries
-Requires:  %{name} = %{version}-%{release}
+Requires:  %{name} = %{?epoch:%{epoch}:}%{version}-%{release}
 
 %description docs
 This package includes the man pages for systemd.
@@ -161,15 +167,23 @@ This package includes the man pages for systemd.
 %patch3 -p1
 %patch4 -p1
 %patch5 -p1
+%patch6 -p1
+%patch7 -p1
+%patch8 -p1
+%patch9 -p1
+%patch10 -p1
+%patch11 -p1
 
 %build
 cp %{SOURCE1001} .
+%autogen
 %configure --disable-static \
     --with-rootdir="" \
     --with-distro=meego \
     --disable-gtk \
     --disable-selinux \
     --disable-tcpwrap \
+    --disable-coredump \
     --enable-split-usr \
     --disable-manpages \
     --with-pamlibdir="/%{_libdir}/security" \
@@ -231,10 +245,8 @@ ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/getty.targe
 ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyO2.service
 
 %post
-if [ "`readlink /etc/mtab`" != "/proc/self/mounts" ]; then
-	rm -f /etc/mtab
-	ln -s /proc/self/mounts /etc/mtab
-fi
+rm -f /etc/mtab
+ln -sf /proc/self/mounts /etc/mtab
 
 /usr/bin/systemd-machine-id-setup >/dev/null 2>&1 || :
 
@@ -253,7 +265,6 @@ fi
 # systemd-analyze is excluded for removing dependency with python-base
 %exclude %{_bindir}/systemd-analyze
 /run
-%config %{_libdir}/sysctl.d/coredump.conf
 %config %{_sysconfdir}/dbus-1/system.d/org.freedesktop.systemd1.conf
 %config %{_sysconfdir}/dbus-1/system.d/org.freedesktop.hostname1.conf
 %config %{_sysconfdir}/dbus-1/system.d/org.freedesktop.locale1.conf

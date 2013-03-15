@@ -1,4 +1,0 @@
---- test1/default.target
-+++ /dev/null
-@@ -1 +0,0 @@
--multiuser.target

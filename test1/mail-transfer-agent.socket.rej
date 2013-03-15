@@ -1,4 +1,0 @@
---- test1/mail-transfer-agent.socket
-+++ /dev/null
-@@ -1 +0,0 @@
--postfix.socket

@@ -1,4 +1,0 @@
---- man/Makefile
-+++ /dev/null
-@@ -1 +0,0 @@
--../src/Makefile

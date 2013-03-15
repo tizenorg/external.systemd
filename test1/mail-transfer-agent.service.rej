@@ -1,4 +1,0 @@
---- test1/mail-transfer-agent.service
-+++ /dev/null
-@@ -1 +0,0 @@
--postfix.service
