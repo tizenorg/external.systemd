@@ -20,6 +20,7 @@ Patch8:     util-introduce-memdup.patch
 Patch9:     main-allow-system-wide-limits-for-services.patch
 Patch10:    enable-core-dumps-globally.patch
 Patch11:    SMACK-Add-configuration-options.-v3.patch
+Patch12:    reboot_syscall_param.patch
 
 BuildRequires:  pkgconfig(dbus-1) >= 1.4.0
 BuildRequires:  pkgconfig(dbus-glib-1)
@@ -173,6 +174,7 @@ This package includes the man pages for systemd.
 %patch9 -p1
 %patch10 -p1
 %patch11 -p1
+%patch12 -p1
 
 %build
 cp %{SOURCE1001} .
