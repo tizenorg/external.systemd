@@ -1,0 +1,58 @@
+diff --git a/src/main.c b/src/main.c
+index ed317b4..6b56a86 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -76,6 +76,7 @@ static bool arg_sysv_console = true;
+ static bool arg_mount_auto = true;
+ static bool arg_swap_auto = true;
+ static char **arg_default_controllers = NULL;
++static char *arg_default_oom_score_adj = NULL;
+ static char ***arg_join_controllers = NULL;
+ static ExecOutput arg_default_std_output = EXEC_OUTPUT_JOURNAL;
+ static ExecOutput arg_default_std_error = EXEC_OUTPUT_INHERIT;
+@@ -656,6 +657,7 @@ static int parse_config_file(void) {
+                 { "Manager", "MountAuto",             config_parse_bool,         0, &arg_mount_auto          },
+                 { "Manager", "SwapAuto",              config_parse_bool,         0, &arg_swap_auto           },
+                 { "Manager", "DefaultControllers",    config_parse_strv,         0, &arg_default_controllers },
++                { "Manager", "DefaultOOMScoreAdj",    config_parse_string,       0, &arg_default_oom_score_adj },
+                 { "Manager", "DefaultStandardOutput", config_parse_output,       0, &arg_default_std_output  },
+                 { "Manager", "DefaultStandardError",  config_parse_output,       0, &arg_default_std_error   },
+                 { "Manager", "JoinControllers",       config_parse_join_controllers, 0, &arg_join_controllers },
+@@ -1260,6 +1262,13 @@ int main(int argc, char *argv[]) {
+ 
+         if (parse_config_file() < 0)
+                 goto finish;
++        
++		if (arg_default_oom_score_adj) {
++			if (write_one_line_file("/proc/self/oom_score_adj", arg_default_oom_score_adj) < 0) {
++				log_error("Failed to set default oom_score_adj: %s", arg_default_oom_score_adj);
++				goto finish;
++			}
++		}
+ 
+         if (arg_running_as == MANAGER_SYSTEM)
+                 if (parse_proc_cmdline() < 0)
+diff --git a/src/system.conf b/src/system.conf
+index 33d09bc..c24a606 100644
+--- a/src/system.conf
++++ b/src/system.conf
+@@ -18,6 +18,7 @@
+ #SysVConsole=yes
+ #CrashChVT=1
+ #CPUAffinity=1 2
++DefaultOOMScoreAdj=-1000
+ #MountAuto=yes
+ #SwapAuto=yes
+ #DefaultControllers=cpu
+diff --git a/src/user.conf b/src/user.conf
+index 9508a02..70c5540 100644
+--- a/src/user.conf
++++ b/src/user.conf
+@@ -8,6 +8,7 @@
+ # See systemd.conf(5) for details
+ 
+ [Manager]
++DefaultOOMScoreAdj=-1000
+ #LogLevel=info
+ #LogTarget=console
+ #LogColor=yes
