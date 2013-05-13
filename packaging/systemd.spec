@@ -9,6 +9,7 @@ URL:        http://www.freedesktop.org/wiki/Software/systemd
 Source0:    http://www.freedesktop.org/software/systemd/%{name}-%{version}.tar.xz
 Source1:    pamconsole-tmp.conf
 Source1001: systemd.manifest
+Source1002: max_user_inotify.conf
 Patch1:     0002-systemd-fsck-disable-l-until-linux.patch
 Patch2:     add-tmp.mount-as-tmpfs.patch
 Patch3:     tizen-login-location.patch
@@ -230,6 +231,10 @@ mkdir -p %{buildroot}/etc/systemd/system/basic.target.wants
 mkdir -p %{buildroot}/etc/systemd/system/getty.target.wants
 mkdir -p %{buildroot}%{_libdir}/systemd/system/getty.target.wants
 
+# Modify inotify max_user_instances
+mkdir -p %{buildroot}/%{_libdir}/sysctl.d
+cp %{SOURCE1002} %{buildroot}%{_libdir}/sysctl.d/
+
 #console-ttyMFD2
 ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyMFD2.service
 
@@ -292,6 +297,7 @@ ln -sf /proc/self/mounts /etc/mtab
 %{_libdir}/libsystemd-id128.so.0.0.2
 %{_libdir}/libsystemd-journal.so.0
 %{_libdir}/libsystemd-journal.so.0.0.2
+%{_libdir}/sysctl.d/*
 %{_datadir}/dbus-1/*/org.freedesktop.systemd1.*
 %{_defaultdocdir}/systemd
 %{_datadir}/polkit-1/actions/org.freedesktop.systemd1.policy
