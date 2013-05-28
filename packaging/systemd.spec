@@ -24,6 +24,7 @@ Patch11:    SMACK-Add-configuration-options.-v3.patch
 Patch12:    reboot_syscall_param.patch
 Patch13:    default_oom_score.patch
 Patch14:    fix-syscall-NR_fanotify_mark-on-arm.patch
+Patch15:    reboot-delay.patch
 
 BuildRequires:  pkgconfig(dbus-1) >= 1.4.0
 BuildRequires:  pkgconfig(dbus-glib-1)
@@ -180,6 +181,7 @@ This package includes the man pages for systemd.
 %patch12 -p1
 %patch13 -p1
 %patch14 -p1
+%patch15 -p1
 
 %build
 cp %{SOURCE1001} .
