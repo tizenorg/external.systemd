@@ -48,18 +48,6 @@ of the system state, maintains mount and automount points and
 implements an elaborate transactional dependency-based service
 control logic. It can work as a drop-in replacement for sysvinit.
 
-# tools package dislabled because of pycairo package dependency
-# %package tools
-# Summary:    Analyze systemd startup timing
-# Group:      Development/Tools
-# Requires:   pycairo
-# Requires:   python-xml
-# Requires:   %{name} = %{version}-%{release}
-
-# %description tools
-# This package installs the systemd-analyze tool, which allows one to
-# inspect and graph service startup timing in table or graph format.
-
 %package devel
 Summary:    Development tools for systemd
 Group:      Development/Libraries
@@ -130,36 +118,6 @@ Requires:  %{name} = %{?epoch:%{epoch}:}%{version}-%{release}
 
 %description docs
 This package includes the man pages for systemd.
-
-
-# %package sysv-docs
-# Summary:   System and session manager man pages - SysV links
-# Group:     Development/Libraries
-# Requires:  %{name} = %{version}-%{release}
-
-# %description sysv-docs
-# This package provides the manual pages needed for systemd
-# to replace sysvinit.
-
-# %package sysv
-# Summary:   System and session manager - SysV links
-# Group:     System/Startup Services
-# Requires:  %{name} = %{version}-%{release}
-# Obsoletes: sysvinit < 3.0
-# Provides:  sysvinit = 3.0
-
-
- #%description sysv
-# Systemd is a replacement for sysvinit.  It is dependency-based and
-# able to read the LSB init script headers in addition to parsing rcN.d
-# links as hints.
-
-# It also provides process supervision using cgroups and the ability to
-# not only depend on other init script being started, but also
-# availability of a given mount point or dbus service.
-
-# This package provides the links needed for systemd
-# to replace sysvinit.
 
 
 %prep
