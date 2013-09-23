@@ -257,6 +257,10 @@ ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/getty.targe
 #console-ttyO2
 ln -s ../serial-getty@.service %{buildroot}%{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyO2.service
 
+#license
+mkdir -p %{buildroot}/usr/share/license
+cp LICENSE %{buildroot}/usr/share/license/%{name}
+
 %post
 rm -f /etc/mtab
 ln -sf /proc/self/mounts /etc/mtab
@@ -324,6 +328,7 @@ ln -sf /proc/self/mounts /etc/mtab
 %exclude %{_libdir}/systemd/system/getty.target.wants/serial-getty@ttyS1.service
 %exclude %{_libdir}/systemd/system/sysinit.target.wants/systemd-vconsole-setup.service
 %exclude %{_libdir}/systemd/user/default.target
+/usr/share/license/%{name}
 
 %files console-ttySAC2
 %defattr(-,root,root,-)
