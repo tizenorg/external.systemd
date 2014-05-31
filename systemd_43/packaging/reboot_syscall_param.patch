@@ -1,0 +1,44 @@
+diff --git a/src/shutdown.c b/src/shutdown.c
+index d157e0f..f3e29cd 100644
+--- a/src/shutdown.c
++++ b/src/shutdown.c
+@@ -45,6 +45,7 @@
+ 
+ #define TIMEOUT_USEC (5 * USEC_PER_SEC)
+ #define FINALIZE_ATTEMPTS 50
++#define REBOOT_MODE_FILE    "/run/reboot_mode"
+ 
+ static bool ignore_proc(pid_t pid) {
+         char buf[PATH_MAX];
+@@ -307,6 +308,7 @@ int main(int argc, char *argv[]) {
+         unsigned retries;
+         bool need_umount = true, need_swapoff = true, need_loop_detach = true, need_dm_detach = true;
+         bool killed_everbody = false, in_container;
++        char *reboot_param;
+ 
+         log_parse_environment();
+         log_set_target(LOG_TARGET_CONSOLE); /* syslog will die if not gone yet */
+@@ -326,6 +328,9 @@ int main(int argc, char *argv[]) {
+                 goto error;
+         }
+ 
++        if(read_one_line_file(REBOOT_MODE_FILE, &reboot_param))
++                reboot_param=NULL;
++
+         in_container = detect_container(NULL) > 0;
+ 
+         if (streq(argv[1], "reboot"))
+@@ -473,7 +478,12 @@ int main(int argc, char *argv[]) {
+                 cmd = RB_AUTOBOOT;
+         }
+ 
+-        reboot(cmd);
++        if(reboot_param){
++		        syscall(__NR_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_CMD_RESTART2, reboot_param);
++        } else {
++                reboot(cmd);
++        }
++
+         log_error("Failed to invoke reboot(): %m");
+         r = -errno;
+ 

@@ -1,0 +1,40 @@
+From e191b67bce5649de7c9091828f1b7b5aaedae0f5 Mon Sep 17 00:00:00 2001
+From: Karol Lewandowski <k.lewandowsk@samsung.com>
+Date: Fri, 14 Dec 2012 08:04:29 +0100
+Subject: [PATCH] Don't try to change hostname if it was already set by kernel
+
+Tizen seem to provide variety of kernels and userspace doesn't
+change it but does depend on it.
+
+Change-Id: Ieb0ffdd7e39729c48c0dad5e325188cb8f351e33
+---
+ src/hostname-setup.c |    6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/hostname-setup.c b/src/hostname-setup.c
+index 2c2f10c..0eae189 100644
+--- a/src/hostname-setup.c
++++ b/src/hostname-setup.c
+@@ -19,6 +19,7 @@
+   along with systemd; If not, see <http://www.gnu.org/licenses/>.
+ ***/
+ 
++#include <sys/utsname.h>
+ #include <unistd.h>
+ #include <stdio.h>
+ #include <errno.h>
+@@ -144,6 +145,11 @@ int hostname_setup(void) {
+         int r;
+         char *b = NULL;
+         const char *hn = NULL;
++        struct utsname uts;
++
++        /* Don't try to change hostname if it was already set by kernel */
++        if (!uname(&uts) && strcmp(uts.nodename, "(none)"))
++                return 0;
+ 
+         if ((r = read_hostname(&b)) < 0) {
+                 if (r == -ENOENT)
+-- 
+1.7.10.4
+

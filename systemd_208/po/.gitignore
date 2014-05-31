@@ -1,0 +1,4 @@
+POTFILES
+.intltool-merge-cache
+Makefile
+systemd.pot

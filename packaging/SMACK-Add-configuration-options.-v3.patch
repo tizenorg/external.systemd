@@ -1,0 +1,201 @@
+From 562f74cc52ad721a5648424fd7ee81c945b4f730 Mon Sep 17 00:00:00 2001
+From: Auke Kok <auke-jan.h.kok@intel.com>
+Date: Mon, 29 Oct 2012 15:30:05 -0700
+Subject: [PATCH] SMACK: Add configuration options. (v3)
+
+This adds SMACK label configuration options to socket units.
+
+SMACK labels should be applied to most objects on disk well before
+execution time, but two items remain that are generated dynamically
+at run time that require SMACK labels to be set in order to enforce
+MAC on all objects.
+
+Files on disk can be labelled using package management.
+
+For device nodes, simple udev rules are sufficient to add SMACK labels
+at boot/insertion time.
+
+Sockets can be created at run time and systemd does just that for
+several services. In order to protect FIFO's and UNIX domain sockets,
+we must instruct systemd to apply SMACK labels at runtime.
+
+This patch adds the following options:
+
+Smack - applicable to FIFO's.
+SmackIpIn/SmackIpOut - applicable to sockets.
+
+No external dependencies are required to support SMACK, as setting
+the labels is done using fsetxattr(). The labels can be set on a
+kernel that does not have SMACK enabled either, so there is no need
+to #ifdef any of this code out.
+
+For more information about SMACK, please see Documentation/Smack.txt
+in the kernel source code.
+
+v3 of this patch changes the config options to be CamelCased.
+---
+ man/systemd.socket.xml           |   20 ++++++++++++++++++++
+ src/dbus-socket.c                |    6 ++++++
+ src/load-fragment-gperf.gperf.m4 |    3 +++
+ src/socket.c                     |   32 ++++++++++++++++++++++++++++++++
+ src/socket.h                     |    4 ++++
+ 5 files changed, 65 insertions(+)
+
+diff --git a/man/systemd.socket.xml b/man/systemd.socket.xml
+index ef5b28c..2a114aa 100644
+--- a/man/systemd.socket.xml
++++ b/man/systemd.socket.xml
+@@ -467,6 +467,26 @@
+                         </varlistentry>
+ 
+                         <varlistentry>
++                                <term><varname>SmackLabel=</varname></term>
++                                <term><varname>SmackLabelIPIn=</varname></term>
++                                <term><varname>SmackLabelIPOut=</varname></term>
++                                <listitem><para>Takes a string
++                                value. Controls the extended
++                                attributes
++                                <literal>security.SMACK64</literal>,
++                                <literal>security.SMACK64IPIN</literal>
++                                and
++                                <literal>security.SMACK64IPOUT</literal>,
++                                respectively, i.e. the security label
++                                of the FIFO, or the security label for
++                                the incoming or outgoing connections
++                                of the socket, respectively.  See
++                                <ulink
++                                url="https://www.kernel.org/doc/Documentation/security/Smack.txt">Smack.txt</ulink>
++                                for details.</para></listitem>
++                        </varlistentry>
++
++                        <varlistentry>
+                                 <term><varname>PipeSize=</varname></term>
+                                 <listitem><para>Takes an integer
+                                 value. Controls the pipe buffer size
+diff --git a/src/dbus-socket.c b/src/dbus-socket.c
+index 9fef676..0b661d3 100644
+--- a/src/dbus-socket.c
++++ b/src/dbus-socket.c
+@@ -59,6 +59,9 @@
+         "  <property name=\"MessageQueueMaxMessages\" type=\"x\" access=\"read\"/>\n" \
+         "  <property name=\"MessageQueueMessageSize\" type=\"x\" access=\"read\"/>\n" \
+         "  <property name=\"Result\" type=\"s\" access=\"read\"/>\n"    \
++        "  <property name=\"SmackLabel\" type=\"s\" access=\"read\"/>\n" \
++        "  <property name=\"SmackLabelIPIn\" type=\"s\" access=\"read\"/>\n" \
++        "  <property name=\"SmackLabelIPOut\" type=\"s\" access=\"read\"/>\n" \
+         " </interface>\n"                                               \
+ 
+ #define INTROSPECTION                                                   \
+@@ -121,6 +124,9 @@ static const BusProperty bus_socket_properties[] = {
+         { "MessageQueueMaxMessages", bus_property_append_long, "x", offsetof(Socket, mq_maxmsg)       },
+         { "MessageQueueMessageSize", bus_property_append_long, "x", offsetof(Socket, mq_msgsize)      },
+         { "Result",         bus_socket_append_socket_result,   "s", offsetof(Socket, result)          },
++        { "SmackLabel",     bus_property_append_string,        "s", offsetof(Socket, smack),          true },
++        { "SmackLabelIPIn", bus_property_append_string,        "s", offsetof(Socket, smack_ip_in),    true },
++        { "SmackLabelIPOut",bus_property_append_string,        "s", offsetof(Socket, smack_ip_out),   true },
+         { NULL, }
+ };
+ 
+diff --git a/src/load-fragment-gperf.gperf.m4 b/src/load-fragment-gperf.gperf.m4
+index 44ce4bb..d07a2e6 100644
+--- a/src/load-fragment-gperf.gperf.m4
++++ b/src/load-fragment-gperf.gperf.m4
+@@ -190,6 +190,9 @@ Socket.TCPCongestion,            config_parse_string,                0,
+ Socket.MessageQueueMaxMessages,  config_parse_long,                  0,                             offsetof(Socket, mq_maxmsg)
+ Socket.MessageQueueMessageSize,  config_parse_long,                  0,                             offsetof(Socket, mq_msgsize)
+ Socket.Service,                  config_parse_socket_service,        0,                             0
++Socket.SmackLabel,               config_parse_string,                0,                             offsetof(Socket, smack)
++Socket.SmackLabelIPIn,           config_parse_string,                0,                             offsetof(Socket, smack_ip_in)
++Socket.SmackLabelIPOut,          config_parse_string,                0,                             offsetof(Socket, smack_ip_out)
+ EXEC_CONTEXT_CONFIG_ITEMS(Socket)m4_dnl
+ m4_dnl
+ Mount.What,                      config_parse_string,                0,                             offsetof(Mount, parameters_fragment.what)
+diff --git a/src/socket.c b/src/socket.c
+index 15a517b..5336e31 100644
+--- a/src/socket.c
++++ b/src/socket.c
+@@ -28,6 +28,7 @@
+ #include <signal.h>
+ #include <arpa/inet.h>
+ #include <mqueue.h>
++#include <attr/xattr.h>
+ 
+ #include "unit.h"
+ #include "socket.h"
+@@ -127,6 +128,10 @@ static void socket_done(Unit *u) {
+         free(s->bind_to_device);
+         s->bind_to_device = NULL;
+ 
++        free(s->smack);
++        free(s->smack_ip_in);
++        free(s->smack_ip_out);
++
+         unit_unwatch_timer(u, &s->timer_watch);
+ }
+ 
+@@ -495,6 +500,21 @@ static void socket_dump(Unit *u, FILE *f, const char *prefix) {
+                         "%sMessageQueueMessageSize: %li\n",
+                         prefix, s->mq_msgsize);
+ 
++        if (s->smack)
++                fprintf(f,
++                        "%sSmackLabel: %s\n",
++                        prefix, s->smack);
++
++        if (s->smack_ip_in)
++                fprintf(f,
++                        "%sSmackLabelIPIn: %s\n",
++                        prefix, s->smack_ip_in);
++
++        if (s->smack_ip_out)
++                fprintf(f,
++                        "%sSmackLabelIPOut: %s\n",
++                        prefix, s->smack_ip_out);
++
+         LIST_FOREACH(port, p, s->ports) {
+ 
+                 if (p->type == SOCKET_SOCKET) {
+@@ -724,6 +744,14 @@ static void socket_apply_socket_options(Socket *s, int fd) {
+         if (s->tcp_congestion)
+                 if (setsockopt(fd, SOL_TCP, TCP_CONGESTION, s->tcp_congestion, strlen(s->tcp_congestion)+1) < 0)
+                         log_warning("TCP_CONGESTION failed: %m");
++
++        if (s->smack_ip_in)
++                if (fsetxattr(fd, "security.SMACK64IPIN", s->smack_ip_in, strlen(s->smack_ip_in), 0) < 0)
++                        log_error("fsetxattr(\"security.SMACK64IPIN\"): %m");
++
++        if (s->smack_ip_out)
++                if (fsetxattr(fd, "security.SMACK64IPOUT", s->smack_ip_out, strlen(s->smack_ip_out), 0) < 0)
++                        log_error("fsetxattr(\"security.SMACK64IPOUT\"): %m");
+ }
+ 
+ static void socket_apply_fifo_options(Socket *s, int fd) {
+@@ -733,6 +761,10 @@ static void socket_apply_fifo_options(Socket *s, int fd) {
+         if (s->pipe_size > 0)
+                 if (fcntl(fd, F_SETPIPE_SZ, s->pipe_size) < 0)
+                         log_warning("F_SETPIPE_SZ: %m");
++
++        if (s->smack)
++                if (fsetxattr(fd, "security.SMACK64", s->smack, strlen(s->smack), 0) < 0)
++                        log_error("fsetxattr(\"security.SMACK64\"): %m");
+ }
+ 
+ static int fifo_address_create(
+diff --git a/src/socket.h b/src/socket.h
+index d242796..612a4a0 100644
+--- a/src/socket.h
++++ b/src/socket.h
+@@ -142,6 +142,10 @@ struct Socket {
+ 
+         /* Only for INET6 sockets: issue IPV6_V6ONLY sockopt */
+         SocketAddressBindIPv6Only bind_ipv6_only;
++
++        char *smack;
++        char *smack_ip_in;
++        char *smack_ip_out;
+ };
+ 
+ /* Called from the service code when collecting fds */
+-- 
+1.7.9.5
+
