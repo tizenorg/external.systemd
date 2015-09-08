@@ -1,2 +1,4 @@
-systemd.special.7.in
-systemd.special.html.in
+/systemd.directives.xml
+/systemd.index.xml
+/*.[13578]
+/custom-entities.ent

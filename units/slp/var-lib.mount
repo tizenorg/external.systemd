@@ -1,9 +1,0 @@
-[Unit]
-Description=/var/lib Mount Point
-Before=local-fs.target
-
-[Mount]
-What=/opt/var/lib
-Where=/var/lib
-Type=bind
-Options=bind

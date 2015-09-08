@@ -8,20 +8,21 @@
   Copyright 2010 Lennart Poettering
 
   systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU General Public License as published by
-  the Free Software Foundation; either version 2 of the License, or
+  under the terms of the GNU Lesser General Public License as published by
+  the Free Software Foundation; either version 2.1 of the License, or
   (at your option) any later version.
 
   systemd is distributed in the hope that it will be useful, but
   WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  General Public License for more details.
+  Lesser General Public License for more details.
 
-  You should have received a copy of the GNU General Public License
+  You should have received a copy of the GNU Lesser General Public License
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 -->
 
-<refentry id="halt">
+<refentry id="halt"
+          xmlns:xi="http://www.w3.org/2001/XInclude">
 
         <refentryinfo>
                 <title>halt</title>
@@ -80,15 +81,14 @@
                         <varlistentry>
                                 <term><option>--help</option></term>
 
-                                <listitem><para>Prints a short help
-                                text and exits.</para></listitem>
+                                <xi:include href="standard-options.xml" xpointer="help-text" />
                         </varlistentry>
 
                         <varlistentry>
                                 <term><option>--halt</option></term>
 
                                 <listitem><para>Halt the machine,
-                                regardless which one of the three
+                                regardless of which one of the three
                                 commands is invoked.</para></listitem>
                         </varlistentry>
 
@@ -97,7 +97,7 @@
                                 <term><option>--poweroff</option></term>
 
                                 <listitem><para>Power-off the machine,
-                                regardless which one of the three
+                                regardless of which one of the three
                                 commands is invoked.</para></listitem>
                         </varlistentry>
 
@@ -105,7 +105,7 @@
                                 <term><option>--reboot</option></term>
 
                                 <listitem><para>Reboot the machine,
-                                regardless which one of the three
+                                regardless of which one of the three
                                 commands is invoked.</para></listitem>
                         </varlistentry>
 
@@ -114,7 +114,7 @@
                                 <term><option>--force</option></term>
 
                                 <listitem><para>Force immediate halt,
-                                power-off, reboot. Don't contact the
+                                power-off, reboot. Do not contact the
                                 init system.</para></listitem>
                         </varlistentry>
 
@@ -123,7 +123,7 @@
                                 <term><option>--wtmp-only</option></term>
 
                                 <listitem><para>Only write wtmp
-                                shutdown entry, don't actually halt,
+                                shutdown entry, do not actually halt,
                                 power-off, reboot.</para></listitem>
                         </varlistentry>
 
@@ -131,23 +131,14 @@
                                 <term><option>-d</option></term>
                                 <term><option>--no-wtmp</option></term>
 
-                                <listitem><para>Don't write wtmp
+                                <listitem><para>Do not write wtmp
                                 shutdown entry.</para></listitem>
-                        </varlistentry>
-
-                        <varlistentry>
-                                <term><option>-n</option></term>
-                                <term><option>--no-sync</option></term>
-
-                                <listitem><para>Don't sync hard disks/storage media before
-                                halt, power-off,
-                                reboot.</para></listitem>
                         </varlistentry>
 
                         <varlistentry>
                                 <term><option>--no-wall</option></term>
 
-                                <listitem><para>Don't send wall
+                                <listitem><para>Do not send wall
                                 message before
                                 halt, power-off, reboot.</para></listitem>
                         </varlistentry>
@@ -157,7 +148,7 @@
         <refsect1>
                 <title>Exit status</title>
 
-                <para>On success 0 is returned, a non-zero failure
+                <para>On success, 0 is returned, a non-zero failure
                 code otherwise.</para>
         </refsect1>
 

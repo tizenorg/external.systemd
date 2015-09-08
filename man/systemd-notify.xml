@@ -8,20 +8,21 @@
   Copyright 2010 Lennart Poettering
 
   systemd is free software; you can redistribute it and/or modify it
-  under the terms of the GNU General Public License as published by
-  the Free Software Foundation; either version 2 of the License, or
+  under the terms of the GNU Lesser General Public License as published by
+  the Free Software Foundation; either version 2.1 of the License, or
   (at your option) any later version.
 
   systemd is distributed in the hope that it will be useful, but
   WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-  General Public License for more details.
+  Lesser General Public License for more details.
 
-  You should have received a copy of the GNU General Public License
+  You should have received a copy of the GNU Lesser General Public License
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 -->
 
-<refentry id="systemd-notify">
+<refentry id="systemd-notify"
+          xmlns:xi="http://www.w3.org/2001/XInclude">
 
         <refentryinfo>
                 <title>systemd-notify</title>
@@ -44,7 +45,7 @@
 
         <refnamediv>
                 <refname>systemd-notify</refname>
-                <refpurpose>Notify init system about start-up completion and other daemon status changes</refpurpose>
+                <refpurpose>Notify service manager about start-up completion and other daemon status changes</refpurpose>
         </refnamediv>
 
         <refsynopsisdiv>
@@ -87,14 +88,6 @@
 
                 <variablelist>
                         <varlistentry>
-                                <term><option>--h</option></term>
-                                <term><option>--help</option></term>
-
-                                <listitem><para>Prints a short help
-                                text and exits.</para></listitem>
-                        </varlistentry>
-
-                        <varlistentry>
                                 <term><option>--ready</option></term>
 
                                 <listitem><para>Inform the init system
@@ -112,7 +105,7 @@
                                 <listitem><para>Inform the init system
                                 about the main PID of the
                                 daemon. Takes a PID as argument. If
-                                the argument is omitted the PID of the
+                                the argument is omitted, the PID of the
                                 process that invoked
                                 <command>systemd-notify</command> is
                                 used. This is equivalent to
@@ -141,10 +134,10 @@
                                 <listitem><para>Returns 0 if the
                                 system was booted up with systemd,
                                 non-zero otherwise. If this option is
-                                passed no message is sent. This option
+                                passed, no message is sent. This option
                                 is hence unrelated to the other
                                 options. For details about the
-                                semantics of this option see
+                                semantics of this option, see
                                 <citerefentry><refentrytitle>sd_booted</refentrytitle><manvolnum>3</manvolnum></citerefentry>.</para></listitem>
                         </varlistentry>
 
@@ -158,6 +151,9 @@
                                 about the semantics of this option see
                                 <citerefentry><refentrytitle>sd_readahead</refentrytitle><manvolnum>3</manvolnum></citerefentry>.</para></listitem>
                         </varlistentry>
+
+                        <xi:include href="standard-options.xml" xpointer="help" />
+                        <xi:include href="standard-options.xml" xpointer="version" />
                 </variablelist>
 
         </refsect1>
@@ -165,7 +161,7 @@
         <refsect1>
                 <title>Exit status</title>
 
-                <para>On success 0 is returned, a non-zero failure
+                <para>On success, 0 is returned, a non-zero failure
                 code otherwise.</para>
         </refsect1>
 
