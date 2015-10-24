@@ -31,18 +31,23 @@
 static bool arg_skip = false;
 static bool arg_force = false;
 
-static int parse_proc_cmdline_word(const char *w) {
-        if (streq(w, "quotacheck.mode=auto"))
-                arg_force = arg_skip = false;
-        else if (streq(w, "quotacheck.mode=force"))
-                arg_force = true;
-        else if (streq(w, "quotacheck.mode=skip"))
-                arg_skip = true;
-        else if (startswith(w, "quotacheck"))
-                log_warning("Invalid quotacheck parameter. Ignoring.");
+static int parse_proc_cmdline_item(const char *key, const char *value) {
+
+        if (streq(key, "quotacheck.mode") && value) {
+
+                if (streq(value, "auto"))
+                        arg_force = arg_skip = false;
+                else if (streq(value, "force"))
+                        arg_force = true;
+                else if (streq(value, "skip"))
+                        arg_skip = true;
+                else
+                        log_warning("Invalid quotacheck.mode= parameter '%s'. Ignoring.", value);
+        }
+
 #ifdef HAVE_SYSV_COMPAT
-        else if (streq(w, "forcequotacheck")) {
-                log_error("Please use 'quotacheck.mode=force' rather than 'forcequotacheck' on the kernel command line.");
+        else if (streq(key, "forcequotacheck") && !value) {
+                log_warning("Please use 'quotacheck.mode=force' rather than 'forcequotacheck' on the kernel command line.");
                 arg_force = true;
         }
 #endif
@@ -51,6 +56,7 @@ static int parse_proc_cmdline_word(const char *w) {
 }
 
 static void test_files(void) {
+
 #ifdef HAVE_SYSV_COMPAT
         if (access("/forcequotacheck", F_OK) >= 0) {
                 log_error("Please pass 'quotacheck.mode=force' on the kernel command line rather than creating /forcequotacheck on the root file system.");
@@ -80,7 +86,7 @@ int main(int argc, char *argv[]) {
 
         umask(0022);
 
-        parse_proc_cmdline(parse_proc_cmdline_word);
+        parse_proc_cmdline(parse_proc_cmdline_item);
         test_files();
 
         if (!arg_force) {

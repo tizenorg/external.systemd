@@ -61,52 +61,46 @@ static void mount_points_list_free(MountPoint **head) {
 }
 
 static int mount_points_list_get(MountPoint **head) {
-        FILE *proc_self_mountinfo;
-        char *path, *p;
+        _cleanup_fclose_ FILE *proc_self_mountinfo = NULL;
         unsigned int i;
-        int r;
 
         assert(head);
 
-        if (!(proc_self_mountinfo = fopen("/proc/self/mountinfo", "re")))
+        proc_self_mountinfo = fopen("/proc/self/mountinfo", "re");
+        if (!proc_self_mountinfo)
                 return -errno;
 
         for (i = 1;; i++) {
-                int k;
+                _cleanup_free_ char *path = NULL;
+                char *p = NULL;
                 MountPoint *m;
+                int k;
 
-                path = p = NULL;
-
-                if ((k = fscanf(proc_self_mountinfo,
-                                "%*s "       /* (1) mount id */
-                                "%*s "       /* (2) parent id */
-                                "%*s "       /* (3) major:minor */
-                                "%*s "       /* (4) root */
-                                "%ms "       /* (5) mount point */
-                                "%*s"        /* (6) mount options */
-                                "%*[^-]"     /* (7) optional fields */
-                                "- "         /* (8) separator */
-                                "%*s "       /* (9) file system type */
-                                "%*s"        /* (10) mount source */
-                                "%*s"        /* (11) mount options 2 */
-                                "%*[^\n]",   /* some rubbish at the end */
-                                &path)) != 1) {
+                k = fscanf(proc_self_mountinfo,
+                           "%*s "       /* (1) mount id */
+                           "%*s "       /* (2) parent id */
+                           "%*s "       /* (3) major:minor */
+                           "%*s "       /* (4) root */
+                           "%ms "       /* (5) mount point */
+                           "%*s"        /* (6) mount options */
+                           "%*[^-]"     /* (7) optional fields */
+                           "- "         /* (8) separator */
+                           "%*s "       /* (9) file system type */
+                           "%*s"        /* (10) mount source */
+                           "%*s"        /* (11) mount options 2 */
+                           "%*[^\n]",   /* some rubbish at the end */
+                           &path);
+                if (k != 1) {
                         if (k == EOF)
                                 break;
 
                         log_warning("Failed to parse /proc/self/mountinfo:%u.", i);
-
-                        free(path);
                         continue;
                 }
 
                 p = cunescape(path);
-                free(path);
-
-                if (!p) {
-                        r = -ENOMEM;
-                        goto finish;
-                }
+                if (!p)
+                        return -ENOMEM;
 
                 /* Ignore mount points we can't unmount because they
                  * are API or because we are keeping them open (like
@@ -118,28 +112,22 @@ static int mount_points_list_get(MountPoint **head) {
                         continue;
                 }
 
-                if (!(m = new0(MountPoint, 1))) {
+                m = new0(MountPoint, 1);
+                if (!m) {
                         free(p);
-                        r = -ENOMEM;
-                        goto finish;
+                        return -ENOMEM;
                 }
 
                 m->path = p;
                 LIST_PREPEND(mount_point, *head, m);
         }
 
-        r = 0;
-
-finish:
-        fclose(proc_self_mountinfo);
-
-        return r;
+        return 0;
 }
 
 static int swap_list_get(MountPoint **head) {
-        FILE *proc_swaps;
+        _cleanup_fclose_ FILE *proc_swaps = NULL;
         unsigned int i;
-        int r;
 
         assert(head);
 
@@ -179,26 +167,19 @@ static int swap_list_get(MountPoint **head) {
                 free(dev);
 
                 if (!d) {
-                        r = -ENOMEM;
-                        goto finish;
+                        return -ENOMEM;
                 }
 
                 if (!(swap = new0(MountPoint, 1))) {
                         free(d);
-                        r = -ENOMEM;
-                        goto finish;
+                        return -ENOMEM;
                 }
 
                 swap->path = d;
                 LIST_PREPEND(mount_point, *head, swap);
         }
 
-        r = 0;
-
-finish:
-        fclose(proc_swaps);
-
-        return r;
+        return 0;
 }
 
 static int loopback_list_get(MountPoint **head) {
@@ -329,14 +310,14 @@ static int dm_list_get(MountPoint **head) {
 }
 
 static int delete_loopback(const char *device) {
-        int fd, r;
+        _cleanup_close_ int fd = -1;
+        int r;
 
-        if ((fd = open(device, O_RDONLY|O_CLOEXEC)) < 0)
+        fd = open(device, O_RDONLY|O_CLOEXEC);
+        if (fd < 0)
                 return errno == ENOENT ? 0 : -errno;
 
         r = ioctl(fd, LOOP_CLR_FD, 0);
-        close_nointr_nofail(fd);
-
         if (r >= 0)
                 return 1;
 

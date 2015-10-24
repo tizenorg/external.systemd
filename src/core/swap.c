@@ -118,11 +118,8 @@ static void swap_init(Unit *u) {
 
         s->timeout_usec = u->manager->default_timeout_start_usec;
 
-        exec_context_init(&s->exec_context);
         s->exec_context.std_output = u->manager->default_std_output;
         s->exec_context.std_error = u->manager->default_std_error;
-        kill_context_init(&s->kill_context);
-        cgroup_context_init(&s->cgroup_context);
 
         s->parameters_proc_swaps.priority = s->parameters_fragment.priority = -1;
 
@@ -155,8 +152,6 @@ static void swap_done(Unit *u) {
         free(s->parameters_fragment.what);
         s->parameters_fragment.what = NULL;
 
-        cgroup_context_done(&s->cgroup_context);
-        exec_context_done(&s->exec_context);
         s->exec_runtime = exec_runtime_unref(s->exec_runtime);
         exec_command_done_array(s->exec_command, _SWAP_EXEC_COMMAND_MAX);
         s->control_command = NULL;
@@ -184,7 +179,12 @@ static int swap_arm_timer(Swap *s) {
                 return sd_event_source_set_enabled(s->timer_event_source, SD_EVENT_ONESHOT);
         }
 
-        return sd_event_add_monotonic(UNIT(s)->manager->event, &s->timer_event_source, now(CLOCK_MONOTONIC) + s->timeout_usec, 0, swap_dispatch_timer, s);
+        return sd_event_add_time(
+                        UNIT(s)->manager->event,
+                        &s->timer_event_source,
+                        CLOCK_MONOTONIC,
+                        now(CLOCK_MONOTONIC) + s->timeout_usec, 0,
+                        swap_dispatch_timer, s);
 }
 
 static int swap_add_device_links(Swap *s) {
@@ -303,9 +303,6 @@ static int swap_load(Unit *u) {
                 return r;
 
         if (u->load_state == UNIT_LOADED) {
-                r = unit_add_exec_dependencies(u, &s->exec_context);
-                if (r < 0)
-                        return r;
 
                 if (UNIT(s)->fragment_path)
                         s->from_fragment = true;
@@ -342,7 +339,15 @@ static int swap_load(Unit *u) {
                 if (r < 0)
                         return r;
 
-                r = unit_add_default_slice(u);
+                r = unit_patch_contexts(u);
+                if (r < 0)
+                        return r;
+
+                r = unit_add_exec_dependencies(u, &s->exec_context);
+                if (r < 0)
+                        return r;
+
+                r = unit_add_default_slice(u, &s->cgroup_context);
                 if (r < 0)
                         return r;
 
@@ -351,10 +356,6 @@ static int swap_load(Unit *u) {
                         if (r < 0)
                                 return r;
                 }
-
-                r = unit_exec_context_defaults(u, &s->exec_context);
-                if (r < 0)
-                        return r;
         }
 
         return swap_verify(s);
@@ -608,8 +609,8 @@ static void swap_dump(Unit *u, FILE *f, const char *prefix) {
 
         if (s->control_pid > 0)
                 fprintf(f,
-                        "%sControl PID: %lu\n",
-                        prefix, (unsigned long) s->control_pid);
+                        "%sControl PID: "PID_FMT"\n",
+                        prefix, s->control_pid);
 
         exec_context_dump(&s->exec_context, f, prefix);
         kill_context_dump(&s->kill_context, f, prefix);
@@ -644,6 +645,7 @@ static int swap_spawn(Swap *s, ExecCommand *c, pid_t *_pid) {
                        UNIT(s)->manager->confirm_spawn,
                        UNIT(s)->manager->cgroup_supported,
                        UNIT(s)->cgroup_path,
+                       manager_get_runtime_prefix(UNIT(s)->manager),
                        UNIT(s)->id,
                        0,
                        NULL,
@@ -675,6 +677,8 @@ static void swap_enter_dead(Swap *s, SwapResult f) {
 
         exec_runtime_destroy(s->exec_runtime);
         s->exec_runtime = exec_runtime_unref(s->exec_runtime);
+
+        exec_context_destroy_runtime_directory(&s->exec_context, manager_get_runtime_prefix(UNIT(s)->manager));
 
         swap_set_state(s, s->result != SWAP_SUCCESS ? SWAP_FAILED : SWAP_DEAD);
 }
@@ -874,7 +878,7 @@ static int swap_serialize(Unit *u, FILE *f, FDSet *fds) {
         unit_serialize_item(u, f, "result", swap_result_to_string(s->result));
 
         if (s->control_pid > 0)
-                unit_serialize_item_format(u, f, "control-pid", "%lu", (unsigned long) s->control_pid);
+                unit_serialize_item_format(u, f, "control-pid", PID_FMT, s->control_pid);
 
         if (s->control_command_id >= 0)
                 unit_serialize_item(u, f, "control-command", swap_exec_command_to_string(s->control_command_id));

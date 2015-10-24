@@ -78,7 +78,7 @@ static int builtin_keyboard(struct udev_device *dev, int argc, char *argv[], boo
 
         udev_list_entry_foreach(entry, udev_device_get_properties_list_entry(dev)) {
                 const char *key;
-                unsigned int scancode;
+                unsigned int scancode, keycode_num;
                 char *endptr;
                 const char *keycode;
                 const struct key *k;
@@ -110,13 +110,19 @@ static int builtin_keyboard(struct udev_device *dev, int argc, char *argv[], boo
 
                 /* translate identifier to key code */
                 k = keyboard_lookup_key(keycode, strlen(keycode));
-                if (!k) {
-                        log_error("Error, unknown key identifier '%s'", keycode);
-                        continue;
+                if (k) {
+                        keycode_num = k->id;
+                } else {
+                        /* check if it's a numeric code already */
+                        keycode_num = strtoul(keycode, &endptr, 0);
+                        if (endptr[0] !='\0') {
+                                log_error("Error, unknown key identifier '%s'", keycode);
+                                continue;
+                        }
                 }
 
                 map[map_count].scan = scancode;
-                map[map_count].key = k->id;
+                map[map_count].key = keycode_num;
                 if (map_count < ELEMENTSOF(map)-1)
                         map_count++;
         }
@@ -143,7 +149,7 @@ static int builtin_keyboard(struct udev_device *dev, int argc, char *argv[], boo
                         log_debug("keyboard: mapping scan code %d (0x%x) to key code %d (0x%x)",
                                   map[i].scan, map[i].scan, map[i].key, map[i].key);
                         if (ioctl(fd, EVIOCSKEYCODE, &map[i]) < 0)
-                                log_error("Error calling EVIOCSKEYCODE (scan code 0x%x, key code %d): %m", map[i].scan, map[i].key);
+                                log_error("Error calling EVIOCSKEYCODE on device node '%s' (scan code 0x%x, key code %d): %m", node, map[i].scan, map[i].key);
                 }
 
                 /* install list of force-release codes */

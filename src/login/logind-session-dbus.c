@@ -27,6 +27,7 @@
 #include "strv.h"
 #include "bus-util.h"
 #include "bus-errors.h"
+#include "bus-label.h"
 
 #include "logind.h"
 #include "logind-session.h"
@@ -492,7 +493,7 @@ int session_object_find(sd_bus *bus, const char *path, const char *interface, vo
                 sd_bus_message *message;
                 pid_t pid;
 
-                message = sd_bus_get_current(bus);
+                message = sd_bus_get_current_message(bus);
                 if (!message)
                         return 0;
 
@@ -515,7 +516,7 @@ int session_object_find(sd_bus *bus, const char *path, const char *interface, vo
                 if (!p)
                         return 0;
 
-                e = sd_bus_label_unescape(p);
+                e = bus_label_unescape(p);
                 if (!e)
                         return -ENOMEM;
 
@@ -533,7 +534,7 @@ char *session_bus_path(Session *s) {
 
         assert(s);
 
-        t = sd_bus_label_escape(s->id);
+        t = bus_label_escape(s->id);
         if (!t)
                 return NULL;
 
@@ -558,11 +559,9 @@ int session_node_enumerator(sd_bus *bus, const char *path, void *userdata, char 
                 if (!p)
                         return -ENOMEM;
 
-                r = strv_push(&l, p);
-                if (r < 0) {
-                        free(p);
+                r = strv_consume(&l, p);
+                if (r < 0)
                         return r;
-                }
         }
 
         *nodes = l;
@@ -677,9 +676,11 @@ int session_send_create_reply(Session *s, sd_bus_error *error) {
                 return -ENOMEM;
 
         log_debug("Sending reply about created session: "
-                  "id=%s object_path=%s runtime_path=%s session_fd=%d seat=%s vtnr=%u",
+                  "id=%s object_path=%s uid=%u runtime_path=%s "
+                  "session_fd=%d seat=%s vtnr=%u",
                   s->id,
                   p,
+                  (uint32_t) s->user->uid,
                   s->user->runtime_path,
                   fifo_fd,
                   s->seat ? s->seat->id : "",

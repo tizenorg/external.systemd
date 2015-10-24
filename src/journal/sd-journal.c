@@ -51,6 +51,8 @@
 
 #define DEFAULT_DATA_THRESHOLD (64*1024)
 
+static void remove_file_real(sd_journal *j, JournalFile *f);
+
 static bool journal_pid_changed(sd_journal *j) {
         assert(j);
 
@@ -885,6 +887,7 @@ static int real_journal_next(sd_journal *j, direction_t direction) {
                 r = next_beyond_location(j, f, direction, &o, &p);
                 if (r < 0) {
                         log_debug("Can't iterate through %s, ignoring: %s", f->path, strerror(-r));
+                        remove_file_real(j, f);
                         continue;
                 } else if (r == 0)
                         continue;
@@ -994,7 +997,7 @@ _public_ int sd_journal_get_cursor(sd_journal *j, char **cursor) {
 }
 
 _public_ int sd_journal_seek_cursor(sd_journal *j, const char *cursor) {
-        char *w, *state;
+        const char *word, *state;
         size_t l;
         unsigned long long seqnum, monotonic, realtime, xor_hash;
         bool
@@ -1010,18 +1013,18 @@ _public_ int sd_journal_seek_cursor(sd_journal *j, const char *cursor) {
         assert_return(!journal_pid_changed(j), -ECHILD);
         assert_return(!isempty(cursor), -EINVAL);
 
-        FOREACH_WORD_SEPARATOR(w, l, cursor, ";", state) {
+        FOREACH_WORD_SEPARATOR(word, l, cursor, ";", state) {
                 char *item;
                 int k = 0;
 
-                if (l < 2 || w[1] != '=')
+                if (l < 2 || word[1] != '=')
                         return -EINVAL;
 
-                item = strndup(w, l);
+                item = strndup(word, l);
                 if (!item)
                         return -ENOMEM;
 
-                switch (w[0]) {
+                switch (word[0]) {
 
                 case 's':
                         seqnum_id_set = true;
@@ -1100,7 +1103,7 @@ _public_ int sd_journal_seek_cursor(sd_journal *j, const char *cursor) {
 
 _public_ int sd_journal_test_cursor(sd_journal *j, const char *cursor) {
         int r;
-        char *w, *state;
+        const char *word, *state;
         size_t l;
         Object *o;
 
@@ -1115,20 +1118,20 @@ _public_ int sd_journal_test_cursor(sd_journal *j, const char *cursor) {
         if (r < 0)
                 return r;
 
-        FOREACH_WORD_SEPARATOR(w, l, cursor, ";", state) {
+        FOREACH_WORD_SEPARATOR(word, l, cursor, ";", state) {
                 _cleanup_free_ char *item = NULL;
                 sd_id128_t id;
                 unsigned long long ll;
                 int k = 0;
 
-                if (l < 2 || w[1] != '=')
+                if (l < 2 || word[1] != '=')
                         return -EINVAL;
 
-                item = strndup(w, l);
+                item = strndup(word, l);
                 if (!item)
                         return -ENOMEM;
 
-                switch (w[0]) {
+                switch (word[0]) {
 
                 case 's':
                         k = sd_id128_from_string(item+2, &id);
@@ -1270,7 +1273,7 @@ static bool file_type_wanted(int flags, const char *filename) {
         if (flags & SD_JOURNAL_CURRENT_USER) {
                 char prefix[5 + DECIMAL_STR_MAX(uid_t) + 1];
 
-                assert_se(snprintf(prefix, sizeof(prefix), "user-%lu", (unsigned long) getuid())
+                assert_se(snprintf(prefix, sizeof(prefix), "user-"UID_FMT, getuid())
                           < (int) sizeof(prefix));
 
                 if (file_has_type_prefix(prefix, filename))
@@ -1339,7 +1342,7 @@ static int add_file(sd_journal *j, const char *prefix, const char *filename) {
 }
 
 static int remove_file(sd_journal *j, const char *prefix, const char *filename) {
-        char *path;
+        _cleanup_free_ char *path;
         JournalFile *f;
 
         assert(j);
@@ -1351,9 +1354,16 @@ static int remove_file(sd_journal *j, const char *prefix, const char *filename) 
                 return -ENOMEM;
 
         f = hashmap_get(j->files, path);
-        free(path);
         if (!f)
                 return 0;
+
+        remove_file_real(j, f);
+        return 0;
+}
+
+static void remove_file_real(sd_journal *j, JournalFile *f) {
+        assert(j);
+        assert(f);
 
         hashmap_remove(j->files, f->path);
 
@@ -1372,8 +1382,6 @@ static int remove_file(sd_journal *j, const char *prefix, const char *filename) 
         journal_file_close(f);
 
         j->current_invalidate_counter ++;
-
-        return 0;
 }
 
 static int add_directory(sd_journal *j, const char *prefix, const char *dirname) {
@@ -1447,8 +1455,7 @@ static int add_directory(sd_journal *j, const char *prefix, const char *dirname)
                 de = readdir(d);
                 if (!de && errno != 0) {
                         r = -errno;
-                        log_debug("Failed to read directory %s: %s",
-                                  m->path, strerror(errno));
+                        log_debug("Failed to read directory %s: %m", m->path);
                         return r;
                 }
                 if (!de)
@@ -1538,8 +1545,7 @@ static int add_root_directory(sd_journal *j, const char *p) {
                 de = readdir(d);
                 if (!de && errno != 0) {
                         r = -errno;
-                        log_debug("Failed to read directory %s: %s",
-                                  m->path, strerror(errno));
+                        log_debug("Failed to read directory %s: %m", m->path);
                         return r;
                 }
                 if (!de)
@@ -1842,8 +1848,7 @@ _public_ void sd_journal_close(sd_journal *j) {
         hashmap_free(j->directories_by_path);
         hashmap_free(j->directories_by_wd);
 
-        if (j->inotify_fd >= 0)
-                close_nointr_nofail(j->inotify_fd);
+        safe_close(j->inotify_fd);
 
         if (j->mmap) {
                 log_debug("mmap cache statistics: %u hit, %u miss", mmap_cache_get_hit(j->mmap), mmap_cache_get_missed(j->mmap));
@@ -1978,6 +1983,7 @@ _public_ int sd_journal_get_data(sd_journal *j, const char *field, const void **
                 uint64_t p, l;
                 le64_t le_hash;
                 size_t t;
+                int compression;
 
                 p = le64toh(o->entry.items[i].object_offset);
                 le_hash = o->entry.items[i].hash;
@@ -1990,19 +1996,22 @@ _public_ int sd_journal_get_data(sd_journal *j, const char *field, const void **
 
                 l = le64toh(o->object.size) - offsetof(Object, data.payload);
 
-                if (o->object.flags & OBJECT_COMPRESSED) {
-
-#ifdef HAVE_XZ
-                        if (uncompress_startswith(o->data.payload, l,
+                compression = o->object.flags & OBJECT_COMPRESSION_MASK;
+                if (compression) {
+#if defined(HAVE_XZ) || defined(HAVE_LZ4)
+                        if (decompress_startswith(compression,
+                                                  o->data.payload, l,
                                                   &f->compress_buffer, &f->compress_buffer_size,
                                                   field, field_length, '=')) {
 
-                                uint64_t rsize;
+                                size_t rsize;
 
-                                if (!uncompress_blob(o->data.payload, l,
-                                                     &f->compress_buffer, &f->compress_buffer_size, &rsize,
-                                                     j->data_threshold))
-                                        return -EBADMSG;
+                                r = decompress_blob(compression,
+                                                    o->data.payload, l,
+                                                    &f->compress_buffer, &f->compress_buffer_size, &rsize,
+                                                    j->data_threshold);
+                                if (r < 0)
+                                        return r;
 
                                 *data = f->compress_buffer;
                                 *size = (size_t) rsize;
@@ -2012,7 +2021,6 @@ _public_ int sd_journal_get_data(sd_journal *j, const char *field, const void **
 #else
                         return -EPROTONOSUPPORT;
 #endif
-
                 } else if (l >= field_length+1 &&
                            memcmp(o->data.payload, field, field_length) == 0 &&
                            o->data.payload[field_length] == '=') {
@@ -2039,6 +2047,7 @@ _public_ int sd_journal_get_data(sd_journal *j, const char *field, const void **
 static int return_data(sd_journal *j, JournalFile *f, Object *o, const void **data, size_t *size) {
         size_t t;
         uint64_t l;
+        int compression;
 
         l = le64toh(o->object.size) - offsetof(Object, data.payload);
         t = (size_t) l;
@@ -2047,12 +2056,17 @@ static int return_data(sd_journal *j, JournalFile *f, Object *o, const void **da
         if ((uint64_t) t != l)
                 return -E2BIG;
 
-        if (o->object.flags & OBJECT_COMPRESSED) {
-#ifdef HAVE_XZ
-                uint64_t rsize;
+        compression = o->object.flags & OBJECT_COMPRESSION_MASK;
+        if (compression) {
+#if defined(HAVE_XZ) || defined(HAVE_LZ4)
+                size_t rsize;
+                int r;
 
-                if (!uncompress_blob(o->data.payload, l, &f->compress_buffer, &f->compress_buffer_size, &rsize, j->data_threshold))
-                        return -EBADMSG;
+                r = decompress_blob(compression,
+                                    o->data.payload, l, &f->compress_buffer,
+                                    &f->compress_buffer_size, &rsize, j->data_threshold);
+                if (r < 0)
+                        return r;
 
                 *data = f->compress_buffer;
                 *size = (size_t) rsize;
@@ -2293,8 +2307,6 @@ _public_ int sd_journal_process(sd_journal *j) {
                         l -= step;
                 }
         }
-
-        return determine_change(j);
 }
 
 _public_ int sd_journal_wait(sd_journal *j, uint64_t timeout_usec) {
@@ -2387,7 +2399,7 @@ _public_ int sd_journal_get_cutoff_realtime_usec(sd_journal *j, uint64_t *from, 
 _public_ int sd_journal_get_cutoff_monotonic_usec(sd_journal *j, sd_id128_t boot_id, uint64_t *from, uint64_t *to) {
         Iterator i;
         JournalFile *f;
-        bool first = true;
+        bool found = false;
         int r;
 
         assert_return(j, -EINVAL);
@@ -2406,21 +2418,21 @@ _public_ int sd_journal_get_cutoff_monotonic_usec(sd_journal *j, sd_id128_t boot
                 if (r == 0)
                         continue;
 
-                if (first) {
-                        if (from)
-                                *from = fr;
-                        if (to)
-                                *to = t;
-                        first = false;
-                } else {
+                if (found) {
                         if (from)
                                 *from = MIN(fr, *from);
                         if (to)
                                 *to = MAX(t, *to);
+                } else {
+                        if (from)
+                                *from = fr;
+                        if (to)
+                                *to = t;
+                        found = true;
                 }
         }
 
-        return first ? 0 : 1;
+        return found;
 }
 
 void journal_print_header(sd_journal *j) {

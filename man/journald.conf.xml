@@ -146,29 +146,30 @@
 
                                 <listitem><para>Controls whether to
                                 split up journal files per user. One
-                                of <literal>login</literal>,
-                                <literal>uid</literal> and
-                                <literal>none</literal>. If
-                                <literal>login</literal>, each logged-in
-                                user will get his own journal
-                                files, but systemd user IDs will log
-                                into the system journal. If
-                                <literal>uid</literal>, any user ID
-                                will get his own journal files
-                                regardless of whether it belongs to a
-                                system service or refers to a real
-                                logged in user. If
+                                of <literal>uid</literal>,
+                                <literal>login</literal> and
+                                <literal>none</literal>.  If
+                                <literal>uid</literal>, all users will
+                                get each their own journal files
+                                regardless of whether they possess a
+                                login session or not, however system
+                                users will log into the system
+                                journal. If <literal>login</literal>,
+                                actually logged-in users will get each
+                                their own journal files, but users
+                                without login session and system users
+                                will log into the system journal. If
                                 <literal>none</literal>, journal files
                                 are not split up by user and all
-                                messages are instead stored in the single
-                                system journal. Note that splitting
-                                up journal files by user is only
-                                available for journals stored
+                                messages are instead stored in the
+                                single system journal. Note that
+                                splitting up journal files by user is
+                                only available for journals stored
                                 persistently. If journals are stored
-                                on volatile storage (see above), only a
-                                single journal file for all user IDs
+                                on volatile storage (see above), only
+                                a single journal file for all user IDs
                                 is kept. Defaults to
-                                <literal>login</literal>.</para></listitem>
+                                <literal>uid</literal>.</para></listitem>
                         </varlistentry>
 
                         <varlistentry>
@@ -190,8 +191,8 @@
                                 limiting is applied per-service, so
                                 that two services which log do not
                                 interfere with each other's
-                                limits. Defaults to 200 messages in
-                                10s. The time specification for
+                                limits. Defaults to 1000 messages in
+                                30s. The time specification for
                                 <varname>RateLimitInterval=</varname>
                                 may be specified in the following
                                 units: <literal>s</literal>,
@@ -381,28 +382,32 @@
                                 <term><varname>ForwardToSyslog=</varname></term>
                                 <term><varname>ForwardToKMsg=</varname></term>
                                 <term><varname>ForwardToConsole=</varname></term>
+                                <term><varname>ForwardToWall=</varname></term>
 
                                 <listitem><para>Control whether log
                                 messages received by the journal
                                 daemon shall be forwarded to a
                                 traditional syslog daemon, to the
-                                kernel log buffer (kmsg), or to the
-                                system console. These options take
-                                boolean arguments. If forwarding to
-                                syslog is enabled but no syslog daemon
-                                is running, the respective option has
-                                no effect. By default, only forwarding
-                                to syslog is enabled. These settings
-                                may be overridden at boot time with
-                                the kernel command line options
+                                kernel log buffer (kmsg), to the
+                                system console, or sent as wall
+                                messages to all logged-in users. These
+                                options take boolean arguments. If
+                                forwarding to syslog is enabled but no
+                                syslog daemon is running, the
+                                respective option has no effect. By
+                                default, only forwarding wall is
+                                enabled. These settings may be
+                                overridden at boot time with the
+                                kernel command line options
                                 <literal>systemd.journald.forward_to_syslog=</literal>,
-                                <literal>systemd.journald.forward_to_kmsg=</literal>
+                                <literal>systemd.journald.forward_to_kmsg=</literal>,
+                                <literal>systemd.journald.forward_to_console=</literal>
                                 and
-                                <literal>systemd.journald.forward_to_console=</literal>.
+                                <literal>systemd.journald.forward_to_wall=</literal>.
                                 When forwarding to the console, the
-                                TTY to log to can be changed
-                                with <varname>TTYPath=</varname>,
-                                described below.</para></listitem>
+                                TTY to log to can be changed with
+                                <varname>TTYPath=</varname>, described
+                                below.</para></listitem>
                         </varlistentry>
 
                         <varlistentry>
@@ -410,12 +415,14 @@
                                 <term><varname>MaxLevelSyslog=</varname></term>
                                 <term><varname>MaxLevelKMsg=</varname></term>
                                 <term><varname>MaxLevelConsole=</varname></term>
+                                <term><varname>MaxLevelWall=</varname></term>
 
                                 <listitem><para>Controls the maximum
                                 log level of messages that are stored
-                                on disk, forwarded to syslog, kmsg or
-                                the console (if that is enabled, see
-                                above). As argument, takes one of
+                                on disk, forwarded to syslog, kmsg,
+                                the console or wall (if that is
+                                enabled, see above). As argument,
+                                takes one of
                                 <literal>emerg</literal>,
                                 <literal>alert</literal>,
                                 <literal>crit</literal>,
@@ -436,9 +443,11 @@
                                 written to disk and forwarded to
                                 syslog. Defaults to
                                 <literal>notice</literal> for
-                                <varname>MaxLevelKMsg=</varname> and
+                                <varname>MaxLevelKMsg=</varname>,
                                 <literal>info</literal> for
-                                <varname>MaxLevelConsole=</varname>.</para></listitem>
+                                <varname>MaxLevelConsole=</varname> and
+                                <literal>emerg</literal> for
+                                <varname>MaxLevelWall=</varname>.</para></listitem>
                         </varlistentry>
 
                         <varlistentry>

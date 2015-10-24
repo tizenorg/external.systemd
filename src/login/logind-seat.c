@@ -120,9 +120,9 @@ int seat_save(Seat *s) {
 
                 fprintf(f,
                         "ACTIVE=%s\n"
-                        "ACTIVE_UID=%lu\n",
+                        "ACTIVE_UID="UID_FMT"\n",
                         s->active->id,
-                        (unsigned long) s->active->user->uid);
+                        s->active->user->uid);
         }
 
         if (s->sessions) {
@@ -168,14 +168,12 @@ int seat_load(Seat *s) {
 }
 
 static int vt_allocate(unsigned int vtnr) {
-        _cleanup_free_ char *p = NULL;
+        char p[sizeof("/dev/tty") + DECIMAL_STR_MAX(unsigned int)];
         _cleanup_close_ int fd = -1;
 
         assert(vtnr >= 1);
 
-        if (asprintf(&p, "/dev/tty%u", vtnr) < 0)
-                return -ENOMEM;
-
+        snprintf(p, sizeof(p), "/dev/tty%u", vtnr);
         fd = open_terminal(p, O_RDWR|O_NOCTTY|O_CLOEXEC);
         if (fd < 0)
                 return -errno;
@@ -277,8 +275,13 @@ int seat_switch_to(Seat *s, unsigned int num) {
         if (!num)
                 return -EINVAL;
 
-        if (num >= s->position_count || !s->positions[num])
+        if (num >= s->position_count || !s->positions[num]) {
+                /* allow switching to unused VTs to trigger auto-activate */
+                if (seat_has_vts(s) && num < 64)
+                        return chvt(num);
+
                 return -EINVAL;
+        }
 
         return session_activate(s->positions[num]);
 }
@@ -459,6 +462,7 @@ int seat_stop_sessions(Seat *s, bool force) {
 }
 
 void seat_evict_position(Seat *s, Session *session) {
+        Session *iter;
         unsigned int pos = session->pos;
 
         session->pos = 0;
@@ -466,8 +470,19 @@ void seat_evict_position(Seat *s, Session *session) {
         if (!pos)
                 return;
 
-        if (pos < s->position_count && s->positions[pos] == session)
+        if (pos < s->position_count && s->positions[pos] == session) {
                 s->positions[pos] = NULL;
+
+                /* There might be another session claiming the same
+                 * position (eg., during gdm->session transition), so lets look
+                 * for it and set it on the free slot. */
+                LIST_FOREACH(sessions_by_seat, iter, s->sessions) {
+                        if (iter->pos == pos) {
+                                s->positions[pos] = iter;
+                                break;
+                        }
+                }
+        }
 }
 
 void seat_claim_position(Seat *s, Session *session, unsigned int pos) {

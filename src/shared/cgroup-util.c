@@ -472,9 +472,7 @@ static int join_path(const char *controller, const char *path, const char *suffi
         if (!t)
                 return -ENOMEM;
 
-        path_kill_slashes(t);
-
-        *fs = t;
+        *fs = path_kill_slashes(t);
         return 0;
 }
 
@@ -509,7 +507,7 @@ static int check_hierarchy(const char *p) {
         assert(p);
 
         /* Check if this controller actually really exists */
-        cc = alloca(sizeof("/sys/fs/cgroup/") + strlen(p));
+        cc = alloca(strlen("/sys/fs/cgroup/") + strlen(p) + 1);
         strcpy(stpcpy(cc, "/sys/fs/cgroup/"), p);
         if (access(cc, F_OK) < 0)
                 return -errno;
@@ -643,9 +641,9 @@ int cg_attach(const char *controller, const char *path, pid_t pid) {
         if (pid == 0)
                 pid = getpid();
 
-        snprintf(c, sizeof(c), "%lu\n", (unsigned long) pid);
+        snprintf(c, sizeof(c), PID_FMT"\n", pid);
 
-        return write_string_file(fs, c);
+        return write_string_file_no_create(fs, c);
 }
 
 int cg_attach_fallback(const char *controller, const char *path, pid_t pid) {
@@ -755,9 +753,9 @@ int cg_pid_get_path(const char *controller, pid_t pid, char **path) {
         cs = strlen(controller);
 
         FOREACH_LINE(line, f, return -errno) {
-                char *l, *p, *w, *e;
+                char *l, *p, *e;
                 size_t k;
-                char *state;
+                const char *word, *state;
                 bool found = false;
 
                 truncate_nl(line);
@@ -773,16 +771,16 @@ int cg_pid_get_path(const char *controller, pid_t pid, char **path) {
 
                 *e = 0;
 
-                FOREACH_WORD_SEPARATOR(w, k, l, ",", state) {
+                FOREACH_WORD_SEPARATOR(word, k, l, ",", state) {
 
-                        if (k == cs && memcmp(w, controller, cs) == 0) {
+                        if (k == cs && memcmp(word, controller, cs) == 0) {
                                 found = true;
                                 break;
                         }
 
                         if (k == 5 + cs &&
-                            memcmp(w, "name=", 5) == 0 &&
-                            memcmp(w+5, controller, cs) == 0) {
+                            memcmp(word, "name=", 5) == 0 &&
+                            memcmp(word+5, controller, cs) == 0) {
                                 found = true;
                                 break;
                         }
@@ -819,7 +817,7 @@ int cg_install_release_agent(const char *controller, const char *agent) {
 
         sc = strstrip(contents);
         if (sc[0] == 0) {
-                r = write_string_file(fs, agent);
+                r = write_string_file_no_create(fs, agent);
                 if (r < 0)
                         return r;
         } else if (!streq(sc, agent))
@@ -839,7 +837,7 @@ int cg_install_release_agent(const char *controller, const char *agent) {
 
         sc = strstrip(contents);
         if (streq(sc, "0")) {
-                r = write_string_file(fs, "1");
+                r = write_string_file_no_create(fs, "1");
                 if (r < 0)
                         return r;
 
@@ -860,7 +858,7 @@ int cg_uninstall_release_agent(const char *controller) {
         if (r < 0)
                 return r;
 
-        r = write_string_file(fs, "0");
+        r = write_string_file_no_create(fs, "0");
         if (r < 0)
                 return r;
 
@@ -871,7 +869,7 @@ int cg_uninstall_release_agent(const char *controller) {
         if (r < 0)
                 return r;
 
-        r = write_string_file(fs, "");
+        r = write_string_file_no_create(fs, "");
         if (r < 0)
                 return r;
 
@@ -957,8 +955,7 @@ int cg_split_spec(const char *spec, char **controller, char **path) {
                         if (!t)
                                 return -ENOMEM;
 
-                        path_kill_slashes(t);
-                        *path = t;
+                        *path = path_kill_slashes(t);
                 }
 
                 if (controller)
@@ -1048,8 +1045,7 @@ int cg_mangle_path(const char *path, char **result) {
                 if (!t)
                         return -ENOMEM;
 
-                path_kill_slashes(t);
-                *result = t;
+                *result = path_kill_slashes(t);
                 return 0;
         }
 
@@ -1595,7 +1591,7 @@ int cg_set_attribute(const char *controller, const char *path, const char *attri
         if (r < 0)
                 return r;
 
-        return write_string_file(p, value);
+        return write_string_file_no_create(p, value);
 }
 
 static const char mask_names[] =

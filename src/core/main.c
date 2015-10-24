@@ -35,6 +35,9 @@
 #ifdef HAVE_VALGRIND_VALGRIND_H
 #include <valgrind/valgrind.h>
 #endif
+#ifdef HAVE_SECCOMP
+#include <seccomp.h>
+#endif
 
 #include "sd-daemon.h"
 #include "sd-messages.h"
@@ -47,6 +50,7 @@
 #include "conf-parser.h"
 #include "missing.h"
 #include "label.h"
+#include "pager.h"
 #include "build.h"
 #include "strv.h"
 #include "def.h"
@@ -58,7 +62,7 @@
 #include "capability.h"
 #include "killall.h"
 #include "env-util.h"
-#include "hwclock.h"
+#include "clock-util.h"
 #include "fileio.h"
 #include "dbus-manager.h"
 #include "bus-error.h"
@@ -91,6 +95,7 @@ static int arg_crash_chvt = -1;
 static bool arg_confirm_spawn = false;
 static ShowStatus arg_show_status = _SHOW_STATUS_UNSET;
 static bool arg_switched_root = false;
+static int arg_no_pager = -1;
 static char ***arg_join_controllers = NULL;
 static ExecOutput arg_default_std_output = EXEC_OUTPUT_JOURNAL;
 static ExecOutput arg_default_std_error = EXEC_OUTPUT_INHERIT;
@@ -105,13 +110,25 @@ static char **arg_default_environment = NULL;
 #ifdef CONFIG_TIZEN
 static char **arg_default_extra_dependencies = NULL;
 #endif
-static struct rlimit *arg_default_rlimit[RLIMIT_NLIMITS] = {};
+static struct rlimit *arg_default_rlimit[_RLIMIT_MAX] = {};
 static uint64_t arg_capability_bounding_set_drop = 0;
-static nsec_t arg_timer_slack_nsec = (nsec_t) -1;
+static nsec_t arg_timer_slack_nsec = NSEC_INFINITY;
+static usec_t arg_default_timer_accuracy_usec = 1 * USEC_PER_MINUTE;
 static Set* arg_syscall_archs = NULL;
 static FILE* arg_serialization = NULL;
+static bool arg_default_cpu_accounting = false;
+static bool arg_default_blockio_accounting = false;
+static bool arg_default_memory_accounting = false;
 
 static void nop_handler(int sig) {}
+
+static void pager_open_if_enabled(void) {
+
+        if (arg_no_pager <= 0)
+                return;
+
+        pager_open(false);
+}
 
 noreturn static void crash(int sig) {
 
@@ -214,31 +231,25 @@ static void install_crash_handler(void) {
         sigaction_many(&sa, SIGNALS_CRASH_HANDLER, -1);
 }
 
-static int console_setup(bool do_reset) {
-        int tty_fd, r;
-
-        /* If we are init, we connect stdin/stdout/stderr to /dev/null
-         * and make sure we don't have a controlling tty. */
-
-        release_terminal();
-
-        if (!do_reset)
-                return 0;
+static int console_setup(void) {
+        _cleanup_close_ int tty_fd = -1;
+        int r;
 
         tty_fd = open_terminal("/dev/console", O_WRONLY|O_NOCTTY|O_CLOEXEC);
         if (tty_fd < 0) {
                 log_error("Failed to open /dev/console: %s", strerror(-tty_fd));
-                return -tty_fd;
+                return tty_fd;
         }
 
-        /* We don't want to force text mode.
-         * plymouth may be showing pictures already from initrd. */
+        /* We don't want to force text mode.  plymouth may be showing
+         * pictures already from initrd. */
         r = reset_terminal_fd(tty_fd, false);
-        if (r < 0)
+        if (r < 0) {
                 log_error("Failed to reset /dev/console: %s", strerror(-r));
+                return r;
+        }
 
-        close_nointr_nofail(tty_fd);
-        return r;
+        return 0;
 }
 
 static int set_default_unit(const char *u) {
@@ -256,7 +267,7 @@ static int set_default_unit(const char *u) {
         return 0;
 }
 
-static int parse_proc_cmdline_word(const char *word) {
+static int parse_proc_cmdline_item(const char *key, const char *value) {
 
         static const char * const rlmap[] = {
                 "emergency", SPECIAL_EMERGENCY_TARGET,
@@ -271,162 +282,107 @@ static int parse_proc_cmdline_word(const char *word) {
                 "4",         SPECIAL_RUNLEVEL4_TARGET,
                 "5",         SPECIAL_RUNLEVEL5_TARGET,
         };
+        int r;
 
-        assert(word);
+        assert(key);
 
-        if (startswith(word, "systemd.unit=")) {
+        if (streq(key, "systemd.unit") && value) {
 
                 if (!in_initrd())
-                        return set_default_unit(word + 13);
+                        return set_default_unit(value);
 
-        } else if (startswith(word, "rd.systemd.unit=")) {
+        } else if (streq(key, "rd.systemd.unit") && value) {
 
                 if (in_initrd())
-                        return set_default_unit(word + 16);
+                        return set_default_unit(value);
 
-        } else if (startswith(word, "systemd.log_target=")) {
+        } else if (streq(key, "systemd.dump_core") && value) {
 
-                if (log_set_target_from_string(word + 19) < 0)
-                        log_warning("Failed to parse log target %s. Ignoring.", word + 19);
-
-        } else if (startswith(word, "systemd.log_level=")) {
-
-                if (log_set_max_level_from_string(word + 18) < 0)
-                        log_warning("Failed to parse log level %s. Ignoring.", word + 18);
-
-        } else if (startswith(word, "systemd.log_color=")) {
-
-                if (log_show_color_from_string(word + 18) < 0)
-                        log_warning("Failed to parse log color setting %s. Ignoring.", word + 18);
-
-        } else if (startswith(word, "systemd.log_location=")) {
-
-                if (log_show_location_from_string(word + 21) < 0)
-                        log_warning("Failed to parse log location setting %s. Ignoring.", word + 21);
-
-        } else if (startswith(word, "systemd.dump_core=")) {
-                int r;
-
-                r = parse_boolean(word + 18);
+                r = parse_boolean(value);
                 if (r < 0)
-                        log_warning("Failed to parse dump core switch %s. Ignoring.", word + 18);
+                        log_warning("Failed to parse dump core switch %s. Ignoring.", value);
                 else
                         arg_dump_core = r;
 
-        } else if (startswith(word, "systemd.crash_shell=")) {
-                int r;
+        } else if (streq(key, "systemd.crash_shell") && value) {
 
-                r = parse_boolean(word + 20);
+                r = parse_boolean(value);
                 if (r < 0)
-                        log_warning("Failed to parse crash shell switch %s. Ignoring.", word + 20);
+                        log_warning("Failed to parse crash shell switch %s. Ignoring.", value);
                 else
                         arg_crash_shell = r;
 
-        } else if (startswith(word, "systemd.confirm_spawn=")) {
-                int r;
+        } else if (streq(key, "systemd.crash_chvt") && value) {
 
-                r = parse_boolean(word + 22);
+                if (safe_atoi(value, &r) < 0)
+                        log_warning("Failed to parse crash chvt switch %s. Ignoring.", value);
+                else
+                        arg_crash_chvt = r;
+
+        } else if (streq(key, "systemd.confirm_spawn") && value) {
+
+                r = parse_boolean(value);
                 if (r < 0)
-                        log_warning("Failed to parse confirm spawn switch %s. Ignoring.", word + 22);
+                        log_warning("Failed to parse confirm spawn switch %s. Ignoring.", value);
                 else
                         arg_confirm_spawn = r;
 
-        } else if (startswith(word, "systemd.crash_chvt=")) {
-                int k;
+        } else if (streq(key, "systemd.show_status") && value) {
 
-                if (safe_atoi(word + 19, &k) < 0)
-                        log_warning("Failed to parse crash chvt switch %s. Ignoring.", word + 19);
-                else
-                        arg_crash_chvt = k;
-
-        } else if (startswith(word, "systemd.show_status=")) {
-                int r;
-
-                r = parse_show_status(word + 20, &arg_show_status);
+                r = parse_show_status(value, &arg_show_status);
                 if (r < 0)
-                        log_warning("Failed to parse show status switch %s. Ignoring.", word + 20);
-        } else if (startswith(word, "systemd.default_standard_output=")) {
-                int r;
+                        log_warning("Failed to parse show status switch %s. Ignoring.", value);
 
-                r = exec_output_from_string(word + 32);
+        } else if (streq(key, "systemd.default_standard_output") && value) {
+
+                r = exec_output_from_string(value);
                 if (r < 0)
-                        log_warning("Failed to parse default standard output switch %s. Ignoring.", word + 32);
+                        log_warning("Failed to parse default standard output switch %s. Ignoring.", value);
                 else
                         arg_default_std_output = r;
-        } else if (startswith(word, "systemd.default_standard_error=")) {
-                int r;
 
-                r = exec_output_from_string(word + 31);
+        } else if (streq(key, "systemd.default_standard_error") && value) {
+
+                r = exec_output_from_string(value);
                 if (r < 0)
-                        log_warning("Failed to parse default standard error switch %s. Ignoring.", word + 31);
+                        log_warning("Failed to parse default standard error switch %s. Ignoring.", value);
                 else
                         arg_default_std_error = r;
-        } else if (startswith(word, "systemd.setenv=")) {
-                const char *cenv = word + 15;
 
-                if (env_assignment_is_valid(cenv)) {
+        } else if (streq(key, "systemd.setenv") && value) {
+
+                if (env_assignment_is_valid(value)) {
                         char **env;
 
-                        env = strv_env_set(arg_default_environment, cenv);
+                        env = strv_env_set(arg_default_environment, value);
                         if (env)
                                 arg_default_environment = env;
                         else
-                                log_warning("Setting environment variable '%s' failed, ignoring: %s",
-                                            cenv, strerror(ENOMEM));
+                                log_warning("Setting environment variable '%s' failed, ignoring: %s", value, strerror(ENOMEM));
                 } else
-                        log_warning("Environment variable name '%s' is not valid. Ignoring.", cenv);
+                        log_warning("Environment variable name '%s' is not valid. Ignoring.", value);
 
-        } else if (startswith(word, "systemd.") ||
-                   (in_initrd() && startswith(word, "rd.systemd."))) {
+        } else if (streq(key, "quiet") && !value) {
 
-                const char *c;
+                log_set_max_level(LOG_NOTICE);
 
-                /* Ignore systemd.journald.xyz and friends */
-                c = word;
-                if (startswith(c, "rd."))
-                        c += 3;
-                if (startswith(c, "systemd."))
-                        c += 8;
-                if (c[strcspn(c, ".=")] != '.')  {
-
-                        log_warning("Unknown kernel switch %s. Ignoring.", word);
-
-                        log_info("Supported kernel switches:\n"
-                                 "systemd.unit=UNIT                        Default unit to start\n"
-                                 "rd.systemd.unit=UNIT                     Default unit to start when run in initrd\n"
-                                 "systemd.dump_core=0|1                    Dump core on crash\n"
-                                 "systemd.crash_shell=0|1                  Run shell on crash\n"
-                                 "systemd.crash_chvt=N                     Change to VT #N on crash\n"
-                                 "systemd.confirm_spawn=0|1                Confirm every process spawn\n"
-                                 "systemd.show_status=0|1|auto             Show status updates on the console during bootup\n"
-                                 "systemd.log_target=console|kmsg|journal|journal-or-kmsg|syslog|syslog-or-kmsg|null\n"
-                                 "                                         Log target\n"
-                                 "systemd.log_level=LEVEL                  Log level\n"
-                                 "systemd.log_color=0|1                    Highlight important log messages\n"
-                                 "systemd.log_location=0|1                 Include code location in log messages\n"
-                                 "systemd.default_standard_output=null|tty|syslog|syslog+console|kmsg|kmsg+console|journal|journal+console\n"
-                                 "                                         Set default log output for services\n"
-                                 "systemd.default_standard_error=null|tty|syslog|syslog+console|kmsg|kmsg+console|journal|journal+console\n"
-                                 "                                         Set default log error output for services\n"
-                                 "systemd.setenv=ASSIGNMENT                Set an environment variable for all spawned processes\n");
-                }
-
-        } else if (streq(word, "quiet")) {
                 if (arg_show_status == _SHOW_STATUS_UNSET)
                         arg_show_status = SHOW_STATUS_AUTO;
-        } else if (streq(word, "debug")) {
-                /* Log to kmsg, the journal socket will fill up before the
-                 * journal is started and tools running during that time
-                 * will block with every log message for for 60 seconds,
-                 * before they give up. */
-                log_set_max_level(LOG_DEBUG);
-                log_set_target(detect_container(NULL) > 0 ? LOG_TARGET_CONSOLE : LOG_TARGET_KMSG);
-        } else if (!in_initrd()) {
+
+        } else if (streq(key, "debug") && !value) {
+
+                /* Note that log_parse_environment() handles 'debug'
+                 * too, and sets the log level to LOG_DEBUG. */
+
+                if (detect_container(NULL) > 0)
+                        log_set_target(LOG_TARGET_CONSOLE);
+
+        } else if (!in_initrd() && !value) {
                 unsigned i;
 
                 /* SysV compatibility */
                 for (i = 0; i < ELEMENTSOF(rlmap); i += 2)
-                        if (streq(word, rlmap[i]))
+                        if (streq(key, rlmap[i]))
                                 return set_default_unit(rlmap[i+1]);
         }
 
@@ -465,20 +421,20 @@ DEFINE_SETTER(config_parse_target, log_set_target_from_string, "target")
 DEFINE_SETTER(config_parse_color, log_show_color_from_string, "color" )
 DEFINE_SETTER(config_parse_location, log_show_location_from_string, "location")
 
-static int config_parse_cpu_affinity2(const char *unit,
-                                      const char *filename,
-                                      unsigned line,
-                                      const char *section,
-                                      unsigned section_line,
-                                      const char *lvalue,
-                                      int ltype,
-                                      const char *rvalue,
-                                      void *data,
-                                      void *userdata) {
+static int config_parse_cpu_affinity2(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
 
-        char *w;
+        const char *word, *state;
         size_t l;
-        char *state;
         cpu_set_t *c = NULL;
         unsigned ncpus = 0;
 
@@ -486,12 +442,12 @@ static int config_parse_cpu_affinity2(const char *unit,
         assert(lvalue);
         assert(rvalue);
 
-        FOREACH_WORD_QUOTED(w, l, rvalue, state) {
+        FOREACH_WORD_QUOTED(word, l, rvalue, state) {
                 char *t;
                 int r;
                 unsigned cpu;
 
-                if (!(t = strndup(w, l)))
+                if (!(t = strndup(word, l)))
                         return log_oom();
 
                 r = safe_atou(t, &cpu);
@@ -510,12 +466,45 @@ static int config_parse_cpu_affinity2(const char *unit,
 
                 CPU_SET_S(cpu, CPU_ALLOC_SIZE(ncpus), c);
         }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
 
         if (c) {
                 if (sched_setaffinity(0, CPU_ALLOC_SIZE(ncpus), c) < 0)
                         log_warning_unit(unit, "Failed to set CPU affinity: %m");
 
                 CPU_FREE(c);
+        }
+
+        return 0;
+}
+
+static int config_parse_show_status(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        int k;
+        ShowStatus *b = data;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        k = parse_show_status(rvalue, b);
+        if (k < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, -k,
+                           "Failed to parse show status setting, ignoring: %s", rvalue);
+                return 0;
         }
 
         return 0;
@@ -550,7 +539,7 @@ static int config_parse_join_controllers(const char *unit,
                                          void *userdata) {
 
         unsigned n = 0;
-        char *state, *w;
+        const char *word, *state;
         size_t length;
 
         assert(filename);
@@ -559,10 +548,10 @@ static int config_parse_join_controllers(const char *unit,
 
         free_join_controllers();
 
-        FOREACH_WORD_QUOTED(w, length, rvalue, state) {
+        FOREACH_WORD_QUOTED(word, length, rvalue, state) {
                 char *s, **l;
 
-                s = strndup(w, length);
+                s = strndup(word, length);
                 if (!s)
                         return log_oom();
 
@@ -628,6 +617,9 @@ static int config_parse_join_controllers(const char *unit,
                         arg_join_controllers = t;
                 }
         }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
 
         return 0;
 }
@@ -652,6 +644,7 @@ static int parse_config_file(void) {
                 { "Manager", "SystemCallArchitectures",   config_parse_syscall_archs,    0, &arg_syscall_archs                     },
 #endif
                 { "Manager", "TimerSlackNSec",            config_parse_nsec,             0, &arg_timer_slack_nsec                  },
+                { "Manager", "DefaultTimerAccuracySec",   config_parse_sec,              0, &arg_default_timer_accuracy_usec       },
                 { "Manager", "DefaultStandardOutput",     config_parse_output,           0, &arg_default_std_output                },
                 { "Manager", "DefaultStandardError",      config_parse_output,           0, &arg_default_std_error                 },
                 { "Manager", "DefaultTimeoutStartSec",    config_parse_sec,              0, &arg_default_timeout_start_usec        },
@@ -679,26 +672,19 @@ static int parse_config_file(void) {
                 { "Manager", "DefaultLimitNICE",          config_parse_limit,            0, &arg_default_rlimit[RLIMIT_NICE]       },
                 { "Manager", "DefaultLimitRTPRIO",        config_parse_limit,            0, &arg_default_rlimit[RLIMIT_RTPRIO]     },
                 { "Manager", "DefaultLimitRTTIME",        config_parse_limit,            0, &arg_default_rlimit[RLIMIT_RTTIME]     },
+                { "Manager", "DefaultCPUAccounting",      config_parse_bool,             0, &arg_default_cpu_accounting            },
+                { "Manager", "DefaultBlockIOAccounting",  config_parse_bool,             0, &arg_default_blockio_accounting        },
+                { "Manager", "DefaultMemoryAccounting",   config_parse_bool,             0, &arg_default_memory_accounting         },
                 {}
         };
 
-        _cleanup_fclose_ FILE *f;
         const char *fn;
-        int r;
 
         fn = arg_running_as == SYSTEMD_SYSTEM ? PKGSYSCONFDIR "/system.conf" : PKGSYSCONFDIR "/user.conf";
-        f = fopen(fn, "re");
-        if (!f) {
-                if (errno == ENOENT)
-                        return 0;
-
-                log_warning("Failed to open configuration file '%s': %m", fn);
-                return 0;
-        }
-
-        r = config_parse(NULL, fn, f, "Manager\0", config_item_table_lookup, (void*) items, false, false, NULL);
-        if (r < 0)
-                log_warning("Failed to parse configuration file: %s", strerror(-r));
+        config_parse(NULL, fn, NULL,
+                     "Manager\0",
+                     config_item_table_lookup, items,
+                     false, false, true, NULL);
 
         return 0;
 }
@@ -714,6 +700,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_SYSTEM,
                 ARG_USER,
                 ARG_TEST,
+                ARG_NO_PAGER,
                 ARG_VERSION,
                 ARG_DUMP_CONFIGURATION_ITEMS,
                 ARG_DUMP_CORE,
@@ -735,6 +722,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "system",                   no_argument,       NULL, ARG_SYSTEM                   },
                 { "user",                     no_argument,       NULL, ARG_USER                     },
                 { "test",                     no_argument,       NULL, ARG_TEST                     },
+                { "no-pager",                 no_argument,       NULL, ARG_NO_PAGER                 },
                 { "help",                     no_argument,       NULL, 'h'                          },
                 { "version",                  no_argument,       NULL, ARG_VERSION                  },
                 { "dump-configuration-items", no_argument,       NULL, ARG_DUMP_CONFIGURATION_ITEMS },
@@ -842,6 +830,12 @@ static int parse_argv(int argc, char *argv[]) {
 
                 case ARG_TEST:
                         arg_action = ACTION_TEST;
+                        if (arg_no_pager < 0)
+                                arg_no_pager = true;
+                        break;
+
+                case ARG_NO_PAGER:
+                        arg_no_pager = true;
                         break;
 
                 case ARG_VERSION:
@@ -922,6 +916,8 @@ static int parse_argv(int argc, char *argv[]) {
 
                 case 'h':
                         arg_action = ACTION_HELP;
+                        if (arg_no_pager < 0)
+                                arg_no_pager = true;
                         break;
 
                 case 'D':
@@ -937,13 +933,13 @@ static int parse_argv(int argc, char *argv[]) {
                          * parse_proc_cmdline_word() or ignore. */
 
                 case '?':
-                default:
-                        if (getpid() != 1) {
-                                log_error("Unknown option code %c", c);
+                        if (getpid() != 1)
                                 return -EINVAL;
-                        }
+                        else
+                                return 0;
 
-                        break;
+                default:
+                        assert_not_reached("Unhandled option code.");
                 }
 
         if (optind < argc && getpid() != 1) {
@@ -952,26 +948,6 @@ static int parse_argv(int argc, char *argv[]) {
 
                 log_error("Excess arguments.");
                 return -EINVAL;
-        }
-
-        if (detect_container(NULL) > 0) {
-                char **a;
-
-                /* All /proc/cmdline arguments the kernel didn't
-                 * understand it passed to us. We're not really
-                 * interested in that usually since /proc/cmdline is
-                 * more interesting and complete. With one exception:
-                 * if we are run in a container /proc/cmdline is not
-                 * relevant for the container, hence we rely on argv[]
-                 * instead. */
-
-                for (a = argv; a < argv + argc; a++) {
-                        r = parse_proc_cmdline_word(*a);
-                        if (r < 0) {
-                                log_error("Failed on cmdline argument %s: %s", *a, strerror(-r));
-                                return r;
-                        }
-                }
         }
 
         return 0;
@@ -983,6 +959,7 @@ static int help(void) {
                "Starts up and maintains the system or user services.\n\n"
                "  -h --help                      Show this help\n"
                "     --test                      Determine startup sequence, dump it and exit\n"
+               "     --no-pager                  Do not pipe output into a pager\n"
                "     --dump-configuration-items  Dump understood unit configuration items\n"
                "     --unit=UNIT                 Set default unit\n"
                "     --system                    Run a system instance, even if PID != 1\n"
@@ -991,7 +968,7 @@ static int help(void) {
                "     --crash-shell[=0|1]         Run shell on crash\n"
                "     --confirm-spawn[=0|1]       Ask for confirmation when spawning processes\n"
                "     --show-status[=0|1]         Show status updates on the console during bootup\n"
-               "     --log-target=TARGET         Set log target (console, journal, syslog, kmsg, journal-or-kmsg, syslog-or-kmsg, null)\n"
+               "     --log-target=TARGET         Set log target (console, journal, kmsg, journal-or-kmsg, null)\n"
                "     --log-level=LEVEL           Set log level (debug, info, notice, warning, err, crit, alert, emerg)\n"
                "     --log-color[=0|1]           Highlight important log messages\n"
                "     --log-location[=0|1]        Include code location in log messages\n"
@@ -1109,19 +1086,25 @@ static int bump_rlimit_nofile(struct rlimit *saved_rlimit) {
 }
 
 static void test_mtab(void) {
-        char *p;
 
-        /* Check that /etc/mtab is a symlink */
+        static const char ok[] =
+                "/proc/self/mounts\0"
+                "/proc/mounts\0"
+                "../proc/self/mounts\0"
+                "../proc/mounts\0";
 
-        if (readlink_malloc("/etc/mtab", &p) >= 0) {
-                bool b;
+        _cleanup_free_ char *p = NULL;
+        int r;
 
-                b = streq(p, "/proc/self/mounts") || streq(p, "/proc/mounts");
-                free(p);
+        /* Check that /etc/mtab is a symlink to the right place or
+         * non-existing. But certainly not a file, or a symlink to
+         * some weird place... */
 
-                if (b)
-                        return;
-        }
+        r = readlink_malloc("/etc/mtab", &p);
+        if (r == -ENOENT)
+                return;
+        if (r >= 0 && nulstr_contains(ok, p))
+                return;
 
         log_warning("/etc/mtab is not a symlink or not pointing to /proc/self/mounts. "
                     "This is not supported anymore. "
@@ -1138,21 +1121,6 @@ static void test_usr(void) {
         log_warning("/usr appears to be on its own filesytem and is not already mounted. This is not a supported setup. "
                     "Some things will probably break (sometimes even silently) in mysterious ways. "
                     "Consult http://freedesktop.org/wiki/Software/systemd/separate-usr-is-broken for more information.");
-}
-
-static void test_cgroups(void) {
-
-        if (access("/proc/cgroups", F_OK) >= 0)
-                return;
-
-        log_warning("CONFIG_CGROUPS was not set when your kernel was compiled. "
-                    "Systems without control groups are not supported. "
-                    "We will now sleep for 10s, and then continue boot-up. "
-                    "Expect breakage and please do not file bugs. "
-                    "Instead fix your kernel and enable CONFIG_CGROUPS. "
-                    "Consult http://0pointer.de/blog/projects/cgroups-vs-cgroups.html for more information.");
-
-        sleep(10);
 }
 
 static int initialize_join_controllers(void) {
@@ -1224,14 +1192,30 @@ static int status_welcome(void) {
                            "PRETTY_NAME", &pretty_name,
                            "ANSI_COLOR", &ansi_color,
                            NULL);
+        if (r == -ENOENT) {
+                r = parse_env_file("/usr/lib/os-release", NEWLINE,
+                                   "PRETTY_NAME", &pretty_name,
+                                   "ANSI_COLOR", &ansi_color,
+                                   NULL);
+        }
 
         if (r < 0 && r != -ENOENT)
-                log_warning("Failed to read /etc/os-release: %s", strerror(-r));
+                log_warning("Failed to read os-release file: %s", strerror(-r));
 
         return status_printf(NULL, false, false,
                              "\nWelcome to \x1B[%sm%s\x1B[0m!\n",
                              isempty(ansi_color) ? "1" : ansi_color,
                              isempty(pretty_name) ? "Linux" : pretty_name);
+}
+
+static int write_container_id(void) {
+        const char *c;
+
+        c = getenv("container");
+        if (isempty(c))
+                return 0;
+
+        return write_string_file("/run/systemd/container", c);
 }
 
 int main(int argc, char *argv[]) {
@@ -1253,6 +1237,7 @@ int main(int argc, char *argv[]) {
         bool loaded_policy = false;
         bool arm_reboot_watchdog = false;
         bool queue_default_job = false;
+        bool empty_etc = false;
         char *switch_root_dir = NULL, *switch_root_init = NULL;
         static struct rlimit saved_rlimit_nofile = { 0, 0 };
 
@@ -1293,6 +1278,7 @@ int main(int argc, char *argv[]) {
         saved_argc = argc;
 
         log_show_color(isatty(STDERR_FILENO) > 0);
+        log_set_upgrade_syslog_to_journal(true);
 
         /* Disable the umask logic */
         if (getpid() == 1)
@@ -1311,24 +1297,29 @@ int main(int argc, char *argv[]) {
 
                 if (!skip_setup) {
                         mount_setup_early();
+#ifdef CONFIG_TIZEN_WIP
+                        if (access("/opt/.initrd-done", F_OK) < 0 &&
+                            access("/usr/bin/tizen-boot.sh", X_OK) == 0) {
+                                /* If systemd is running as PID 1 and
+                                 * booted without initrd, we need
+                                 * extra pre-mounts to use passwd and
+                                 * group. */
+                                log_info("No initrd. invoke tizen-boot.sh");
+                                int sys_ret = system("/usr/bin/tizen-boot.sh");
+                                if (WIFSIGNALED(sys_ret) &&
+                                    (WTERMSIG(sys_ret) == SIGINT || WTERMSIG(sys_ret) == SIGQUIT)) {
+                                        log_error("Failed to execute tizen-boot");
+                                        goto finish;
+                                }
+                        }
+#endif
                         dual_timestamp_get(&security_start_timestamp);
                         if (selinux_setup(&loaded_policy) < 0)
                                 goto finish;
                         if (ima_setup() < 0)
                                 goto finish;
-#ifndef CONFIG_TIZEN_WIP
-                        /* FIXME */
-                        /* smack_setup is temporary blocked. Now Tizen
-                         * is using newest feature of smack. Invalid
-                         * argument will occur in fflush by dual
-                         * permission field. Until smack_setup cover
-                         * the new feature it will be blocked. When
-                         * the smack_setup can cover the dual
-                         * permission field then smack.service should
-                         * be removed. */
                         if (smack_setup(&loaded_policy) < 0)
                                 goto finish;
-#endif
                         dual_timestamp_get(&security_finish_timestamp);
                 }
 
@@ -1336,30 +1327,37 @@ int main(int argc, char *argv[]) {
                         goto finish;
 
                 if (!skip_setup) {
-                        if (hwclock_is_localtime() > 0) {
+                        if (clock_is_localtime() > 0) {
                                 int min;
 
-                                /* The first-time call to settimeofday() does a time warp in the kernel */
-                                r = hwclock_set_timezone(&min);
+                                /*
+                                 * The very first call of settimeofday() also does a time warp in the kernel.
+                                 *
+                                 * In the rtc-in-local time mode, we set the kernel's timezone, and rely on
+                                 * external tools to take care of maintaining the RTC and do all adjustments.
+                                 * This matches the behavior of Windows, which leaves the RTC alone if the
+                                 * registry tells that the RTC runs in UTC.
+                                 */
+                                r = clock_set_timezone(&min);
                                 if (r < 0)
                                         log_error("Failed to apply local time delta, ignoring: %s", strerror(-r));
                                 else
                                         log_info("RTC configured in localtime, applying delta of %i minutes to system time.", min);
                         } else if (!in_initrd()) {
                                 /*
-                                 * Do dummy first-time call to seal the kernel's time warp magic
+                                 * Do a dummy very first call to seal the kernel's time warp magic.
                                  *
                                  * Do not call this this from inside the initrd. The initrd might not
                                  * carry /etc/adjtime with LOCAL, but the real system could be set up
                                  * that way. In such case, we need to delay the time-warp or the sealing
                                  * until we reach the real system.
+                                 *
+                                 * Do no set the kernel's timezone. The concept of local time cannot
+                                 * be supported reliably, the time will jump or be incorrect at every daylight
+                                 * saving time change. All kernel local time concepts will be treated
+                                 * as UTC that way.
                                  */
-                                hwclock_reset_timezone();
-
-                                /* Tell the kernel our timezone */
-                                r = hwclock_set_timezone(NULL);
-                                if (r < 0)
-                                        log_error("Failed to set the kernel's timezone, ignoring: %s", strerror(-r));
+                                clock_reset_timewarp();
                         }
                 }
 
@@ -1426,9 +1424,11 @@ int main(int argc, char *argv[]) {
                 goto finish;
 
         if (arg_running_as == SYSTEMD_SYSTEM)
-                if (parse_proc_cmdline(parse_proc_cmdline_word) < 0)
+                if (parse_proc_cmdline(parse_proc_cmdline_item) < 0)
                         goto finish;
 
+        /* Note that this also parses bits from the kernel command
+         * line, including "debug". */
         log_parse_environment();
 
         if (parse_argv(argc, argv) < 0)
@@ -1453,6 +1453,11 @@ int main(int argc, char *argv[]) {
                 log_error("Cannot be run in a chroot() environment.");
                 goto finish;
         }
+
+        if (arg_action == ACTION_TEST)
+                skip_setup = true;
+
+        pager_open_if_enabled();
 
         if (arg_action == ACTION_HELP) {
                 retval = help();
@@ -1500,8 +1505,16 @@ int main(int argc, char *argv[]) {
 
         /* Reset the console, but only if this is really init and we
          * are freshly booted */
-        if (arg_running_as == SYSTEMD_SYSTEM && arg_action == ACTION_RUN)
-                console_setup(getpid() == 1 && !skip_setup);
+        if (arg_running_as == SYSTEMD_SYSTEM && arg_action == ACTION_RUN) {
+
+                /* If we are init, we connect stdin/stdout/stderr to
+                 * /dev/null and make sure we don't have a controlling
+                 * tty. */
+                release_terminal();
+
+                if (getpid() == 1 && !skip_setup)
+                        console_setup();
+        }
 
         /* Open the logging devices, if possible and necessary */
         log_open();
@@ -1522,21 +1535,37 @@ int main(int argc, char *argv[]) {
         if (arg_running_as == SYSTEMD_SYSTEM) {
                 const char *virtualization = NULL;
 
-                log_info(PACKAGE_STRING " running in system mode. (" SYSTEMD_FEATURES ")");
+                log_info(PACKAGE_STRING " running in %ssystem mode. (" SYSTEMD_FEATURES ")",
+                         arg_action == ACTION_TEST ? "test " : "" );
 
                 detect_virtualization(&virtualization);
                 if (virtualization)
                         log_info("Detected virtualization '%s'.", virtualization);
+
+                write_container_id();
 
                 log_info("Detected architecture '%s'.", architecture_to_string(uname_architecture()));
 
                 if (in_initrd())
                         log_info("Running in initial RAM disk.");
 
+                /* Let's check whether /etc is already populated. We
+                 * don't actually really check for that, but use
+                 * /etc/machine-id as flag file. This allows container
+                 * managers and installers to provision a couple of
+                 * files already. If the container manager wants to
+                 * provision the machine ID itself it should pass
+                 * $container_uuid to PID 1.*/
+
+                empty_etc = access("/etc/machine-id", F_OK) < 0;
+                if (empty_etc)
+                        log_info("Running with unpopulated /etc.");
         } else {
-                _cleanup_free_ char *t = uid_to_name(getuid());
-                log_debug(PACKAGE_STRING " running in user mode for user "PID_FMT"/%s. (" SYSTEMD_FEATURES ")",
-                          getuid(), t);
+                _cleanup_free_ char *t;
+
+                t = uid_to_name(getuid());
+                log_debug(PACKAGE_STRING " running in %suser mode for user "UID_FMT"/%s. (" SYSTEMD_FEATURES ")",
+                          arg_action == ACTION_TEST ? " test" : "", getuid(), t);
         }
 
         if (arg_running_as == SYSTEMD_SYSTEM && !skip_setup) {
@@ -1544,22 +1573,20 @@ int main(int argc, char *argv[]) {
                         status_welcome();
 
 #ifdef HAVE_KMOD
-                if (detect_container(NULL) <= 0)
-                        kmod_setup();
+                kmod_setup();
 #endif
                 hostname_setup();
-                machine_id_setup();
+                machine_id_setup(NULL);
                 loopback_setup();
 
                 test_mtab();
                 test_usr();
-                test_cgroups();
         }
 
         if (arg_running_as == SYSTEMD_SYSTEM && arg_runtime_watchdog > 0)
                 watchdog_set_timeout(&arg_runtime_watchdog);
 
-        if (arg_timer_slack_nsec != (nsec_t) -1)
+        if (arg_timer_slack_nsec != NSEC_INFINITY)
                 if (prctl(PR_SET_TIMERSLACK, arg_timer_slack_nsec) < 0)
                         log_error("Failed to adjust timer slack: %m");
 
@@ -1591,16 +1618,26 @@ int main(int argc, char *argv[]) {
                 }
         }
 
-        if (arg_running_as == SYSTEMD_SYSTEM)
+        if (arg_running_as == SYSTEMD_SYSTEM) {
                 bump_rlimit_nofile(&saved_rlimit_nofile);
 
-        r = manager_new(arg_running_as, &m);
+                if (empty_etc) {
+                        r = unit_file_preset_all(UNIT_FILE_SYSTEM, false, NULL, UNIT_FILE_PRESET_FULL, false, NULL, 0);
+                        if (r < 0)
+                                log_warning("Failed to populate /etc with preset unit settings, ignoring: %s", strerror(-r));
+                        else
+                                log_info("Populated /etc with preset unit settings.");
+                }
+        }
+
+        r = manager_new(arg_running_as, arg_action == ACTION_TEST, &m);
         if (r < 0) {
                 log_error("Failed to allocate manager object: %s", strerror(-r));
                 goto finish;
         }
 
         m->confirm_spawn = arg_confirm_spawn;
+        m->default_timer_accuracy_usec = arg_default_timer_accuracy_usec;
         m->default_std_output = arg_default_std_output;
         m->default_std_error = arg_default_std_error;
         m->default_restart_usec = arg_default_restart_usec;
@@ -1608,6 +1645,9 @@ int main(int argc, char *argv[]) {
         m->default_timeout_stop_usec = arg_default_timeout_stop_usec;
         m->default_start_limit_interval = arg_default_start_limit_interval;
         m->default_start_limit_burst = arg_default_start_limit_burst;
+        m->default_cpu_accounting = arg_default_cpu_accounting;
+        m->default_blockio_accounting = arg_default_blockio_accounting;
+        m->default_memory_accounting = arg_default_memory_accounting;
         m->runtime_watchdog = arg_runtime_watchdog;
         m->shutdown_watchdog = arg_shutdown_watchdog;
         m->userspace_timestamp = userspace_timestamp;
@@ -1619,10 +1659,10 @@ int main(int argc, char *argv[]) {
         manager_set_default_rlimits(m, arg_default_rlimit);
         manager_environment_add(m, NULL, arg_default_environment);
 #ifdef CONFIG_TIZEN
-        if (arg_running_as == SYSTEMD_SYSTEM && arg_default_extra_dependencies)
-                manager_set_default_extra_dependencies(m, arg_default_extra_dependencies);
+        manager_set_default_extra_dependencies(m, arg_default_extra_dependencies);
 #endif
         manager_set_show_status(m, arg_show_status);
+        manager_set_first_boot(m, empty_etc);
 
         /* Remember whether we should queue the default job */
         queue_default_job = !arg_serialization || arg_switched_root;
@@ -1778,6 +1818,8 @@ int main(int argc, char *argv[]) {
         }
 
 finish:
+        pager_close();
+
         if (m) {
                 manager_free(m);
                 m = NULL;
@@ -1804,6 +1846,7 @@ finish:
         if (reexecute) {
                 const char **args;
                 unsigned i, args_size;
+                sigset_t ss;
 
                 /* Close and disarm the watchdog, so that the new
                  * instance can reinitialize it, but doesn't get
@@ -1887,6 +1930,13 @@ finish:
                 args[i++] = NULL;
                 assert(i <= args_size);
 
+                /* reenable any blocked signals, especially important
+                 * if we switch from initial ramdisk to init=... */
+                reset_all_signal_handlers();
+
+                assert_se(sigemptyset(&ss) == 0);
+                assert_se(sigprocmask(SIG_SETMASK, &ss, NULL) == 0);
+
                 if (switch_root_init) {
                         args[0] = switch_root_init;
                         execv(args[0], (char* const*) args);
@@ -1961,7 +2011,7 @@ finish:
                 if (log_get_show_location())
                         command_line[pos++] = "--log-location";
 
-                assert(pos + 1 < ELEMENTSOF(command_line));
+                assert(pos < ELEMENTSOF(command_line));
 
                 if (arm_reboot_watchdog && arg_shutdown_watchdog > 0) {
                         char *e;

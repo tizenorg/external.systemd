@@ -35,7 +35,7 @@
 #include "util.h"
 #include "spawn-polkit-agent.h"
 #include "build.h"
-#include "hwclock.h"
+#include "clock-util.h"
 #include "strv.h"
 #include "sd-id128.h"
 #include "virt.h"
@@ -67,34 +67,45 @@ typedef struct StatusInfo {
         char *pretty_hostname;
         char *icon_name;
         char *chassis;
+        char *deployment;
+        char *location;
+        char *kernel_name;
+        char *kernel_release;
+        char *os_pretty_name;
+        char *os_cpe_name;
+        char *virtualization;
+        char *architecture;
 } StatusInfo;
 
 static void print_status_info(StatusInfo *i) {
         sd_id128_t mid = {}, bid = {};
         int r;
-        const char *id = NULL;
-        _cleanup_free_ char *pretty_name = NULL, *cpe_name = NULL;
-        struct utsname u;
 
         assert(i);
 
-        printf("   Static hostname: %s\n",
-               strna(i->static_hostname));
+        printf("   Static hostname: %s\n", strna(i->static_hostname));
 
         if (!isempty(i->pretty_hostname) &&
             !streq_ptr(i->pretty_hostname, i->static_hostname))
-                printf("   Pretty hostname: %s\n",
-                       strna(i->pretty_hostname));
+                printf("   Pretty hostname: %s\n", i->pretty_hostname);
 
         if (!isempty(i->hostname) &&
             !streq_ptr(i->hostname, i->static_hostname))
-                printf("Transient hostname: %s\n",
-                       strna(i->hostname));
+                printf("Transient hostname: %s\n", i->hostname);
 
-        printf("         Icon name: %s\n"
-               "           Chassis: %s\n",
-               strna(i->icon_name),
-               strna(i->chassis));
+        if (!isempty(i->icon_name))
+                printf("         Icon name: %s\n",
+                       strna(i->icon_name));
+
+        if (!isempty(i->chassis))
+                printf("           Chassis: %s\n",
+                       strna(i->chassis));
+
+        if (!isempty(i->deployment))
+                printf("        Deployment: %s\n", i->deployment);
+
+        if (!isempty(i->location))
+                printf("          Location: %s\n", i->location);
 
         r = sd_id128_get_machine(&mid);
         if (r >= 0)
@@ -104,27 +115,20 @@ static void print_status_info(StatusInfo *i) {
         if (r >= 0)
                 printf("           Boot ID: " SD_ID128_FORMAT_STR "\n", SD_ID128_FORMAT_VAL(bid));
 
-        if (detect_virtualization(&id) > 0)
-                printf("    Virtualization: %s\n", id);
+        if (!isempty(i->virtualization))
+                printf("    Virtualization: %s\n", i->virtualization);
 
-        r = parse_env_file("/etc/os-release", NEWLINE,
-                           "PRETTY_NAME", &pretty_name,
-                           "CPE_NAME", &cpe_name,
-                           NULL);
-        if (r < 0)
-                log_warning("Failed to read /etc/os-release: %s", strerror(-r));
+        if (!isempty(i->os_pretty_name))
+                printf("  Operating System: %s\n", i->os_pretty_name);
 
-        if (!isempty(pretty_name))
-                printf("  Operating System: %s\n", pretty_name);
+        if (!isempty(i->os_cpe_name))
+                printf("       CPE OS Name: %s\n", i->os_cpe_name);
 
-        if (!isempty(cpe_name))
-                printf("       CPE OS Name: %s\n", cpe_name);
+        if (!isempty(i->kernel_name) && !isempty(i->kernel_release))
+                printf("            Kernel: %s %s\n", i->kernel_name, i->kernel_release);
 
-        assert_se(uname(&u) >= 0);
-        printf("            Kernel: %s %s\n"
-               "      Architecture: %s\n",
-               u.sysname, u.release,
-               architecture_to_string(uname_architecture()));
+        if (!isempty(i->architecture))
+                printf("      Architecture: %s\n", i->architecture);
 
 }
 
@@ -157,23 +161,43 @@ static int show_one_name(sd_bus *bus, const char* attr) {
 
 static int show_all_names(sd_bus *bus) {
         StatusInfo info = {};
-        static const struct bus_properties_map map[]  = {
-                { "Hostname",       "s", NULL, offsetof(StatusInfo, hostname) },
-                { "StaticHostname", "s", NULL, offsetof(StatusInfo, static_hostname) },
-                { "PrettyHostname", "s", NULL, offsetof(StatusInfo, pretty_hostname) },
-                { "IconName",       "s", NULL, offsetof(StatusInfo, icon_name) },
-                { "Chassis",        "s", NULL, offsetof(StatusInfo, chassis) },
+
+        static const struct bus_properties_map hostname_map[]  = {
+                { "Hostname",                  "s", NULL, offsetof(StatusInfo, hostname)        },
+                { "StaticHostname",            "s", NULL, offsetof(StatusInfo, static_hostname) },
+                { "PrettyHostname",            "s", NULL, offsetof(StatusInfo, pretty_hostname) },
+                { "IconName",                  "s", NULL, offsetof(StatusInfo, icon_name)       },
+                { "Chassis",                   "s", NULL, offsetof(StatusInfo, chassis)         },
+                { "Deployment",                "s", NULL, offsetof(StatusInfo, deployment)      },
+                { "Location",                  "s", NULL, offsetof(StatusInfo, location)        },
+                { "KernelName",                "s", NULL, offsetof(StatusInfo, kernel_name)     },
+                { "KernelRelease",             "s", NULL, offsetof(StatusInfo, kernel_release)  },
+                { "OperatingSystemPrettyName", "s", NULL, offsetof(StatusInfo, os_pretty_name)  },
+                { "OperatingSystemCPEName",    "s", NULL, offsetof(StatusInfo, os_cpe_name)     },
                 {}
         };
+
+        static const struct bus_properties_map manager_map[] = {
+                { "Virtualization",            "s", NULL, offsetof(StatusInfo, virtualization)  },
+                { "Architecture",              "s", NULL, offsetof(StatusInfo, architecture)    },
+                {}
+        };
+
         int r;
 
         r = bus_map_all_properties(bus,
                                    "org.freedesktop.hostname1",
                                    "/org/freedesktop/hostname1",
-                                   map,
+                                   hostname_map,
                                    &info);
         if (r < 0)
                 goto fail;
+
+        bus_map_all_properties(bus,
+                               "org.freedesktop.systemd1",
+                               "/org/freedesktop/systemd1",
+                               manager_map,
+                               &info);
 
         print_status_info(&info);
 
@@ -183,7 +207,16 @@ fail:
         free(info.pretty_hostname);
         free(info.icon_name);
         free(info.chassis);
-        return 0;
+        free(info.deployment);
+        free(info.location);
+        free(info.kernel_name);
+        free(info.kernel_release);
+        free(info.os_pretty_name);
+        free(info.os_cpe_name);
+        free(info.virtualization);
+        free(info.architecture);
+
+        return r;
 }
 
 static int show_status(sd_bus *bus, char **args, unsigned n) {
@@ -291,8 +324,21 @@ static int set_chassis(sd_bus *bus, char **args, unsigned n) {
         return set_simple_string(bus, "SetChassis", args[1]);
 }
 
-static int help(void) {
+static int set_deployment(sd_bus *bus, char **args, unsigned n) {
+        assert(args);
+        assert(n == 2);
 
+        return set_simple_string(bus, "SetDeployment", args[1]);
+}
+
+static int set_location(sd_bus *bus, char **args, unsigned n) {
+        assert(args);
+        assert(n == 2);
+
+        return set_simple_string(bus, "SetLocation", args[1]);
+}
+
+static void help(void) {
         printf("%s [OPTIONS...] COMMAND ...\n\n"
                "Query or change system hostname.\n\n"
                "  -h --help              Show this help\n"
@@ -307,10 +353,10 @@ static int help(void) {
                "  status                 Show current hostname settings\n"
                "  set-hostname NAME      Set system hostname\n"
                "  set-icon-name NAME     Set icon name for host\n"
-               "  set-chassis NAME       Set chassis type for host\n",
-               program_invocation_short_name);
-
-        return 0;
+               "  set-chassis NAME       Set chassis type for host\n"
+               "  set-deployment NAME    Set deployment environment for host\n"
+               "  set-location NAME      Set location for host\n"
+               , program_invocation_short_name);
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -340,12 +386,13 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "hH:M:", options, NULL)) >= 0) {
+        while ((c = getopt_long(argc, argv, "hH:M:", options, NULL)) >= 0)
 
                 switch (c) {
 
                 case 'h':
-                        return help();
+                        help();
+                        return 0;
 
                 case ARG_VERSION:
                         puts(PACKAGE_STRING);
@@ -384,7 +431,6 @@ static int parse_argv(int argc, char *argv[]) {
                 default:
                         assert_not_reached("Unhandled option");
                 }
-        }
 
         return 1;
 }
@@ -401,10 +447,12 @@ static int hostnamectl_main(sd_bus *bus, int argc, char *argv[]) {
                 const int argc;
                 int (* const dispatch)(sd_bus *bus, char **args, unsigned n);
         } verbs[] = {
-                { "status",        LESS,  1, show_status   },
-                { "set-hostname",  EQUAL, 2, set_hostname  },
-                { "set-icon-name", EQUAL, 2, set_icon_name },
-                { "set-chassis",   EQUAL, 2, set_chassis   },
+                { "status",           LESS,  1, show_status    },
+                { "set-hostname",     EQUAL, 2, set_hostname   },
+                { "set-icon-name",    EQUAL, 2, set_icon_name  },
+                { "set-chassis",      EQUAL, 2, set_chassis    },
+                { "set-deployment",   EQUAL, 2, set_deployment },
+                { "set-location",     EQUAL, 2, set_location   },
         };
 
         int left;
@@ -468,7 +516,7 @@ static int hostnamectl_main(sd_bus *bus, int argc, char *argv[]) {
 }
 
 int main(int argc, char *argv[]) {
-        _cleanup_bus_unref_ sd_bus *bus = NULL;
+        _cleanup_bus_close_unref_ sd_bus *bus = NULL;
         int r;
 
         setlocale(LC_ALL, "");

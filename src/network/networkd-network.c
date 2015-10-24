@@ -19,8 +19,13 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
+#include <ctype.h>
+#include <net/if.h>
+
 #include "networkd.h"
-#include "net-util.h"
+#include "networkd-netdev.h"
+#include "networkd-link.h"
+#include "network-internal.h"
 #include "path-util.h"
 #include "conf-files.h"
 #include "conf-parser.h"
@@ -41,7 +46,12 @@ static int network_load_one(Manager *manager, const char *filename) {
                 if (errno == ENOENT)
                         return 0;
                 else
-                        return errno;
+                        return -errno;
+        }
+
+        if (null_or_empty_fd(fileno(file))) {
+                log_debug("Skipping empty file: %s", filename);
+                return 0;
         }
 
         network = new0(Network, 1);
@@ -53,15 +63,15 @@ static int network_load_one(Manager *manager, const char *filename) {
         LIST_HEAD_INIT(network->static_addresses);
         LIST_HEAD_INIT(network->static_routes);
 
-        network->vlans = hashmap_new(uint64_hash_func, uint64_compare_func);
-        if (!network->vlans)
+        network->stacked_netdevs = hashmap_new(string_hash_func, string_compare_func);
+        if (!network->stacked_netdevs)
                 return log_oom();
 
-        network->addresses_by_section = hashmap_new(uint64_hash_func, uint64_compare_func);
+        network->addresses_by_section = hashmap_new(NULL, NULL);
         if (!network->addresses_by_section)
                 return log_oom();
 
-        network->routes_by_section = hashmap_new(uint64_hash_func, uint64_compare_func);
+        network->routes_by_section = hashmap_new(NULL, NULL);
         if (!network->routes_by_section)
                 return log_oom();
 
@@ -69,20 +79,25 @@ static int network_load_one(Manager *manager, const char *filename) {
         if (!network->filename)
                 return log_oom();
 
+        network->dhcp = DHCP_SUPPORT_NONE;
+        network->dhcp_ntp = true;
         network->dhcp_dns = true;
         network->dhcp_hostname = true;
-        network->dhcp_domainname = true;
+        network->dhcp_routes = true;
+        network->dhcp_sendhost = true;
 
-        r = config_parse(NULL, filename, file, "Match\0Network\0Address\0Route\0DHCPv4\0", config_item_perf_lookup,
-                        (void*) network_network_gperf_lookup, false, false, network);
-        if (r < 0) {
-                log_warning("Could not parse config file %s: %s", filename, strerror(-r));
+        network->llmnr = LLMNR_SUPPORT_YES;
+
+        r = config_parse(NULL, filename, file,
+                         "Match\0Network\0Address\0Route\0DHCP\0DHCPv4\0",
+                         config_item_perf_lookup, network_network_gperf_lookup,
+                         false, false, true, network);
+        if (r < 0)
                 return r;
-        }
 
         LIST_PREPEND(networks, manager->networks, network);
 
-        LIST_FOREACH(static_routes, route, network->static_routes) {
+        LIST_FOREACH(routes, route, network->static_routes) {
                 if (!route->family) {
                         log_warning("Route section without Gateway field configured in %s. "
                                     "Ignoring", filename);
@@ -90,7 +105,7 @@ static int network_load_one(Manager *manager, const char *filename) {
                 }
         }
 
-        LIST_FOREACH(static_addresses, address, network->static_addresses) {
+        LIST_FOREACH(addresses, address, network->static_addresses) {
                 if (!address->family) {
                         log_warning("Address section without Address field configured in %s. "
                                     "Ignoring", filename);
@@ -130,8 +145,10 @@ int network_load(Manager *manager) {
 }
 
 void network_free(Network *network) {
+        NetDev *netdev;
         Route *route;
         Address *address;
+        Iterator i;
 
         if (!network)
                 return;
@@ -145,10 +162,21 @@ void network_free(Network *network) {
         free(network->match_name);
 
         free(network->description);
+        free(network->dhcp_vendor_class_identifier);
 
-        address_free(network->dns);
+        strv_free(network->ntp);
+        strv_free(network->dns);
+        strv_free(network->domains);
 
-        hashmap_free(network->vlans);
+        netdev_unref(network->bridge);
+
+        netdev_unref(network->bond);
+
+        HASHMAP_FOREACH(netdev, network->stacked_netdevs, i) {
+                hashmap_remove(network->stacked_netdevs, netdev->ifname);
+                netdev_unref(netdev);
+        }
+        hashmap_free(network->stacked_netdevs);
 
         while ((route = network->static_routes))
                 route_free(route);
@@ -162,31 +190,36 @@ void network_free(Network *network) {
         if (network->manager && network->manager->networks)
                 LIST_REMOVE(networks, network->manager->networks, network);
 
+        condition_free_list(network->match_host);
+        condition_free_list(network->match_virt);
+        condition_free_list(network->match_kernel);
+        condition_free_list(network->match_arch);
+
         free(network);
 }
 
-int network_get(Manager *manager, struct udev_device *device, Network **ret) {
+int network_get(Manager *manager, struct udev_device *device,
+                const char *ifname, const struct ether_addr *address,
+                Network **ret) {
         Network *network;
 
         assert(manager);
-        assert(device);
         assert(ret);
 
         LIST_FOREACH(networks, network, manager->networks) {
                 if (net_match_config(network->match_mac, network->match_path,
-                                        network->match_driver, network->match_type,
-                                        network->match_name, network->match_host,
-                                        network->match_virt, network->match_kernel,
-                                        network->match_arch,
-                                        udev_device_get_sysattr_value(device, "address"),
-                                        udev_device_get_property_value(device, "ID_PATH"),
-                                        udev_device_get_driver(udev_device_get_parent(device)),
-                                        udev_device_get_property_value(device, "ID_NET_DRIVER"),
-                                        udev_device_get_devtype(device),
-                                        udev_device_get_sysname(device))) {
-                        log_debug("%s: found matching network '%s'",
-                                        udev_device_get_sysname(device),
-                                        network->filename);
+                                     network->match_driver, network->match_type,
+                                     network->match_name, network->match_host,
+                                     network->match_virt, network->match_kernel,
+                                     network->match_arch,
+                                     address,
+                                     udev_device_get_property_value(device, "ID_PATH"),
+                                     udev_device_get_driver(udev_device_get_parent(device)),
+                                     udev_device_get_property_value(device, "ID_NET_DRIVER"),
+                                     udev_device_get_devtype(device),
+                                     ifname)) {
+                        log_debug("%-*s: found matching network '%s'", IFNAMSIZ, ifname,
+                                  network->filename);
                         *ret = network;
                         return 0;
                 }
@@ -202,12 +235,28 @@ int network_apply(Manager *manager, Network *network, Link *link) {
 
         link->network = network;
 
-        r = link_configure(link);
-        if (r < 0)
-                return r;
+        if (network->ipv4ll_route) {
+                Route *route;
 
-        if (network->dns) {
-                r = manager_update_resolv_conf(manager);
+                r = route_new_static(network, 0, &route);
+                if (r < 0)
+                        return r;
+
+                r = inet_pton(AF_INET, "169.254.0.0", &route->dst_addr.in);
+                if (r == 0)
+                        return -EINVAL;
+                if (r < 0)
+                        return -errno;
+
+                route->family = AF_INET;
+                route->dst_prefixlen = 16;
+                route->scope = RT_SCOPE_LINK;
+                route->metrics = IPV4LL_ROUTE_METRIC;
+                route->protocol = RTPROT_STATIC;
+        }
+
+        if (network->dns || network->ntp) {
+                r = link_save(link);
                 if (r < 0)
                         return r;
         }
@@ -215,7 +264,7 @@ int network_apply(Manager *manager, Network *network, Link *link) {
         return 0;
 }
 
-int config_parse_bridge(const char *unit,
+int config_parse_netdev(const char *unit,
                 const char *filename,
                 unsigned line,
                 const char *section,
@@ -226,7 +275,10 @@ int config_parse_bridge(const char *unit,
                 void *data,
                 void *userdata) {
         Network *network = userdata;
+        _cleanup_free_ char *kind_string = NULL;
+        char *p;
         NetDev *netdev;
+        NetDevKind kind;
         int r;
 
         assert(filename);
@@ -234,71 +286,115 @@ int config_parse_bridge(const char *unit,
         assert(rvalue);
         assert(data);
 
+        kind_string = strdup(lvalue);
+        if (!kind_string)
+                return log_oom();
+
+        /* the keys are CamelCase versions of the kind */
+        for (p = kind_string; *p; p++)
+                *p = tolower(*p);
+
+        kind = netdev_kind_from_string(kind_string);
+        if (kind == _NETDEV_KIND_INVALID) {
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Invalid NetDev kind: %s", lvalue);
+                return 0;
+        }
+
         r = netdev_get(network->manager, rvalue, &netdev);
         if (r < 0) {
                 log_syntax(unit, LOG_ERR, filename, line, EINVAL,
-                           "Bridge is invalid, ignoring assignment: %s", rvalue);
+                           "%s could not be found, ignoring assignment: %s", lvalue, rvalue);
                 return 0;
         }
 
-        if (netdev->kind != NETDEV_KIND_BRIDGE) {
+        if (netdev->kind != kind) {
                 log_syntax(unit, LOG_ERR, filename, line, EINVAL,
-                           "NetDev is not a bridge, ignoring assignment: %s", rvalue);
+                           "NetDev is not a %s, ignoring assignment: %s", lvalue, rvalue);
                 return 0;
         }
 
-        network->bridge = netdev;
+        switch (kind) {
+        case NETDEV_KIND_BRIDGE:
+                network->bridge = netdev;
+
+                break;
+        case NETDEV_KIND_BOND:
+                network->bond = netdev;
+
+                break;
+        case NETDEV_KIND_VLAN:
+        case NETDEV_KIND_MACVLAN:
+        case NETDEV_KIND_VXLAN:
+                r = hashmap_put(network->stacked_netdevs, netdev->ifname, netdev);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                                   "Can not add VLAN '%s' to network: %s",
+                                   rvalue, strerror(-r));
+                        return 0;
+                }
+
+                break;
+        default:
+                assert_not_reached("Can not parse NetDev");
+        }
+
+        netdev_ref(netdev);
 
         return 0;
 }
 
-int config_parse_bond(const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
+int config_parse_domains(const char *unit,
+                         const char *filename,
+                         unsigned line,
+                         const char *section,
+                         unsigned section_line,
+                         const char *lvalue,
+                         int ltype,
+                         const char *rvalue,
+                         void *data,
+                         void *userdata) {
         Network *network = userdata;
-        NetDev *netdev;
+        char ***domains = data;
+        char **domain;
         int r;
 
-        assert(filename);
-        assert(lvalue);
-        assert(rvalue);
-        assert(data);
+        r = config_parse_strv(unit, filename, line, section, section_line,
+                              lvalue, ltype, rvalue, domains, userdata);
+        if (r < 0)
+                return r;
 
-        r = netdev_get(network->manager, rvalue, &netdev);
-        if (r < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
-                           "Bond is invalid, ignoring assignment: %s", rvalue);
-                return 0;
+        strv_uniq(*domains);
+        network->wildcard_domain = !!strv_find(*domains, "*");
+
+        STRV_FOREACH(domain, *domains) {
+                if (is_localhost(*domain))
+                        log_syntax(unit, LOG_ERR, filename, line, EINVAL, "'localhost' domain names may not be configured, ignoring assignment: %s", *domain);
+                else if (!hostname_is_valid(*domain)) {
+                        if (!streq(*domain, "*"))
+                                log_syntax(unit, LOG_ERR, filename, line, EINVAL, "domain name is not valid, ignoring assignment: %s", *domain);
+                } else
+                        continue;
+
+                strv_remove(*domains, *domain);
+
+                /* We removed one entry, make sure we don't skip the next one */
+                domain--;
         }
-
-        if (netdev->kind != NETDEV_KIND_BOND) {
-                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
-                           "NetDev is not a bond, ignoring assignment: %s", rvalue);
-                return 0;
-        }
-
-        network->bond = netdev;
 
         return 0;
 }
 
-int config_parse_vlan(const char *unit,
-                const char *filename,
-                unsigned line,
-                const char *section,
-                unsigned section_line,
-                const char *lvalue,
-                int ltype,
-                const char *rvalue,
-                void *data,
-                void *userdata) {
+int config_parse_tunnel(const char *unit,
+                        const char *filename,
+                        unsigned line,
+                        const char *section,
+                        unsigned section_line,
+                        const char *lvalue,
+                        int ltype,
+                        const char *rvalue,
+                        void *data,
+                        void *userdata) {
         Network *network = userdata;
         NetDev *netdev;
         int r;
@@ -311,21 +407,130 @@ int config_parse_vlan(const char *unit,
         r = netdev_get(network->manager, rvalue, &netdev);
         if (r < 0) {
                 log_syntax(unit, LOG_ERR, filename, line, EINVAL,
-                           "VLAN is invalid, ignoring assignment: %s", rvalue);
+                           "Tunnel is invalid, ignoring assignment: %s", rvalue);
                 return 0;
         }
 
-        if (netdev->kind != NETDEV_KIND_VLAN) {
+        if (netdev->kind != NETDEV_KIND_IPIP &&
+            netdev->kind != NETDEV_KIND_SIT &&
+            netdev->kind != NETDEV_KIND_GRE &&
+            netdev->kind != NETDEV_KIND_VTI) {
                 log_syntax(unit, LOG_ERR, filename, line, EINVAL,
-                           "NetDev is not a VLAN, ignoring assignment: %s", rvalue);
+                           "NetDev is not a tunnel, ignoring assignment: %s", rvalue);
                 return 0;
         }
 
-        r = hashmap_put(network->vlans, &netdev->vlanid, netdev);
+        r = hashmap_put(network->stacked_netdevs, netdev->ifname, netdev);
         if (r < 0) {
                 log_syntax(unit, LOG_ERR, filename, line, EINVAL,
-                           "Can not add VLAN to network: %s", rvalue);
+                           "Can not add VLAN '%s' to network: %s",
+                           rvalue, strerror(-r));
                 return 0;
+        }
+
+        netdev_ref(netdev);
+
+        return 0;
+}
+
+static const char* const dhcp_support_table[_DHCP_SUPPORT_MAX] = {
+        [DHCP_SUPPORT_NONE] = "none",
+        [DHCP_SUPPORT_BOTH] = "both",
+        [DHCP_SUPPORT_V4] = "v4",
+        [DHCP_SUPPORT_V6] = "v6",
+};
+
+DEFINE_STRING_TABLE_LOOKUP(dhcp_support, DHCPSupport);
+
+int config_parse_dhcp(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        DHCPSupport *dhcp = data;
+        int k;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        /* Our enum shall be a superset of booleans, hence first try
+         * to parse as boolean, and then as enum */
+
+        k = parse_boolean(rvalue);
+        if (k > 0)
+                *dhcp = DHCP_SUPPORT_BOTH;
+        else if (k == 0)
+                *dhcp = DHCP_SUPPORT_NONE;
+        else {
+                DHCPSupport s;
+
+                s = dhcp_support_from_string(rvalue);
+                if (s < 0){
+                        log_syntax(unit, LOG_ERR, filename, line, -s, "Failed to parse DHCP option, ignoring: %s", rvalue);
+                        return 0;
+                }
+
+                *dhcp = s;
+        }
+
+        return 0;
+}
+
+static const char* const llmnr_support_table[_LLMNR_SUPPORT_MAX] = {
+        [LLMNR_SUPPORT_NO] = "no",
+        [LLMNR_SUPPORT_YES] = "yes",
+        [LLMNR_SUPPORT_RESOLVE] = "resolve",
+};
+
+DEFINE_STRING_TABLE_LOOKUP(llmnr_support, LLMNRSupport);
+
+int config_parse_llmnr(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        LLMNRSupport *llmnr = data;
+        int k;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        /* Our enum shall be a superset of booleans, hence first try
+         * to parse as boolean, and then as enum */
+
+        k = parse_boolean(rvalue);
+        if (k > 0)
+                *llmnr = LLMNR_SUPPORT_YES;
+        else if (k == 0)
+                *llmnr = LLMNR_SUPPORT_NO;
+        else {
+                LLMNRSupport s;
+
+                s = llmnr_support_from_string(rvalue);
+                if (s < 0){
+                        log_syntax(unit, LOG_ERR, filename, line, -s, "Failed to parse LLMNR option, ignoring: %s", rvalue);
+                        return 0;
+                }
+
+                *llmnr = s;
         }
 
         return 0;

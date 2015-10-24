@@ -40,7 +40,7 @@
 #include "acl-util.h"
 #endif
 
-#include <systemd/sd-journal.h>
+#include "systemd/sd-journal.h"
 
 #include "log.h"
 #include "logs-show.h"
@@ -160,15 +160,15 @@ static int parse_boot_descriptor(const char *x, sd_id128_t *boot_id, int *offset
         return 0;
 }
 
-static int help(void) {
+static void help(void) {
 
         pager_open_if_enabled();
 
         printf("%s [OPTIONS...] [MATCHES...]\n\n"
                "Query the journal.\n\n"
                "Flags:\n"
-               "     --system              Show only the system journal\n"
-               "     --user                Show only the user journal for the current user\n"
+               "     --system              Show the system journal\n"
+               "     --user                Show the user journal for the current user\n"
                "  -M --machine=CONTAINER   Operate on local container\n"
                "     --since=DATE          Start showing entries on or newer than the specified date\n"
                "     --until=DATE          Stop showing entries on or older than the specified date\n"
@@ -218,8 +218,6 @@ static int help(void) {
                "     --verify              Verify journal file consistency\n"
 #endif
                , program_invocation_short_name);
-
-        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -306,12 +304,13 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "hefo:aln::qmb::kD:p:c:u:F:xrM:", options, NULL)) >= 0) {
+        while ((c = getopt_long(argc, argv, "hefo:aln::qmb::kD:p:c:u:F:xrM:", options, NULL)) >= 0)
 
                 switch (c) {
 
                 case 'h':
-                        return help();
+                        help();
+                        return 0;
 
                 case ARG_VERSION:
                         puts(PACKAGE_STRING);
@@ -633,7 +632,6 @@ static int parse_argv(int argc, char *argv[]) {
                 default:
                         assert_not_reached("Unhandled option");
                 }
-        }
 
         if (arg_follow && !arg_no_tail && arg_lines < 0)
                 arg_lines = 10;
@@ -655,6 +653,11 @@ static int parse_argv(int argc, char *argv[]) {
 
         if (arg_follow && arg_reverse) {
                 log_error("Please specify either --reverse= or --follow=, not both.");
+                return -EINVAL;
+        }
+
+        if (arg_action != ACTION_SHOW && optind < argc) {
+                log_error("Extraneous arguments starting with '%s'", argv[optind]);
                 return -EINVAL;
         }
 
@@ -694,15 +697,20 @@ static int generate_new_id128(void) {
 
 static int add_matches(sd_journal *j, char **args) {
         char **i;
+        bool have_term = false;
 
         assert(j);
 
         STRV_FOREACH(i, args) {
                 int r;
 
-                if (streq(*i, "+"))
+                if (streq(*i, "+")) {
+                        if (!have_term)
+                                break;
                         r = sd_journal_add_disjunction(j);
-                else if (path_is_absolute(*i)) {
+                        have_term = false;
+
+                } else if (path_is_absolute(*i)) {
                         _cleanup_free_ char *p, *t = NULL, *t2 = NULL;
                         const char *path;
                         _cleanup_free_ char *interpreter = NULL;
@@ -736,11 +744,17 @@ static int add_matches(sd_journal *j, char **args) {
                                         }
                                 } else
                                         t = strappend("_EXE=", path);
-                        } else if (S_ISCHR(st.st_mode))
-                                asprintf(&t, "_KERNEL_DEVICE=c%u:%u", major(st.st_rdev), minor(st.st_rdev));
-                        else if (S_ISBLK(st.st_mode))
-                                asprintf(&t, "_KERNEL_DEVICE=b%u:%u", major(st.st_rdev), minor(st.st_rdev));
-                        else {
+                        } else if (S_ISCHR(st.st_mode)) {
+                                if (asprintf(&t, "_KERNEL_DEVICE=c%u:%u",
+                                             major(st.st_rdev),
+                                             minor(st.st_rdev)) < 0)
+                                        return -ENOMEM;
+                        } else if (S_ISBLK(st.st_mode)) {
+                                if (asprintf(&t, "_KERNEL_DEVICE=b%u:%u",
+                                             major(st.st_rdev),
+                                             minor(st.st_rdev)) < 0)
+                                        return -ENOMEM;
+                        } else {
                                 log_error("File is neither a device node, nor regular file, nor executable: %s", *i);
                                 return -EINVAL;
                         }
@@ -751,13 +765,22 @@ static int add_matches(sd_journal *j, char **args) {
                         r = sd_journal_add_match(j, t, 0);
                         if (t2)
                                 r = sd_journal_add_match(j, t2, 0);
-                } else
+                        have_term = true;
+
+                } else {
                         r = sd_journal_add_match(j, *i, 0);
+                        have_term = true;
+                }
 
                 if (r < 0) {
                         log_error("Failed to add match '%s': %s", *i, strerror(-r));
                         return r;
                 }
+        }
+
+        if (!strv_isempty(args) && !have_term) {
+                log_error("\"+\" can only be used between terms");
+                return -EINVAL;
         }
 
         return 0;
@@ -1285,7 +1308,7 @@ static int setup_keys(void) {
         n = now(CLOCK_REALTIME);
         n /= arg_interval;
 
-        close_nointr_nofail(fd);
+        safe_close(fd);
         fd = mkostemp_safe(k, O_WRONLY|O_CLOEXEC);
         if (fd < 0) {
                 log_error("Failed to open %s: %m", k);
@@ -1384,8 +1407,7 @@ static int setup_keys(void) {
         r = 0;
 
 finish:
-        if (fd >= 0)
-                close_nointr_nofail(fd);
+        safe_close(fd);
 
         if (k) {
                 unlink(k);
@@ -1590,16 +1612,12 @@ int main(int argc, char *argv[]) {
             arg_action == ACTION_LIST_CATALOG ||
             arg_action == ACTION_DUMP_CATALOG) {
 
-                const char* database = CATALOG_DATABASE;
-                _cleanup_free_ char *copy = NULL;
-                if (arg_root) {
-                        copy = strjoin(arg_root, "/", CATALOG_DATABASE, NULL);
-                        if (!copy) {
-                                r = log_oom();
-                                goto finish;
-                        }
-                        path_kill_slashes(copy);
-                        database = copy;
+                _cleanup_free_ char *database;
+
+                database = path_join(arg_root, CATALOG_DATABASE, NULL);
+                if (!database) {
+                        r = log_oom();
+                        goto finish;
                 }
 
                 if (arg_action == ACTION_UPDATE_CATALOG) {
@@ -1748,7 +1766,7 @@ int main(int argc, char *argv[]) {
         }
 
         if (arg_cursor || arg_after_cursor) {
-                r = sd_journal_seek_cursor(j, arg_cursor ? arg_cursor : arg_after_cursor);
+                r = sd_journal_seek_cursor(j, arg_cursor ?: arg_after_cursor);
                 if (r < 0) {
                         log_error("Failed to seek to cursor: %s", strerror(-r));
                         return EXIT_FAILURE;
@@ -1932,6 +1950,8 @@ int main(int argc, char *argv[]) {
 
 finish:
         pager_close();
+
+        strv_free(arg_file);
 
         return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }

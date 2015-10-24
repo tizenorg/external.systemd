@@ -33,6 +33,8 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <sys/types.h>
+#include <grp.h>
 
 #ifdef HAVE_SECCOMP
 #include <seccomp.h>
@@ -56,12 +58,13 @@
 #include "bus-util.h"
 #include "bus-error.h"
 #include "errno-list.h"
+#include "af-list.h"
 
 #ifdef HAVE_SECCOMP
 #include "seccomp-util.h"
 #endif
 
-#if !defined(HAVE_SYSV_COMPAT) || !defined(HAVE_SECCOMP) || !defined(HAVE_LIBWRAP) || !defined(HAVE_PAM) || !defined(HAVE_SELINUX) || !defined(HAVE_SMACK) || !defined(HAVE_APPARMOR)
+#if !defined(HAVE_SYSV_COMPAT) || !defined(HAVE_SECCOMP) || !defined(HAVE_PAM) || !defined(HAVE_SELINUX) || !defined(HAVE_SMACK) || !defined(HAVE_APPARMOR)
 int config_parse_warn_compat(
                 const char *unit,
                 const char *filename,
@@ -81,7 +84,7 @@ int config_parse_warn_compat(
 }
 #endif
 
-int config_parse_unit_deps(const char* unit,
+int config_parse_unit_deps(const char *unit,
                            const char *filename,
                            unsigned line,
                            const char *section,
@@ -94,19 +97,18 @@ int config_parse_unit_deps(const char* unit,
 
         UnitDependency d = ltype;
         Unit *u = userdata;
-        char *w;
+        const char *word, *state;
         size_t l;
-        char *state;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
 
-        FOREACH_WORD_QUOTED(w, l, rvalue, state) {
+        FOREACH_WORD_QUOTED(word, l, rvalue, state) {
                 _cleanup_free_ char *t = NULL, *k = NULL;
                 int r;
 
-                t = strndup(w, l);
+                t = strndup(word, l);
                 if (!t)
                         return log_oom();
 
@@ -122,6 +124,8 @@ int config_parse_unit_deps(const char* unit,
                         log_syntax(unit, LOG_ERR, filename, line, -r,
                                    "Failed to add dependency on %s, ignoring: %s", k, strerror(-r));
         }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL, "Invalid syntax, ignoring.");
 
         return 0;
 }
@@ -195,8 +199,8 @@ int config_parse_unit_path_printf(const char *unit,
                                   void *data,
                                   void *userdata) {
 
-        Unit *u = userdata;
         _cleanup_free_ char *k = NULL;
+        Unit *u = userdata;
         int r;
 
         assert(filename);
@@ -205,12 +209,72 @@ int config_parse_unit_path_printf(const char *unit,
         assert(u);
 
         r = unit_full_printf(u, rvalue, &k);
-        if (r < 0)
-                log_syntax(unit, LOG_ERR, filename, line, -r,
-                           "Failed to resolve unit specifiers on %s, ignoring: %s", rvalue, strerror(-r));
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, -r, "Failed to resolve unit specifiers on %s, ignoring: %s", rvalue, strerror(-r));
+                return 0;
+        }
 
-        return config_parse_path(unit, filename, line, section, section_line, lvalue, ltype,
-                                 k ? k : rvalue, data, userdata);
+        return config_parse_path(unit, filename, line, section, section_line, lvalue, ltype, k, data, userdata);
+}
+
+int config_parse_unit_path_strv_printf(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        char ***x = data;
+        const char *word, *state;
+        Unit *u = userdata;
+        size_t l;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(u);
+
+        FOREACH_WORD_QUOTED(word, l, rvalue, state) {
+                _cleanup_free_ char *k = NULL;
+                char t[l+1];
+
+                memcpy(t, word, l);
+                t[l] = 0;
+
+                r = unit_full_printf(u, t, &k);
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, -r, "Failed to resolve unit specifiers on %s, ignoring: %s", t, strerror(-r));
+                        return 0;
+                }
+
+                if (!utf8_is_valid(k)) {
+                        log_invalid_utf8(unit, LOG_ERR, filename, line, EINVAL, rvalue);
+                        return 0;
+                }
+
+                if (!path_is_absolute(k)) {
+                        log_syntax(unit, LOG_ERR, filename, line, -r, "Symlink path %s is not absolute, ignoring: %s", k, strerror(-r));
+                        return 0;
+                }
+
+                path_kill_slashes(k);
+
+                r = strv_push(x, k);
+                if (r < 0)
+                        return log_oom();
+
+                k = NULL;
+        }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL, "Invalid syntax, ignoring.");
+
+        return 0;
 }
 
 int config_parse_socket_listen(const char *unit,
@@ -474,9 +538,8 @@ int config_parse_exec(const char *unit,
          * overriding of argv[0]. */
         for (;;) {
                 int i;
-                char *w;
+                const char *word, *state;
                 size_t l;
-                char *state;
                 bool honour_argv0 = false, ignore = false;
 
                 path = NULL;
@@ -507,37 +570,41 @@ int config_parse_exec(const char *unit,
                 }
 
                 k = 0;
-                FOREACH_WORD_QUOTED(w, l, rvalue, state) {
-                        if (strneq(w, ";", MAX(l, 1U)))
-                                break;
+                FOREACH_WORD_QUOTED(word, l, rvalue, state) {
+                        if (strneq(word, ";", MAX(l, 1U)))
+                                goto found;
 
                         k++;
                 }
+                if (!isempty(state)) {
+                        log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                                   "Trailing garbage, ignoring.");
+                        return 0;
+                }
 
+        found:
                 n = new(char*, k + !honour_argv0);
                 if (!n)
                         return log_oom();
 
                 k = 0;
-                FOREACH_WORD_QUOTED(w, l, rvalue, state) {
-                        if (strneq(w, ";", MAX(l, 1U)))
+                FOREACH_WORD_QUOTED(word, l, rvalue, state) {
+                        if (strneq(word, ";", MAX(l, 1U)))
                                 break;
-                        else if (strneq(w, "\\;", MAX(l, 1U)))
-                                w ++;
+                        else if (strneq(word, "\\;", MAX(l, 1U)))
+                                word ++;
 
-                        if (honour_argv0 && w == rvalue) {
+                        if (honour_argv0 && word == rvalue) {
                                 assert(!path);
 
-                                path = strndup(w, l);
+                                path = strndup(word, l);
                                 if (!path) {
                                         r = log_oom();
                                         goto fail;
                                 }
 
                                 if (!utf8_is_valid(path)) {
-                                        log_syntax(unit, LOG_ERR, filename, line, EINVAL,
-                                                   "Path is not UTF-8 clean, ignoring assignment: %s",
-                                                   rvalue);
+                                        log_invalid_utf8(unit, LOG_ERR, filename, line, EINVAL, rvalue);
                                         r = 0;
                                         goto fail;
                                 }
@@ -545,16 +612,14 @@ int config_parse_exec(const char *unit,
                         } else {
                                 char *c;
 
-                                c = n[k++] = cunescape_length(w, l);
+                                c = n[k++] = cunescape_length(word, l);
                                 if (!c) {
                                         r = log_oom();
                                         goto fail;
                                 }
 
                                 if (!utf8_is_valid(c)) {
-                                        log_syntax(unit, LOG_ERR, filename, line, EINVAL,
-                                                   "Path is not UTF-8 clean, ignoring assignment: %s",
-                                                   rvalue);
+                                        log_invalid_utf8(unit, LOG_ERR, filename, line, EINVAL, rvalue);
                                         r = 0;
                                         goto fail;
                                 }
@@ -799,9 +864,8 @@ int config_parse_exec_cpu_affinity(const char *unit,
                                    void *userdata) {
 
         ExecContext *c = data;
-        char *w;
+        const char *word, *state;
         size_t l;
-        char *state;
 
         assert(filename);
         assert(lvalue);
@@ -816,12 +880,12 @@ int config_parse_exec_cpu_affinity(const char *unit,
                 return 0;
         }
 
-        FOREACH_WORD_QUOTED(w, l, rvalue, state) {
+        FOREACH_WORD_QUOTED(word, l, rvalue, state) {
                 _cleanup_free_ char *t = NULL;
                 int r;
                 unsigned cpu;
 
-                t = strndup(w, l);
+                t = strndup(word, l);
                 if (!t)
                         return log_oom();
 
@@ -841,6 +905,9 @@ int config_parse_exec_cpu_affinity(const char *unit,
 
                 CPU_SET_S(cpu, CPU_ALLOC_SIZE(c->cpuset_ncpus), c->cpuset);
         }
+        if (!isempty(state))
+                log_syntax(unit, LOG_WARNING, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
 
         return 0;
 }
@@ -890,9 +957,8 @@ int config_parse_exec_secure_bits(const char *unit,
                                   void *userdata) {
 
         ExecContext *c = data;
-        char *w;
         size_t l;
-        char *state;
+        const char *word, *state;
 
         assert(filename);
         assert(lvalue);
@@ -905,18 +971,18 @@ int config_parse_exec_secure_bits(const char *unit,
                 return 0;
         }
 
-        FOREACH_WORD_QUOTED(w, l, rvalue, state) {
-                if (first_word(w, "keep-caps"))
+        FOREACH_WORD_QUOTED(word, l, rvalue, state) {
+                if (first_word(word, "keep-caps"))
                         c->secure_bits |= 1<<SECURE_KEEP_CAPS;
-                else if (first_word(w, "keep-caps-locked"))
+                else if (first_word(word, "keep-caps-locked"))
                         c->secure_bits |= 1<<SECURE_KEEP_CAPS_LOCKED;
-                else if (first_word(w, "no-setuid-fixup"))
+                else if (first_word(word, "no-setuid-fixup"))
                         c->secure_bits |= 1<<SECURE_NO_SETUID_FIXUP;
-                else if (first_word(w, "no-setuid-fixup-locked"))
+                else if (first_word(word, "no-setuid-fixup-locked"))
                         c->secure_bits |= 1<<SECURE_NO_SETUID_FIXUP_LOCKED;
-                else if (first_word(w, "noroot"))
+                else if (first_word(word, "noroot"))
                         c->secure_bits |= 1<<SECURE_NOROOT;
-                else if (first_word(w, "noroot-locked"))
+                else if (first_word(word, "noroot-locked"))
                         c->secure_bits |= 1<<SECURE_NOROOT_LOCKED;
                 else {
                         log_syntax(unit, LOG_ERR, filename, line, EINVAL,
@@ -924,6 +990,9 @@ int config_parse_exec_secure_bits(const char *unit,
                         return 0;
                 }
         }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Invalid syntax, garbage at the end, ignoring.");
 
         return 0;
 }
@@ -940,9 +1009,8 @@ int config_parse_bounding_set(const char *unit,
                               void *userdata) {
 
         uint64_t *capability_bounding_set_drop = data;
-        char *w;
+        const char *word, *state;
         size_t l;
-        char *state;
         bool invert = false;
         uint64_t sum = 0;
 
@@ -961,12 +1029,12 @@ int config_parse_bounding_set(const char *unit,
          * non-inverted everywhere to have a fully normalized
          * interface. */
 
-        FOREACH_WORD_QUOTED(w, l, rvalue, state) {
+        FOREACH_WORD_QUOTED(word, l, rvalue, state) {
                 _cleanup_free_ char *t = NULL;
                 int r;
                 cap_value_t cap;
 
-                t = strndup(w, l);
+                t = strndup(word, l);
                 if (!t)
                         return log_oom();
 
@@ -979,6 +1047,9 @@ int config_parse_bounding_set(const char *unit,
 
                 sum |= ((uint64_t) 1ULL) << (uint64_t) cap;
         }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
 
         if (invert)
                 *capability_bounding_set_drop |= sum;
@@ -1108,9 +1179,8 @@ int config_parse_exec_mount_flags(const char *unit,
                                   void *userdata) {
 
         ExecContext *c = data;
-        char *w;
+        const char *word, *state;
         size_t l;
-        char *state;
         unsigned long flags = 0;
 
         assert(filename);
@@ -1118,26 +1188,28 @@ int config_parse_exec_mount_flags(const char *unit,
         assert(rvalue);
         assert(data);
 
-        FOREACH_WORD_SEPARATOR(w, l, rvalue, ", ", state) {
+        FOREACH_WORD_SEPARATOR(word, l, rvalue, ", ", state) {
                 _cleanup_free_ char *t;
 
-                t = strndup(w, l);
+                t = strndup(word, l);
                 if (!t)
                         return log_oom();
 
                 if (streq(t, "shared"))
-                        flags |= MS_SHARED;
+                        flags = MS_SHARED;
                 else if (streq(t, "slave"))
-                        flags |= MS_SLAVE;
-                else if (streq(w, "private"))
-                        flags |= MS_PRIVATE;
+                        flags = MS_SLAVE;
+                else if (streq(word, "private"))
+                        flags = MS_PRIVATE;
                 else {
                         log_syntax(unit, LOG_ERR, filename, line, EINVAL,
-                                   "Failed to parse mount flag %s, ignoring: %s",
-                                   t, rvalue);
+                                   "Failed to parse mount flag %s, ignoring: %s", t, rvalue);
                         return 0;
                 }
         }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
 
         c->mount_flags = flags;
         return 0;
@@ -1181,7 +1253,8 @@ int config_parse_exec_selinux_context(
 
         r = unit_name_printf(u, rvalue, &k);
         if (r < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, -r, "Failed to resolve specifiers, ignoring: %s", strerror(-r));
+                log_syntax(unit, LOG_ERR, filename, line, -r,
+                           "Failed to resolve specifiers, ignoring: %s", strerror(-r));
                 return 0;
         }
 
@@ -1230,13 +1303,64 @@ int config_parse_exec_apparmor_profile(
 
         r = unit_name_printf(u, rvalue, &k);
         if (r < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, -r, "Failed to resolve specifiers, ignoring: %s", strerror(-r));
+                log_syntax(unit, LOG_ERR, filename, line, -r,
+                           "Failed to resolve specifiers, ignoring: %s", strerror(-r));
                 return 0;
         }
 
         free(c->apparmor_profile);
         c->apparmor_profile = k;
         c->apparmor_profile_ignore = ignore;
+
+        return 0;
+}
+
+int config_parse_exec_smack_process_label(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        ExecContext *c = data;
+        Unit *u = userdata;
+        bool ignore;
+        char *k;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        if (isempty(rvalue)) {
+                free(c->smack_process_label);
+                c->smack_process_label = NULL;
+                c->smack_process_label_ignore = false;
+                return 0;
+        }
+
+        if (rvalue[0] == '-') {
+                ignore = true;
+                rvalue++;
+        } else
+                ignore = false;
+
+        r = unit_name_printf(u, rvalue, &k);
+        if (r < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, -r,
+                           "Failed to resolve specifiers, ignoring: %s", strerror(-r));
+                return 0;
+        }
+
+        free(c->smack_process_label);
+        c->smack_process_label = k;
+        c->smack_process_label_ignore = ignore;
 
         return 0;
 }
@@ -1257,7 +1381,6 @@ int config_parse_timer(const char *unit,
         TimerValue *v;
         TimerBase b;
         CalendarSpec *c = NULL;
-        clockid_t id;
 
         assert(filename);
         assert(lvalue);
@@ -1284,8 +1407,6 @@ int config_parse_timer(const char *unit,
                                    rvalue);
                         return 0;
                 }
-
-                id = CLOCK_REALTIME;
         } else {
                 if (parse_sec(rvalue, &u) < 0) {
                         log_syntax(unit, LOG_ERR, filename, line, EINVAL,
@@ -1293,8 +1414,6 @@ int config_parse_timer(const char *unit,
                                    rvalue);
                         return 0;
                 }
-
-                id = CLOCK_MONOTONIC;
         }
 
         v = new0(TimerValue, 1);
@@ -1302,7 +1421,6 @@ int config_parse_timer(const char *unit,
                 return log_oom();
 
         v->base = b;
-        v->clock_id = id;
         v->value = u;
         v->calendar_spec = c;
 
@@ -1458,18 +1576,21 @@ int config_parse_socket_service(const char *unit,
 
         r = unit_name_printf(UNIT(s), rvalue, &p);
         if (r < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, -r, "Failed to resolve specifiers, ignoring: %s", rvalue);
+                log_syntax(unit, LOG_ERR, filename, line, -r,
+                           "Failed to resolve specifiers, ignoring: %s", rvalue);
                 return 0;
         }
 
         if (!endswith(p, ".service")) {
-                log_syntax(unit, LOG_ERR, filename, line, EINVAL, "Unit must be of type service, ignoring: %s", rvalue);
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Unit must be of type service, ignoring: %s", rvalue);
                 return 0;
         }
 
         r = manager_load_unit(UNIT(s)->manager, p, NULL, &error, &x);
         if (r < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to load unit %s, ignoring: %s", rvalue, bus_error_message(&error, r));
+                log_syntax(unit, LOG_ERR, filename, line, -r,
+                           "Failed to load unit %s, ignoring: %s", rvalue, bus_error_message(&error, r));
                 return 0;
         }
 
@@ -1491,7 +1612,7 @@ int config_parse_service_sockets(const char *unit,
 
         Service *s = data;
         int r;
-        char *state, *w;
+        const char *word, *state;
         size_t l;
 
         assert(filename);
@@ -1499,10 +1620,10 @@ int config_parse_service_sockets(const char *unit,
         assert(rvalue);
         assert(data);
 
-        FOREACH_WORD_QUOTED(w, l, rvalue, state) {
+        FOREACH_WORD_QUOTED(word, l, rvalue, state) {
                 _cleanup_free_ char *t = NULL, *k = NULL;
 
-                t = strndup(w, l);
+                t = strndup(word, l);
                 if (!t)
                         return log_oom();
 
@@ -1527,6 +1648,9 @@ int config_parse_service_sockets(const char *unit,
                 if (r < 0)
                         return r;
         }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
 
         return 0;
 }
@@ -1589,22 +1713,91 @@ int config_parse_busname_service(
 
         r = unit_name_printf(UNIT(n), rvalue, &p);
         if (r < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, -r, "Failed to resolve specifiers, ignoring: %s", rvalue);
+                log_syntax(unit, LOG_ERR, filename, line, -r,
+                           "Failed to resolve specifiers, ignoring: %s", rvalue);
                 return 0;
         }
 
         if (!endswith(p, ".service")) {
-                log_syntax(unit, LOG_ERR, filename, line, EINVAL, "Unit must be of type service, ignoring: %s", rvalue);
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Unit must be of type service, ignoring: %s", rvalue);
                 return 0;
         }
 
         r = manager_load_unit(UNIT(n)->manager, p, NULL, &error, &x);
         if (r < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, r, "Failed to load unit %s, ignoring: %s", rvalue, bus_error_message(&error, r));
+                log_syntax(unit, LOG_ERR, filename, line, -r,
+                           "Failed to load unit %s, ignoring: %s", rvalue, bus_error_message(&error, r));
                 return 0;
         }
 
         unit_ref_set(&n->service, x);
+
+        return 0;
+}
+
+DEFINE_CONFIG_PARSE_ENUM(config_parse_bus_policy_world, busname_policy_access, BusNamePolicyAccess, "Failed to parse bus name policy access");
+
+int config_parse_bus_policy(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        _cleanup_free_ BusNamePolicy *p = NULL;
+        _cleanup_free_ char *id_str = NULL;
+        BusName *busname = data;
+        char *access_str;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        p = new0(BusNamePolicy, 1);
+        if (!p)
+                return log_oom();
+
+        if (streq(lvalue, "AllowUser"))
+                p->type = BUSNAME_POLICY_TYPE_USER;
+        else if (streq(lvalue, "AllowGroup"))
+                p->type = BUSNAME_POLICY_TYPE_GROUP;
+        else
+                assert_not_reached("Unknown lvalue");
+
+        id_str = strdup(rvalue);
+        if (!id_str)
+                return log_oom();
+
+        access_str = strpbrk(id_str, WHITESPACE);
+        if (!access_str) {
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Invalid busname policy value '%s'", rvalue);
+                return 0;
+        }
+
+        *access_str = '\0';
+        access_str++;
+        access_str += strspn(access_str, WHITESPACE);
+
+        p->access = busname_policy_access_from_string(access_str);
+        if (p->access < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Invalid busname policy access type '%s'", access_str);
+                return 0;
+        }
+
+        p->name = id_str;
+        id_str = NULL;
+
+        LIST_PREPEND(policy, busname->policy, p);
+        p = NULL;
 
         return 0;
 }
@@ -1640,7 +1833,7 @@ int config_parse_unit_env_file(const char *unit,
 
         r = unit_full_printf(u, rvalue, &n);
         if (r < 0)
-                log_syntax(unit, LOG_ERR, filename, line, r,
+                log_syntax(unit, LOG_ERR, filename, line, -r,
                            "Failed to resolve specifiers, ignoring: %s", rvalue);
 
         s = n ?: rvalue;
@@ -1669,7 +1862,8 @@ int config_parse_environ(const char *unit,
                          void *userdata) {
 
         Unit *u = userdata;
-        char*** env = data, *w, *state;
+        char*** env = data;
+        const char *word, *state;
         size_t l;
         _cleanup_free_ char *k = NULL;
         int r;
@@ -1698,11 +1892,11 @@ int config_parse_environ(const char *unit,
         if (!k)
                 return log_oom();
 
-        FOREACH_WORD_QUOTED(w, l, k, state) {
+        FOREACH_WORD_QUOTED(word, l, k, state) {
                 _cleanup_free_ char *n;
                 char **x;
 
-                n = cunescape_length(w, l);
+                n = cunescape_length(word, l);
                 if (!n)
                         return log_oom();
 
@@ -1719,6 +1913,9 @@ int config_parse_environ(const char *unit,
                 strv_free(*env);
                 *env = x;
         }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
 
         return 0;
 }
@@ -1926,7 +2123,7 @@ int config_parse_unit_condition_null(const char *unit,
 }
 
 DEFINE_CONFIG_PARSE_ENUM(config_parse_notify_access, notify_access, NotifyAccess, "Failed to parse notify access specifier");
-DEFINE_CONFIG_PARSE_ENUM(config_parse_start_limit_action, start_limit_action, StartLimitAction, "Failed to parse start limit action specifier");
+DEFINE_CONFIG_PARSE_ENUM(config_parse_failure_action, failure_action, FailureAction, "Failed to parse failure action specifier");
 
 int config_parse_unit_requires_mounts_for(
                 const char *unit,
@@ -1941,36 +2138,37 @@ int config_parse_unit_requires_mounts_for(
                 void *userdata) {
 
         Unit *u = userdata;
-        char *state;
+        const char *word, *state;
         size_t l;
-        char *w;
 
         assert(filename);
         assert(lvalue);
         assert(rvalue);
         assert(data);
 
-        FOREACH_WORD_QUOTED(w, l, rvalue, state) {
+        FOREACH_WORD_QUOTED(word, l, rvalue, state) {
                 int r;
                 _cleanup_free_ char *n;
 
-                n = strndup(w, l);
+                n = strndup(word, l);
                 if (!n)
                         return log_oom();
 
                 if (!utf8_is_valid(n)) {
-                        log_syntax(unit, LOG_ERR, filename, line, EINVAL,
-                                   "Path is not UTF-8 clean, ignoring assignment: %s", rvalue);
+                        log_invalid_utf8(unit, LOG_ERR, filename, line, EINVAL, rvalue);
                         continue;
                 }
 
                 r = unit_require_mounts_for(u, n);
                 if (r < 0) {
-                        log_syntax(unit, LOG_ERR, filename, line, r,
+                        log_syntax(unit, LOG_ERR, filename, line, -r,
                                    "Failed to add required mount for, ignoring: %s", rvalue);
                         continue;
                 }
         }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
 
         return 0;
 }
@@ -2046,7 +2244,7 @@ int config_parse_syscall_filter(
         ExecContext *c = data;
         Unit *u = userdata;
         bool invert = false;
-        char *w, *state;
+        const char *word, *state;
         size_t l;
         int r;
 
@@ -2099,17 +2297,18 @@ int config_parse_syscall_filter(
                 }
         }
 
-        FOREACH_WORD_QUOTED(w, l, rvalue, state) {
+        FOREACH_WORD_QUOTED(word, l, rvalue, state) {
                 _cleanup_free_ char *t = NULL;
                 int id;
 
-                t = strndup(w, l);
+                t = strndup(word, l);
                 if (!t)
                         return log_oom();
 
                 id = seccomp_syscall_resolve_name(t);
                 if (id < 0)  {
-                        log_syntax(unit, LOG_ERR, filename, line, EINVAL, "Failed to parse system call, ignoring: %s", t);
+                        log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                                   "Failed to parse system call, ignoring: %s", t);
                         continue;
                 }
 
@@ -2125,8 +2324,14 @@ int config_parse_syscall_filter(
                 } else
                         set_remove(c->syscall_filter, INT_TO_PTR(id + 1));
         }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
 
-        c->no_new_privileges = true;
+        /* Turn on NNP, but only if it wasn't configured explicitly
+         * before, and only if we are in user mode. */
+        if (!c->no_new_privileges_set && u->manager->running_as == SYSTEMD_USER)
+                c->no_new_privileges = true;
 
         return 0;
 }
@@ -2144,7 +2349,7 @@ int config_parse_syscall_archs(
                 void *userdata) {
 
         Set **archs = data;
-        char *w, *state;
+        const char *word, *state;
         size_t l;
         int r;
 
@@ -2158,17 +2363,18 @@ int config_parse_syscall_archs(
         if (r < 0)
                 return log_oom();
 
-        FOREACH_WORD_QUOTED(w, l, rvalue, state) {
+        FOREACH_WORD_QUOTED(word, l, rvalue, state) {
                 _cleanup_free_ char *t = NULL;
                 uint32_t a;
 
-                t = strndup(w, l);
+                t = strndup(word, l);
                 if (!t)
                         return log_oom();
 
                 r = seccomp_arch_from_string(t, &a);
                 if (r < 0) {
-                        log_syntax(unit, LOG_ERR, filename, line, EINVAL, "Failed to parse system call architecture, ignoring: %s", t);
+                        log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                                   "Failed to parse system call architecture, ignoring: %s", t);
                         continue;
                 }
 
@@ -2178,6 +2384,9 @@ int config_parse_syscall_archs(
                 if (r < 0)
                         return log_oom();
         }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
 
         return 0;
 }
@@ -2209,11 +2418,91 @@ int config_parse_syscall_errno(
 
         e = errno_from_name(rvalue);
         if (e < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, EINVAL, "Failed to parse error number, ignoring: %s", rvalue);
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Failed to parse error number, ignoring: %s", rvalue);
                 return 0;
         }
 
         c->syscall_errno = e;
+        return 0;
+}
+
+int config_parse_address_families(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        ExecContext *c = data;
+        Unit *u = userdata;
+        bool invert = false;
+        const char *word, *state;
+        size_t l;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(u);
+
+        if (isempty(rvalue)) {
+                /* Empty assignment resets the list */
+                set_free(c->address_families);
+                c->address_families = NULL;
+                c->address_families_whitelist = false;
+                return 0;
+        }
+
+        if (rvalue[0] == '~') {
+                invert = true;
+                rvalue++;
+        }
+
+        if (!c->address_families) {
+                c->address_families = set_new(trivial_hash_func, trivial_compare_func);
+                if (!c->address_families)
+                        return log_oom();
+
+                c->address_families_whitelist = !invert;
+        }
+
+        FOREACH_WORD_QUOTED(word, l, rvalue, state) {
+                _cleanup_free_ char *t = NULL;
+                int af;
+
+                t = strndup(word, l);
+                if (!t)
+                        return log_oom();
+
+                af = af_from_name(t);
+                if (af <= 0)  {
+                        log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                                   "Failed to parse address family, ignoring: %s", t);
+                        continue;
+                }
+
+                /* If we previously wanted to forbid an address family and now
+                 * we want to allow it, then remove it from the list
+                 */
+                if (!invert == c->address_families_whitelist)  {
+                        r = set_put(c->address_families, INT_TO_PTR(af));
+                        if (r == -EEXIST)
+                                continue;
+                        if (r < 0)
+                                return log_oom();
+                } else
+                        set_remove(c->address_families, INT_TO_PTR(af));
+        }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
+
         return 0;
 }
 #endif
@@ -2280,8 +2569,7 @@ int config_parse_cpu_shares(
                 void *data,
                 void *userdata) {
 
-        CGroupContext *c = data;
-        unsigned long lu;
+        unsigned long *shares = data, lu;
         int r;
 
         assert(filename);
@@ -2289,7 +2577,7 @@ int config_parse_cpu_shares(
         assert(rvalue);
 
         if (isempty(rvalue)) {
-                c->cpu_shares = 1024;
+                *shares = (unsigned long) -1;
                 return 0;
         }
 
@@ -2300,7 +2588,49 @@ int config_parse_cpu_shares(
                 return 0;
         }
 
-        c->cpu_shares = lu;
+        *shares = lu;
+        return 0;
+}
+
+int config_parse_cpu_quota(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        CGroupContext *c = data;
+        double percent;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                c->cpu_quota_per_sec_usec = USEC_INFINITY;
+                return 0;
+        }
+
+        if (!endswith(rvalue, "%")) {
+
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "CPU quota '%s' not ending in '%%'. Ignoring.", rvalue);
+                return 0;
+        }
+
+        if (sscanf(rvalue, "%lf%%", &percent) != 1 || percent <= 0) {
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "CPU quota '%s' invalid. Ignoring.", rvalue);
+                return 0;
+        }
+
+        c->cpu_quota_per_sec_usec = (usec_t) (percent * USEC_PER_SEC / 100);
+
         return 0;
 }
 
@@ -2329,7 +2659,8 @@ int config_parse_memory_limit(
 
         r = parse_size(rvalue, 1024, &bytes);
         if (r < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, EINVAL, "Memory limit '%s' invalid. Ignoring.", rvalue);
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Memory limit '%s' invalid. Ignoring.", rvalue);
                 return 0;
         }
 
@@ -2370,7 +2701,8 @@ int config_parse_device_allow(
         if (!startswith(path, "/dev/") &&
             !startswith(path, "block-") &&
             !startswith(path, "char-")) {
-                log_syntax(unit, LOG_ERR, filename, line, EINVAL, "Invalid device node path '%s'. Ignoring.", path);
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Invalid device node path '%s'. Ignoring.", path);
                 return 0;
         }
 
@@ -2379,7 +2711,8 @@ int config_parse_device_allow(
                 m = "rwm";
 
         if (!in_charset(m, "rwm")) {
-                log_syntax(unit, LOG_ERR, filename, line, EINVAL, "Invalid device rights '%s'. Ignoring.", m);
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Invalid device rights '%s'. Ignoring.", m);
                 return 0;
         }
 
@@ -2409,8 +2742,7 @@ int config_parse_blockio_weight(
                 void *data,
                 void *userdata) {
 
-        CGroupContext *c = data;
-        unsigned long lu;
+        unsigned long *weight = data, lu;
         int r;
 
         assert(filename);
@@ -2418,7 +2750,7 @@ int config_parse_blockio_weight(
         assert(rvalue);
 
         if (isempty(rvalue)) {
-                c->blockio_weight = 1000;
+                *weight = (unsigned long) -1;
                 return 0;
         }
 
@@ -2429,8 +2761,7 @@ int config_parse_blockio_weight(
                 return 0;
         }
 
-        c->blockio_weight = lu;
-
+        *weight = lu;
         return 0;
 }
 
@@ -2490,7 +2821,6 @@ int config_parse_blockio_device_weight(
                            "Block IO weight '%s' invalid. Ignoring.", rvalue);
                 return 0;
         }
-
 
         w = new0(CGroupBlockIODeviceWeight, 1);
         if (!w)
@@ -2564,7 +2894,8 @@ int config_parse_blockio_bandwidth(
 
         r = parse_size(bandwidth, 1000, &bytes);
         if (r < 0 || bytes <= 0) {
-                log_syntax(unit, LOG_ERR, filename, line, EINVAL, "Block IO Bandwidth '%s' invalid. Ignoring.", rvalue);
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Block IO Bandwidth '%s' invalid. Ignoring.", rvalue);
                 return 0;
         }
 
@@ -2605,7 +2936,8 @@ int config_parse_job_mode_isolate(
 
         r = parse_boolean(rvalue);
         if (r < 0) {
-                log_syntax(unit, LOG_ERR, filename, line, EINVAL, "Failed to parse boolean, ignoring: %s", rvalue);
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Failed to parse boolean, ignoring: %s", rvalue);
                 return 0;
         }
 
@@ -2640,6 +2972,317 @@ int config_parse_personality(
         }
 
         *personality = p;
+        return 0;
+}
+
+int config_parse_runtime_directory(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        char***rt = data;
+        const char *word, *state;
+        size_t l;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        if (isempty(rvalue)) {
+                /* Empty assignment resets the list */
+                strv_free(*rt);
+                *rt = NULL;
+                return 0;
+        }
+
+        FOREACH_WORD_QUOTED(word, l, rvalue, state) {
+                _cleanup_free_ char *n;
+
+                n = strndup(word, l);
+                if (!n)
+                        return log_oom();
+
+                if (!filename_is_safe(n)) {
+                        log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                                   "Runtime directory is not valid, ignoring assignment: %s", rvalue);
+                        continue;
+                }
+
+                r = strv_push(rt, n);
+                if (r < 0)
+                        return log_oom();
+
+                n = NULL;
+        }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
+
+        return 0;
+}
+
+int config_parse_set_status(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        size_t l;
+        const char *word, *state;
+        int r;
+        ExitStatusSet *status_set = data;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        /* Empty assignment resets the list */
+        if (isempty(rvalue)) {
+                exit_status_set_free(status_set);
+                return 0;
+        }
+
+        FOREACH_WORD(word, l, rvalue, state) {
+                _cleanup_free_ char *temp;
+                int val;
+
+                temp = strndup(word, l);
+                if (!temp)
+                        return log_oom();
+
+                r = safe_atoi(temp, &val);
+                if (r < 0) {
+                        val = signal_from_string_try_harder(temp);
+
+                        if (val <= 0) {
+                                log_syntax(unit, LOG_ERR, filename, line, -val,
+                                           "Failed to parse value, ignoring: %s", word);
+                                return 0;
+                        }
+                } else {
+                        if (val < 0 || val > 255) {
+                                log_syntax(unit, LOG_ERR, filename, line, ERANGE,
+                                           "Value %d is outside range 0-255, ignoring", val);
+                                continue;
+                        }
+                }
+
+                r = set_ensure_allocated(&status_set->status, NULL, NULL);
+                if (r < 0)
+                        return log_oom();
+
+                r = set_put(status_set->status, INT_TO_PTR(val));
+                if (r < 0) {
+                        log_syntax(unit, LOG_ERR, filename, line, -r,
+                                   "Unable to store: %s", word);
+                        return r;
+                }
+        }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
+
+        return 0;
+}
+
+int config_parse_namespace_path_strv(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        char*** sv = data;
+        const char *word, *state;
+        size_t l;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        if (isempty(rvalue)) {
+                /* Empty assignment resets the list */
+                strv_free(*sv);
+                *sv = NULL;
+                return 0;
+        }
+
+        FOREACH_WORD_QUOTED(word, l, rvalue, state) {
+                _cleanup_free_ char *n;
+                int offset;
+
+                n = strndup(word, l);
+                if (!n)
+                        return log_oom();
+
+                if (!utf8_is_valid(n)) {
+                        log_invalid_utf8(unit, LOG_ERR, filename, line, EINVAL, rvalue);
+                        continue;
+                }
+
+                offset = n[0] == '-';
+                if (!path_is_absolute(n + offset)) {
+                        log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                                   "Not an absolute path, ignoring: %s", rvalue);
+                        continue;
+                }
+
+                path_kill_slashes(n);
+
+                r = strv_push(sv, n);
+                if (r < 0)
+                        return log_oom();
+
+                n = NULL;
+        }
+        if (!isempty(state))
+                log_syntax(unit, LOG_ERR, filename, line, EINVAL,
+                           "Trailing garbage, ignoring.");
+
+        return 0;
+}
+
+int config_parse_no_new_privileges(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        ExecContext *c = data;
+        int k;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        k = parse_boolean(rvalue);
+        if (k < 0) {
+                log_syntax(unit, LOG_ERR, filename, line, -k,
+                           "Failed to parse boolean value, ignoring: %s", rvalue);
+                return 0;
+        }
+
+        c->no_new_privileges = !!k;
+        c->no_new_privileges_set = true;
+
+        return 0;
+}
+
+int config_parse_protect_home(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        ExecContext *c = data;
+        int k;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        /* Our enum shall be a superset of booleans, hence first try
+         * to parse as as boolean, and then as enum */
+
+        k = parse_boolean(rvalue);
+        if (k > 0)
+                c->protect_home = PROTECT_HOME_YES;
+        else if (k == 0)
+                c->protect_home = PROTECT_HOME_NO;
+        else {
+                ProtectHome h;
+
+                h = protect_home_from_string(rvalue);
+                if (h < 0){
+                        log_syntax(unit, LOG_ERR, filename, line, -h,
+                                   "Failed to parse protect home value, ignoring: %s", rvalue);
+                        return 0;
+                }
+
+                c->protect_home = h;
+        }
+
+        return 0;
+}
+
+int config_parse_protect_system(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        ExecContext *c = data;
+        int k;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        /* Our enum shall be a superset of booleans, hence first try
+         * to parse as as boolean, and then as enum */
+
+        k = parse_boolean(rvalue);
+        if (k > 0)
+                c->protect_system = PROTECT_SYSTEM_YES;
+        else if (k == 0)
+                c->protect_system = PROTECT_SYSTEM_NO;
+        else {
+                ProtectSystem s;
+
+                s = protect_system_from_string(rvalue);
+                if (s < 0){
+                        log_syntax(unit, LOG_ERR, filename, line, -s,
+                                   "Failed to parse protect system value, ignoring: %s", rvalue);
+                        return 0;
+                }
+
+                c->protect_system = s;
+        }
+
         return 0;
 }
 
@@ -2706,7 +3349,7 @@ static int open_follow(char **filename, FILE **_f, Set *names, char **_final) {
         f = fdopen(fd, "re");
         if (!f) {
                 r = -errno;
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return r;
         }
 
@@ -2847,9 +3490,10 @@ static int load_from_path(Unit *u, const char *path) {
                 u->load_state = UNIT_LOADED;
 
                 /* Now, parse the file contents */
-                r = config_parse(u->id, filename, f, UNIT_VTABLE(u)->sections,
-                                 config_item_perf_lookup,
-                                 (void*) load_fragment_gperf_lookup, false, true, u);
+                r = config_parse(u->id, filename, f,
+                                 UNIT_VTABLE(u)->sections,
+                                 config_item_perf_lookup, load_fragment_gperf_lookup,
+                                 false, true, false, u);
                 if (r < 0)
                         return r;
         }
@@ -2957,7 +3601,7 @@ void unit_dump_config_items(FILE *f) {
                 const ConfigParserCallback callback;
                 const char *rvalue;
         } table[] = {
-#if !defined(HAVE_SYSV_COMPAT) || !defined(HAVE_SECCOMP) || !defined(HAVE_LIBWRAP) || !defined(HAVE_PAM) || !defined(HAVE_SELINUX) || !defined(HAVE_SMACK) || !defined(HAVE_APPARMOR)
+#if !defined(HAVE_SYSV_COMPAT) || !defined(HAVE_SECCOMP) || !defined(HAVE_PAM) || !defined(HAVE_SELINUX) || !defined(HAVE_SMACK) || !defined(HAVE_APPARMOR)
                 { config_parse_warn_compat,           "NOTSUPPORTED" },
 #endif
                 { config_parse_int,                   "INTEGER" },
@@ -2981,8 +3625,8 @@ void unit_dump_config_items(FILE *f) {
                 { config_parse_unit_env_file,         "FILE" },
                 { config_parse_output,                "OUTPUT" },
                 { config_parse_input,                 "INPUT" },
-                { config_parse_facility,              "FACILITY" },
-                { config_parse_level,                 "LEVEL" },
+                { config_parse_log_facility,          "FACILITY" },
+                { config_parse_log_level,             "LEVEL" },
                 { config_parse_exec_capabilities,     "CAPABILITIES" },
                 { config_parse_exec_secure_bits,      "SECUREBITS" },
                 { config_parse_bounding_set,          "BOUNDINGSET" },
@@ -3001,7 +3645,7 @@ void unit_dump_config_items(FILE *f) {
                 { config_parse_socket_bindtodevice,   "NETWORKINTERFACE" },
                 { config_parse_sec,                   "SECONDS" },
                 { config_parse_nsec,                  "NANOSECONDS" },
-                { config_parse_path_strv,             "PATH [...]" },
+                { config_parse_namespace_path_strv,   "PATH [...]" },
                 { config_parse_unit_requires_mounts_for, "PATH [...]" },
                 { config_parse_exec_mount_flags,      "MOUNTFLAG [...]" },
                 { config_parse_unit_string_printf,    "STRING" },
@@ -3016,7 +3660,7 @@ void unit_dump_config_items(FILE *f) {
                 { config_parse_unit_slice,            "SLICE" },
                 { config_parse_documentation,         "URL" },
                 { config_parse_service_timeout,       "SECONDS" },
-                { config_parse_start_limit_action,    "ACTION" },
+                { config_parse_failure_action,        "ACTION" },
                 { config_parse_set_status,            "STATUS" },
                 { config_parse_service_sockets,       "SOCKETS" },
                 { config_parse_environ,               "ENVIRON" },
@@ -3024,6 +3668,7 @@ void unit_dump_config_items(FILE *f) {
                 { config_parse_syscall_filter,        "SYSCALLS" },
                 { config_parse_syscall_archs,         "ARCHS" },
                 { config_parse_syscall_errno,         "ERRNO" },
+                { config_parse_address_families,      "FAMILIES" },
 #endif
                 { config_parse_cpu_shares,            "SHARES" },
                 { config_parse_memory_limit,          "LIMIT" },
@@ -3039,6 +3684,7 @@ void unit_dump_config_items(FILE *f) {
 #endif
                 { config_parse_job_mode,              "MODE" },
                 { config_parse_job_mode_isolate,      "BOOLEAN" },
+                { config_parse_personality,           "PERSONALITY" },
         };
 
         const char *prev = NULL;

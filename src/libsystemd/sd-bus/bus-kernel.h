@@ -23,6 +23,7 @@
 
 #include <stdbool.h>
 
+#include "busname.h"
 #include "sd-bus.h"
 
 #define KDBUS_ITEM_NEXT(item) \
@@ -30,7 +31,8 @@
 
 #define KDBUS_ITEM_FOREACH(part, head, first)                           \
         for (part = (head)->first;                                      \
-             (uint8_t *)(part) < (uint8_t *)(head) + (head)->size;      \
+             ((uint8_t *)(part) < (uint8_t *)(head) + (head)->size) &&  \
+                ((uint8_t *) part >= (uint8_t *) head);                 \
              part = KDBUS_ITEM_NEXT(part))
 
 #define KDBUS_ITEM_HEADER_SIZE offsetof(struct kdbus_item, data)
@@ -63,9 +65,11 @@ int bus_kernel_take_fd(sd_bus *b);
 int bus_kernel_write_message(sd_bus *bus, sd_bus_message *m, bool hint_sync_call);
 int bus_kernel_read_message(sd_bus *bus, bool hint_priority, int64_t priority);
 
+int bus_kernel_open_bus_fd(const char *bus, char **path);
+int bus_kernel_make_starter(int fd, const char *name, bool activating, bool accept_fd, BusNamePolicy *policy, BusNamePolicyAccess world_policy);
+
 int bus_kernel_create_bus(const char *name, bool world, char **s);
 int bus_kernel_create_domain(const char *name, char **s);
-int bus_kernel_create_starter(const char *bus, const char *name);
 int bus_kernel_create_monitor(const char *bus);
 
 int bus_kernel_pop_memfd(sd_bus *bus, void **address, size_t *mapped, size_t *allocated);

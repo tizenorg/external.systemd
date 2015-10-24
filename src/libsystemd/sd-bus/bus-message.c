@@ -70,7 +70,7 @@ static void message_free_part(sd_bus_message *m, struct bus_body_part *part) {
                         if (part->mapped > 0)
                                 assert_se(munmap(part->data, part->mapped) == 0);
 
-                        close_nointr_nofail(part->memfd);
+                        safe_close(part->memfd);
                 }
 
         } else if (part->munmap_this)
@@ -136,8 +136,7 @@ static void message_free(sd_bus_message *m) {
                 ioctl(m->bus->input_fd, KDBUS_CMD_FREE, &off);
         }
 
-        if (m->bus)
-                sd_bus_unref(m->bus);
+        sd_bus_unref(m->bus);
 
         if (m->free_fds) {
                 close_many(m->fds, m->n_fds);
@@ -373,6 +372,7 @@ int bus_message_from_header(
         struct bus_header *h;
         size_t a, label_sz;
 
+        assert(bus);
         assert(buffer || length <= 0);
         assert(fds || n_fds <= 0);
         assert(ret);
@@ -426,10 +426,9 @@ int bus_message_from_header(
                 m->creds.mask |= SD_BUS_CREDS_SELINUX_CONTEXT;
         }
 
-        if (bus)
-                m->bus = sd_bus_ref(bus);
-
+        m->bus = sd_bus_ref(bus);
         *ret = m;
+
         return 0;
 }
 
@@ -489,6 +488,8 @@ fail:
 static sd_bus_message *message_new(sd_bus *bus, uint8_t type) {
         sd_bus_message *m;
 
+        assert(bus);
+
         m = malloc0(ALIGN(sizeof(sd_bus_message)) + sizeof(struct bus_header));
         if (!m)
                 return NULL;
@@ -500,9 +501,7 @@ static sd_bus_message *message_new(sd_bus *bus, uint8_t type) {
         m->header->version = bus ? bus->message_version : 1;
         m->allow_fds = !bus || bus->can_fds || (bus->state != BUS_HELLO && bus->state != BUS_RUNNING);
         m->root_container.need_offsets = BUS_MESSAGE_IS_GVARIANT(m);
-
-        if (bus)
-                m->bus = sd_bus_ref(bus);
+        m->bus = sd_bus_ref(bus);
 
         return m;
 }
@@ -517,7 +516,8 @@ _public_ int sd_bus_message_new_signal(
         sd_bus_message *t;
         int r;
 
-        assert_return(!bus || bus->state != BUS_UNSET, -ENOTCONN);
+        assert_return(bus, -ENOTCONN);
+        assert_return(bus->state != BUS_UNSET, -ENOTCONN);
         assert_return(object_path_is_valid(path), -EINVAL);
         assert_return(interface_name_is_valid(interface), -EINVAL);
         assert_return(member_name_is_valid(member), -EINVAL);
@@ -558,7 +558,8 @@ _public_ int sd_bus_message_new_method_call(
         sd_bus_message *t;
         int r;
 
-        assert_return(!bus || bus->state != BUS_UNSET, -ENOTCONN);
+        assert_return(bus, -ENOTCONN);
+        assert_return(bus->state != BUS_UNSET, -ENOTCONN);
         assert_return(!destination || service_name_is_valid(destination), -EINVAL);
         assert_return(object_path_is_valid(path), -EINVAL);
         assert_return(!interface || interface_name_is_valid(interface), -EINVAL);
@@ -607,7 +608,7 @@ static int message_new_reply(
         assert_return(call, -EINVAL);
         assert_return(call->sealed, -EPERM);
         assert_return(call->header->type == SD_BUS_MESSAGE_METHOD_CALL, -EINVAL);
-        assert_return(!call->bus || call->bus->state != BUS_UNSET, -ENOTCONN);
+        assert_return(call->bus->state != BUS_UNSET, -ENOTCONN);
         assert_return(m, -EINVAL);
 
         t = message_new(call->bus, type);
@@ -617,7 +618,7 @@ static int message_new_reply(
         t->header->flags |= BUS_MESSAGE_NO_REPLY_EXPECTED;
         t->reply_cookie = BUS_MESSAGE_COOKIE(call);
 
-        r = message_append_field_uint32(t, BUS_MESSAGE_HEADER_REPLY_SERIAL, t->reply_cookie);
+        r = message_append_field_uint32(t, BUS_MESSAGE_HEADER_REPLY_SERIAL, (uint32_t) t->reply_cookie);
         if (r < 0)
                 goto fail;
 
@@ -742,6 +743,7 @@ int bus_message_new_synthetic_error(
         sd_bus_message *t;
         int r;
 
+        assert(bus);
         assert(sd_bus_error_is_set(e));
         assert(m);
 
@@ -752,7 +754,7 @@ int bus_message_new_synthetic_error(
         t->header->flags |= BUS_MESSAGE_NO_REPLY_EXPECTED;
         t->reply_cookie = cookie;
 
-        r = message_append_field_uint32(t, BUS_MESSAGE_HEADER_REPLY_SERIAL, t->reply_cookie);
+        r = message_append_field_uint32(t, BUS_MESSAGE_HEADER_REPLY_SERIAL, (uint32_t) t->reply_cookie);
         if (r < 0)
                 goto fail;
 
@@ -799,9 +801,10 @@ _public_ sd_bus_message* sd_bus_message_unref(sd_bus_message *m) {
         assert(m->n_ref > 0);
         m->n_ref--;
 
-        if (m->n_ref <= 0)
-                message_free(m);
+        if (m->n_ref > 0)
+                return NULL;
 
+        message_free(m);
         return NULL;
 }
 
@@ -1274,7 +1277,7 @@ static int message_push_fd(sd_bus_message *m, int fd) {
         f = realloc(m->fds, sizeof(int) * (m->n_fds + 1));
         if (!f) {
                 m->poisoned = true;
-                close_nointr_nofail(copy);
+                safe_close(copy);
                 return -ENOMEM;
         }
 
@@ -2784,7 +2787,7 @@ int bus_message_seal(sd_bus_message *m, uint64_t cookie, usec_t timeout) {
         /* If this is something we can send as memfd, then let's seal
         the memfd now. Note that we can send memfds as payload only
         for directed messages, and not for broadcasts. */
-        if (m->destination && m->bus && m->bus->use_memfd) {
+        if (m->destination && m->bus->use_memfd) {
                 MESSAGE_FOREACH_PART(part, i, m)
                         if (part->memfd >= 0 && !part->sealed && (part->size > MEMFD_MIN_SIZE || m->bus->use_memfd < 0)) {
                                 uint64_t sz;
@@ -2837,7 +2840,7 @@ int bus_body_part_map(struct bus_body_part *part) {
         psz = PAGE_ALIGN(part->size);
 
         if (part->memfd >= 0)
-                p = mmap(NULL, psz, PROT_READ, MAP_SHARED, part->memfd, 0);
+                p = mmap(NULL, psz, PROT_READ, MAP_PRIVATE, part->memfd, 0);
         else if (part->is_zero)
                 p = mmap(NULL, psz, PROT_READ, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
         else
@@ -4215,7 +4218,7 @@ static int message_read_ap(
          * in a single stackframe. We hence implement our own
          * home-grown stack in an array. */
 
-        n_array = (unsigned) -1; /* lenght of current array entries */
+        n_array = (unsigned) -1; /* length of current array entries */
         n_struct = strlen(types); /* length of current struct contents signature */
 
         for (;;) {
@@ -4885,6 +4888,7 @@ int bus_message_parse_fields(sd_bus_message *m) {
         size_t ri;
         int r;
         uint32_t unix_fds = 0;
+        bool unix_fds_set = false;
         void *offsets = NULL;
         unsigned n_offsets = 0;
         size_t sz = 0;
@@ -5044,7 +5048,7 @@ int bus_message_parse_fields(sd_bus_message *m) {
 
                         r = message_peek_field_string(m, service_name_is_valid, &ri, item_size, &m->sender);
 
-                        if (r >= 0 && m->sender[0] == ':' && m->bus && m->bus->bus_client && !m->bus->is_kernel) {
+                        if (r >= 0 && m->sender[0] == ':' && m->bus->bus_client && !m->bus->is_kernel) {
                                 m->creds.unique_name = (char*) m->sender;
                                 m->creds.mask |= SD_BUS_CREDS_UNIQUE_NAME & m->bus->creds_mask;
                         }
@@ -5075,24 +5079,29 @@ int bus_message_parse_fields(sd_bus_message *m) {
                         break;
                 }
 
-                case BUS_MESSAGE_HEADER_REPLY_SERIAL:
+                case BUS_MESSAGE_HEADER_REPLY_SERIAL: {
+                        uint32_t serial;
+
                         if (m->reply_cookie != 0)
                                 return -EBADMSG;
 
                         if (!streq(signature, "u"))
                                 return -EBADMSG;
 
-                        r = message_peek_field_uint32(m, &ri, item_size, &m->reply_cookie);
+                        r = message_peek_field_uint32(m, &ri, item_size, &serial);
                         if (r < 0)
                                 return r;
+
+                        m->reply_cookie = serial;
 
                         if (m->reply_cookie == 0)
                                 return -EBADMSG;
 
                         break;
+                }
 
                 case BUS_MESSAGE_HEADER_UNIX_FDS:
-                        if (unix_fds != 0)
+                        if (unix_fds_set)
                                 return -EBADMSG;
 
                         if (!streq(signature, "u"))
@@ -5102,9 +5111,7 @@ int bus_message_parse_fields(sd_bus_message *m) {
                         if (r < 0)
                                 return -EBADMSG;
 
-                        if (unix_fds == 0)
-                                return -EBADMSG;
-
+                        unix_fds_set = true;
                         break;
 
                 default:
@@ -5489,7 +5496,7 @@ int bus_message_remarshal(sd_bus *bus, sd_bus_message **m) {
                         return -ENOMEM;
 
                 n->reply_cookie = (*m)->reply_cookie;
-                r = message_append_field_uint32(n, BUS_MESSAGE_HEADER_REPLY_SERIAL, n->reply_cookie);
+                r = message_append_field_uint32(n, BUS_MESSAGE_HEADER_REPLY_SERIAL, (uint32_t) n->reply_cookie);
                 if (r < 0)
                         return r;
 

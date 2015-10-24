@@ -117,7 +117,6 @@ static int detect_vm_dmi(const char **_id) {
                 /* http://kb.vmware.com/selfservice/microsites/search.do?language=en_US&cmd=displayKC&externalId=1009458 */
                 "VMware\0"                "vmware\0"
                 "VMW\0"                   "vmware\0"
-                "Microsoft Corporation\0" "microsoft\0"
                 "innotek GmbH\0"          "oracle\0"
                 "Xen\0"                   "xen\0"
                 "Bochs\0"                 "bochs\0";
@@ -149,7 +148,7 @@ static int detect_vm_dmi(const char **_id) {
 
 /* Returns a short identifier for the various VM implementations */
 int detect_vm(const char **id) {
-        _cleanup_free_ char *hvtype = NULL, *cpuinfo_contents = NULL;
+        _cleanup_free_ char *domcap = NULL, *cpuinfo_contents = NULL;
         static thread_local int cached_found = -1;
         static thread_local const char *cached_id = NULL;
         const char *_id = NULL;
@@ -163,17 +162,37 @@ int detect_vm(const char **id) {
                 return cached_found;
         }
 
-        /* Try high-level hypervisor sysfs file first:
+        /* Try xen capabilities file first, if not found try high-level hypervisor sysfs file:
          *
-         * https://bugs.freedesktop.org/show_bug.cgi?id=61491 */
-        r = read_one_line_file("/sys/hypervisor/type", &hvtype);
+         * https://bugs.freedesktop.org/show_bug.cgi?id=77271 */
+        r = read_one_line_file("/proc/xen/capabilities", &domcap);
         if (r >= 0) {
-                if (streq(hvtype, "xen")) {
+                char *cap, *i = domcap;
+
+                while ((cap = strsep(&i, ",")))
+                        if (streq(cap, "control_d"))
+                                break;
+
+                if (!cap)  {
                         _id = "xen";
                         r = 1;
-                        goto finish;
                 }
-        } else if (r != -ENOENT)
+
+                goto finish;
+
+        } else if (r == -ENOENT) {
+                _cleanup_free_ char *hvtype = NULL;
+
+                r = read_one_line_file("/sys/hypervisor/type", &hvtype);
+                if (r >= 0) {
+                        if (streq(hvtype, "xen")) {
+                                _id = "xen";
+                                r = 1;
+                                goto finish;
+                        }
+                } else if (r != -ENOENT)
+                        return r;
+        } else
                 return r;
 
         /* this will set _id to "other" and return 0 for unknown hypervisors */
@@ -201,6 +220,23 @@ int detect_vm(const char **id) {
                 goto finish;
         }
 
+#if defined(__s390__)
+        {
+                _cleanup_free_ char *t = NULL;
+
+                r = get_status_field("/proc/sysinfo", "VM00 Control Program:", &t);
+                if (r >= 0) {
+                        if (streq(t, "z/VM"))
+                                _id = "zvm";
+                        else
+                                _id = "kvm";
+                        r = 1;
+
+                        goto finish;
+                }
+        }
+#endif
+
         r = 0;
 
 finish:
@@ -218,8 +254,8 @@ int detect_container(const char **id) {
         static thread_local int cached_found = -1;
         static thread_local const char *cached_id = NULL;
 
-        _cleanup_free_ char *e = NULL;
-        const char *_id = NULL;
+        _cleanup_free_ char *m = NULL;
+        const char *_id = NULL, *e = NULL;
         int r;
 
         if (_likely_(cached_found >= 0)) {
@@ -228,17 +264,6 @@ int detect_container(const char **id) {
                         *id = cached_id;
 
                 return cached_found;
-        }
-
-        /* Unfortunately many of these operations require root access
-         * in one way or another */
-
-        r = running_in_chroot();
-        if (r < 0)
-                return r;
-        if (r > 0) {
-                _id = "chroot";
-                goto finish;
         }
 
         /* /proc/vz exists in container and outside of the container,
@@ -250,11 +275,32 @@ int detect_container(const char **id) {
                 goto finish;
         }
 
-        r = getenv_for_pid(1, "container", &e);
-        if (r < 0)
-                return r;
-        if (r == 0)
-                goto finish;
+        if (getpid() == 1) {
+                /* If we are PID 1 we can just check our own
+                 * environment variable */
+
+                e = getenv("container");
+                if (isempty(e)) {
+                        r = 0;
+                        goto finish;
+                }
+        } else {
+
+                /* Otherwise, PID 1 dropped this information into a
+                 * file in /run. This is better than accessing
+                 * /proc/1/environ, since we don't need CAP_SYS_PTRACE
+                 * for that. */
+
+                r = read_one_line_file("/run/systemd/container", &m);
+                if (r == -ENOENT) {
+                        r = 0;
+                        goto finish;
+                }
+                if (r < 0)
+                        return r;
+
+                e = m;
+        }
 
         /* We only recognize a selected few here, since we want to
          * enforce a redacted namespace */
@@ -266,6 +312,8 @@ int detect_container(const char **id) {
                 _id = "systemd-nspawn";
         else
                 _id = "other";
+
+        r = 1;
 
 finish:
         cached_found = r;

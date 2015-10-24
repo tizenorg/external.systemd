@@ -61,7 +61,7 @@
         "/usr/lib/kbd/keymaps/\0"
 #endif
 
-#define UNIX_SYSTEM_BUS_PATH "unix:path=/run/dbus/system_bus_socket"
+#define UNIX_SYSTEM_BUS_PATH "unix:path=/var/run/dbus/system_bus_socket"
 #define KERNEL_SYSTEM_BUS_PATH "kernel:path=/dev/kdbus/0-system/bus"
 
 #ifdef ENABLE_KDBUS
@@ -71,8 +71,17 @@
 #endif
 
 #define UNIX_USER_BUS_FMT "unix:path=%s/bus"
-#define KERNEL_USER_BUS_FMT "kernel:path=/dev/kdbus/%lu-user/bus"
+#define KERNEL_USER_BUS_FMT "kernel:path=/dev/kdbus/"UID_FMT"-user/bus"
+
+#define PLYMOUTH_SOCKET {                                       \
+                .un.sun_family = AF_UNIX,                       \
+                .un.sun_path = "\0/org/freedesktop/plymouthd",  \
+        }
 
 #ifndef TTY_GID
 #define TTY_GID 5
+#endif
+
+#ifndef RUN_GID
+#define RUN_GID	0
 #endif

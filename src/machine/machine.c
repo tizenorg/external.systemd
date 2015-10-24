@@ -94,6 +94,7 @@ void machine_free(Machine *m) {
         free(m->state_file);
         free(m->service);
         free(m->root_directory);
+        free(m->netif);
         free(m);
 }
 
@@ -123,17 +124,42 @@ int machine_save(Machine *m) {
                 "NAME=%s\n",
                 m->name);
 
-        if (m->unit)
-                fprintf(f, "SCOPE=%s\n", m->unit); /* We continue to call this "SCOPE=" because it is internal only, and we want to stay compatible with old files */
+        if (m->unit) {
+                _cleanup_free_ char *escaped;
+
+                escaped = cescape(m->unit);
+                if (!escaped) {
+                        r = -ENOMEM;
+                        goto finish;
+                }
+
+                fprintf(f, "SCOPE=%s\n", escaped); /* We continue to call this "SCOPE=" because it is internal only, and we want to stay compatible with old files */
+        }
 
         if (m->scope_job)
                 fprintf(f, "SCOPE_JOB=%s\n", m->scope_job);
 
-        if (m->service)
-                fprintf(f, "SERVICE=%s\n", m->service);
+        if (m->service) {
+                _cleanup_free_ char *escaped;
 
-        if (m->root_directory)
-                fprintf(f, "ROOT=%s\n", m->root_directory);
+                escaped = cescape(m->service);
+                if (!escaped) {
+                        r = -ENOMEM;
+                        goto finish;
+                }
+                fprintf(f, "SERVICE=%s\n", escaped);
+        }
+
+        if (m->root_directory) {
+                _cleanup_free_ char *escaped;
+
+                escaped = cescape(m->root_directory);
+                if (!escaped) {
+                        r = -ENOMEM;
+                        goto finish;
+                }
+                fprintf(f, "ROOT=%s\n", escaped);
+        }
 
         if (!sd_id128_equal(m->id, SD_ID128_NULL))
                 fprintf(f, "ID=" SD_ID128_FORMAT_STR "\n", SD_ID128_FORMAT_VAL(m->id));
@@ -151,12 +177,28 @@ int machine_save(Machine *m) {
                         m->timestamp.realtime,
                         m->timestamp.monotonic);
 
-        fflush(f);
+        if (m->n_netif > 0) {
+                unsigned i;
 
-        if (ferror(f) || rename(temp_path, m->state_file) < 0) {
+                fputs("NETIF=", f);
+
+                for (i = 0; i < m->n_netif; i++) {
+                        if (i != 0)
+                                fputc(' ', f);
+
+                        fprintf(f, "%i", m->netif[i]);
+                }
+
+                fputc('\n', f);
+        }
+
+        r = fflush_and_check(f);
+        if (r < 0)
+                goto finish;
+
+        if (rename(temp_path, m->state_file) < 0) {
                 r = -errno;
-                unlink(m->state_file);
-                unlink(temp_path);
+                goto finish;
         }
 
         if (m->unit) {
@@ -170,8 +212,12 @@ int machine_save(Machine *m) {
         }
 
 finish:
-        if (r < 0)
+        if (r < 0) {
+                if (temp_path)
+                        unlink(temp_path);
+
                 log_error("Failed to save machine data %s: %s", m->state_file, strerror(-r));
+        }
 
         return r;
 }
@@ -192,7 +238,7 @@ static void machine_unlink(Machine *m) {
 }
 
 int machine_load(Machine *m) {
-        _cleanup_free_ char *realtime = NULL, *monotonic = NULL, *id = NULL, *leader = NULL, *class = NULL;
+        _cleanup_free_ char *realtime = NULL, *monotonic = NULL, *id = NULL, *leader = NULL, *class = NULL, *netif = NULL;
         int r;
 
         assert(m);
@@ -207,6 +253,7 @@ int machine_load(Machine *m) {
                            "CLASS",     &class,
                            "REALTIME",  &realtime,
                            "MONOTONIC", &monotonic,
+                           "NETIF",     &netif,
                            NULL);
         if (r < 0) {
                 if (r == -ENOENT)
@@ -240,6 +287,35 @@ int machine_load(Machine *m) {
                 unsigned long long l;
                 if (sscanf(monotonic, "%llu", &l) > 0)
                         m->timestamp.monotonic = l;
+        }
+
+        if (netif) {
+                size_t l, allocated = 0, nr = 0;
+                const char *word, *state;
+                int *ni = NULL;
+
+                FOREACH_WORD(word, l, netif, state) {
+                        char buf[l+1];
+                        int ifi;
+
+                        *(char*) (mempcpy(buf, word, l)) = 0;
+
+                        if (safe_atoi(buf, &ifi) < 0)
+                                continue;
+                        if (ifi <= 0)
+                                continue;
+
+                        if (!GREEDY_REALLOC(ni, allocated, nr+1)) {
+                                free(ni);
+                                return log_oom();
+                        }
+
+                        ni[nr++] = ifi;
+                }
+
+                free(m->netif);
+                m->netif = ni;
+                m->n_netif = nr;
         }
 
         return r;
@@ -303,7 +379,7 @@ int machine_start(Machine *m, sd_bus_message *properties, sd_bus_error *error) {
         log_struct(LOG_INFO,
                    MESSAGE_ID(SD_MESSAGE_MACHINE_START),
                    "NAME=%s", m->name,
-                   "LEADER=%lu", (unsigned long) m->leader,
+                   "LEADER="PID_FMT, m->leader,
                    "MESSAGE=New machine %s.", m->name,
                    NULL);
 
@@ -330,16 +406,18 @@ static int machine_stop_scope(Machine *m) {
         if (!m->unit)
                 return 0;
 
-        r = manager_stop_unit(m->manager, m->unit, &error, &job);
-        if (r < 0) {
-                log_error("Failed to stop machine scope: %s", bus_error_message(&error, r));
-                return r;
+        if (!m->registered) {
+                r = manager_stop_unit(m->manager, m->unit, &error, &job);
+                if (r < 0) {
+                        log_error("Failed to stop machine scope: %s", bus_error_message(&error, r));
+                        return r;
+                }
         }
 
         free(m->scope_job);
         m->scope_job = job;
 
-        return r;
+        return 0;
 }
 
 int machine_stop(Machine *m) {
@@ -350,7 +428,7 @@ int machine_stop(Machine *m) {
                 log_struct(LOG_INFO,
                            MESSAGE_ID(SD_MESSAGE_MACHINE_STOP),
                            "NAME=%s", m->name,
-                           "LEADER=%lu", (unsigned long) m->leader,
+                           "LEADER="PID_FMT, m->leader,
                            "MESSAGE=Machine %s terminated.", m->name,
                            NULL);
 
@@ -410,7 +488,17 @@ int machine_kill(Machine *m, KillWho who, int signo) {
         if (!m->unit)
                 return -ESRCH;
 
-        return manager_kill_unit(m->manager, m->unit, who, signo, NULL);
+        if (who == KILL_LEADER) {
+                /* If we shall simply kill the leader, do so directly */
+
+                if (kill(m->leader, signo) < 0)
+                        return -errno;
+
+                return 0;
+        }
+
+        /* Otherwise make PID 1 do it for us, for the entire cgroup */
+        return manager_kill_unit(m->manager, m->unit, signo, NULL);
 }
 
 static const char* const machine_class_table[_MACHINE_CLASS_MAX] = {

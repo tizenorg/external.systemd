@@ -26,10 +26,10 @@
 #include "strv.h"
 #include "path-util.h"
 #include "fileio.h"
-#include "dbus-unit.h"
-#include "dbus-manager.h"
 #include "bus-errors.h"
-#include "dbus-client-track.h"
+#include "dbus.h"
+#include "dbus-manager.h"
+#include "dbus-unit.h"
 
 static BUS_DEFINE_PROPERTY_GET_ENUM(property_get_load_state, unit_load_state, UnitLoadState);
 static BUS_DEFINE_PROPERTY_GET_ENUM(property_get_job_mode, job_mode, JobMode);
@@ -421,6 +421,12 @@ int bus_unit_method_kill(sd_bus *bus, sd_bus_message *message, void *userdata, s
         assert(message);
         assert(u);
 
+        r = bus_verify_manage_unit_async_for_kill(u->manager, message, error);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
+
         r = sd_bus_message_read(message, "si", &swho, &signo);
         if (r < 0)
                 return r;
@@ -436,7 +442,7 @@ int bus_unit_method_kill(sd_bus *bus, sd_bus_message *message, void *userdata, s
         if (signo <= 0 || signo >= _NSIG)
                 return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Signal number out of range.");
 
-        r = selinux_unit_access_check(u, bus, message, "stop", error);
+        r = selinux_unit_access_check(u, message, "stop", error);
         if (r < 0)
                 return r;
 
@@ -455,7 +461,13 @@ int bus_unit_method_reset_failed(sd_bus *bus, sd_bus_message *message, void *use
         assert(message);
         assert(u);
 
-        r = selinux_unit_access_check(u, bus, message, "reload", error);
+        r = bus_verify_manage_unit_async(u->manager, message, error);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
+
+        r = selinux_unit_access_check(u, message, "reload", error);
         if (r < 0)
                 return r;
 
@@ -472,11 +484,17 @@ int bus_unit_method_set_properties(sd_bus *bus, sd_bus_message *message, void *u
         assert(message);
         assert(u);
 
+        r = bus_verify_manage_unit_async(u->manager, message, error);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
+
         r = sd_bus_message_read(message, "b", &runtime);
         if (r < 0)
                 return r;
 
-        r = selinux_unit_access_check(u, bus, message, "start", error);
+        r = selinux_unit_access_check(u, message, "start", error);
         if (r < 0)
                 return r;
 
@@ -589,7 +607,7 @@ const sd_bus_vtable bus_unit_cgroup_vtable[] = {
         SD_BUS_VTABLE_END
 };
 
-static int send_new_signal(sd_bus *bus, const char *destination, void *userdata) {
+static int send_new_signal(sd_bus *bus, void *userdata) {
         _cleanup_bus_message_unref_ sd_bus_message *m = NULL;
         _cleanup_free_ char *p = NULL;
         Unit *u = userdata;
@@ -615,10 +633,10 @@ static int send_new_signal(sd_bus *bus, const char *destination, void *userdata)
         if (r < 0)
                 return r;
 
-        return sd_bus_send_to(bus, m, destination, NULL);
+        return sd_bus_send(bus, m, NULL);
 }
 
-static int send_changed_signal(sd_bus *bus, const char *destination, void *userdata) {
+static int send_changed_signal(sd_bus *bus, void *userdata) {
         _cleanup_free_ char *p = NULL;
         Unit *u = userdata;
         int r;
@@ -638,21 +656,13 @@ static int send_changed_signal(sd_bus *bus, const char *destination, void *userd
                         bus, p,
                         UNIT_VTABLE(u)->bus_interface,
                         NULL);
-        if (r < 0) {
-                log_warning("Failed to send out specific PropertiesChanged signal for %s: %s", u->id, strerror(-r));
+        if (r < 0)
                 return r;
-        }
 
-        r = sd_bus_emit_properties_changed_strv(
+        return sd_bus_emit_properties_changed_strv(
                         bus, p,
                         "org.freedesktop.systemd1.Unit",
                         NULL);
-        if (r < 0) {
-                log_warning("Failed to send out generic PropertiesChanged signal for %s: %s", u->id, strerror(-r));
-                return r;
-        }
-
-        return 0;
 }
 
 void bus_unit_send_change_signal(Unit *u) {
@@ -667,14 +677,14 @@ void bus_unit_send_change_signal(Unit *u) {
         if (!u->id)
                 return;
 
-        r = bus_manager_foreach_client(u->manager, u->sent_dbus_new_signal ? send_changed_signal : send_new_signal, u);
+        r = bus_foreach_bus(u->manager, NULL, u->sent_dbus_new_signal ? send_changed_signal : send_new_signal, u);
         if (r < 0)
                 log_debug("Failed to send unit change signal for %s: %s", u->id, strerror(-r));
 
         u->sent_dbus_new_signal = true;
 }
 
-static int send_removed_signal(sd_bus *bus, const char *destination, void *userdata) {
+static int send_removed_signal(sd_bus *bus, void *userdata) {
         _cleanup_bus_message_unref_ sd_bus_message *m = NULL;
         _cleanup_free_ char *p = NULL;
         Unit *u = userdata;
@@ -700,7 +710,7 @@ static int send_removed_signal(sd_bus *bus, const char *destination, void *userd
         if (r < 0)
                 return r;
 
-        return sd_bus_send_to(bus, m, destination, NULL);
+        return sd_bus_send(bus, m, NULL);
 }
 
 void bus_unit_send_removed_signal(Unit *u) {
@@ -713,7 +723,7 @@ void bus_unit_send_removed_signal(Unit *u) {
         if (!u->id)
                 return;
 
-        r = bus_manager_foreach_client(u->manager, send_removed_signal, u);
+        r = bus_foreach_bus(u->manager, NULL, send_removed_signal, u);
         if (r < 0)
                 log_debug("Failed to send unit remove signal for %s: %s", u->id, strerror(-r));
 }
@@ -745,7 +755,7 @@ int bus_unit_queue_job(
         }
 
         r = selinux_unit_access_check(
-                        u, bus, message,
+                        u, message,
                         (type == JOB_START || type == JOB_RESTART || type == JOB_TRY_RESTART) ? "start" :
                         type == JOB_STOP ? "stop" : "reload", error);
         if (r < 0)
@@ -765,9 +775,17 @@ int bus_unit_queue_job(
         if (r < 0)
                 return r;
 
-        r = bus_client_track(&j->subscribed, bus, sd_bus_message_get_sender(message));
-        if (r < 0)
-                return r;
+        if (bus == u->manager->api_bus) {
+                if (!j->clients) {
+                        r = sd_bus_track_new(bus, &j->clients, NULL, NULL);
+                        if (r < 0)
+                                return r;
+                }
+
+                r = sd_bus_track_add_sender(j->clients, message);
+                if (r < 0)
+                        return r;
+        }
 
         path = job_dbus_path(j);
         if (!path)

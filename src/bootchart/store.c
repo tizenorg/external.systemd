@@ -34,6 +34,7 @@
 #include <time.h>
 
 #include "util.h"
+#include "time-util.h"
 #include "strxcpyx.h"
 #include "store.h"
 #include "bootchart.h"
@@ -54,30 +55,25 @@ double gettime_ns(void) {
 
         clock_gettime(CLOCK_MONOTONIC, &n);
 
-        return (n.tv_sec + (n.tv_nsec / 1000000000.0));
+        return (n.tv_sec + (n.tv_nsec / (double) NSEC_PER_SEC));
+}
+
+static double gettime_up(void) {
+        struct timespec n;
+
+        clock_gettime(CLOCK_BOOTTIME, &n);
+        return (n.tv_sec + (n.tv_nsec / (double) NSEC_PER_SEC));
 }
 
 void log_uptime(void) {
-        _cleanup_fclose_ FILE *f = NULL;
-        char str[32];
-        double uptime;
-
-        f = fopen("/proc/uptime", "re");
-
-        if (!f)
-                return;
-        if (!fscanf(f, "%s %*s", str))
-                return;
-
-        uptime = strtod(str, NULL);
-
-        log_start = gettime_ns();
-
-        /* start graph at kernel boot time */
         if (arg_relative)
-                graph_start = log_start;
-        else
+                graph_start = log_start = gettime_ns();
+        else {
+                double uptime = gettime_up();
+
+                log_start = gettime_ns();
                 graph_start = log_start - uptime;
+        }
 }
 
 static char *bufgetline(char *buf) {

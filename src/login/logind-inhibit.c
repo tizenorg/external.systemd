@@ -151,9 +151,9 @@ int inhibitor_start(Inhibitor *i) {
 
         dual_timestamp_get(&i->since);
 
-        log_debug("Inhibitor %s (%s) pid=%lu uid=%lu mode=%s started.",
+        log_debug("Inhibitor %s (%s) pid="PID_FMT" uid="UID_FMT" mode=%s started.",
                   strna(i->who), strna(i->why),
-                  (unsigned long) i->pid, (unsigned long) i->uid,
+                  i->pid, i->uid,
                   inhibit_mode_to_string(i->mode));
 
         inhibitor_save(i);
@@ -169,9 +169,9 @@ int inhibitor_stop(Inhibitor *i) {
         assert(i);
 
         if (i->started)
-                log_debug("Inhibitor %s (%s) pid=%lu uid=%lu mode=%s stopped.",
+                log_debug("Inhibitor %s (%s) pid="PID_FMT" uid="UID_FMT" mode=%s stopped.",
                           strna(i->who), strna(i->why),
-                          (unsigned long) i->pid, (unsigned long) i->uid,
+                          i->pid, i->uid,
                           inhibit_mode_to_string(i->mode));
 
         if (i->state_file)
@@ -253,8 +253,7 @@ int inhibitor_load(Inhibitor *i) {
                 int fd;
 
                 fd = inhibitor_create_fifo(i);
-                if (fd >= 0)
-                        close_nointr_nofail(fd);
+                safe_close(fd);
         }
 
         return 0;
@@ -320,13 +319,8 @@ int inhibitor_create_fifo(Inhibitor *i) {
 void inhibitor_remove_fifo(Inhibitor *i) {
         assert(i);
 
-        if (i->event_source)
-                i->event_source = sd_event_source_unref(i->event_source);
-
-        if (i->fifo_fd >= 0) {
-                close_nointr_nofail(i->fifo_fd);
-                i->fifo_fd = -1;
-        }
+        i->event_source = sd_event_source_unref(i->event_source);
+        i->fifo_fd = safe_close(i->fifo_fd);
 
         if (i->fifo_path) {
                 unlink(i->fifo_path);
@@ -445,23 +439,23 @@ const char *inhibit_what_to_string(InhibitWhat w) {
 
 InhibitWhat inhibit_what_from_string(const char *s) {
         InhibitWhat what = 0;
-        char *w, *state;
+        const char *word, *state;
         size_t l;
 
-        FOREACH_WORD_SEPARATOR(w, l, s, ":", state) {
-                if (l == 8 && strneq(w, "shutdown", l))
+        FOREACH_WORD_SEPARATOR(word, l, s, ":", state) {
+                if (l == 8 && strneq(word, "shutdown", l))
                         what |= INHIBIT_SHUTDOWN;
-                else if (l == 5 && strneq(w, "sleep", l))
+                else if (l == 5 && strneq(word, "sleep", l))
                         what |= INHIBIT_SLEEP;
-                else if (l == 4 && strneq(w, "idle", l))
+                else if (l == 4 && strneq(word, "idle", l))
                         what |= INHIBIT_IDLE;
-                else if (l == 16 && strneq(w, "handle-power-key", l))
+                else if (l == 16 && strneq(word, "handle-power-key", l))
                         what |= INHIBIT_HANDLE_POWER_KEY;
-                else if (l == 18 && strneq(w, "handle-suspend-key", l))
+                else if (l == 18 && strneq(word, "handle-suspend-key", l))
                         what |= INHIBIT_HANDLE_SUSPEND_KEY;
-                else if (l == 20 && strneq(w, "handle-hibernate-key", l))
+                else if (l == 20 && strneq(word, "handle-hibernate-key", l))
                         what |= INHIBIT_HANDLE_HIBERNATE_KEY;
-                else if (l == 17 && strneq(w, "handle-lid-switch", l))
+                else if (l == 17 && strneq(word, "handle-lid-switch", l))
                         what |= INHIBIT_HANDLE_LID_SWITCH;
                 else
                         return _INHIBIT_WHAT_INVALID;

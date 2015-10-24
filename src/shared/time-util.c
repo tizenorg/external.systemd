@@ -22,9 +22,11 @@
 #include <time.h>
 #include <string.h>
 #include <sys/timex.h>
+#include <sys/timerfd.h>
 
 #include "util.h"
 #include "time-util.h"
+#include "strv.h"
 
 usec_t now(clockid_t clock_id) {
         struct timespec ts;
@@ -47,8 +49,8 @@ dual_timestamp* dual_timestamp_from_realtime(dual_timestamp *ts, usec_t u) {
         int64_t delta;
         assert(ts);
 
-        if (u == (usec_t) -1) {
-                ts->realtime = ts->monotonic = (usec_t) -1;
+        if (u == USEC_INFINITY) {
+                ts->realtime = ts->monotonic = USEC_INFINITY;
                 return ts;
         }
 
@@ -74,8 +76,8 @@ dual_timestamp* dual_timestamp_from_monotonic(dual_timestamp *ts, usec_t u) {
         int64_t delta;
         assert(ts);
 
-        if (u == (usec_t) -1) {
-                ts->realtime = ts->monotonic = (usec_t) -1;
+        if (u == USEC_INFINITY) {
+                ts->realtime = ts->monotonic = USEC_INFINITY;
                 return ts;
         }
 
@@ -96,10 +98,10 @@ usec_t timespec_load(const struct timespec *ts) {
 
         if (ts->tv_sec == (time_t) -1 &&
             ts->tv_nsec == (long) -1)
-                return (usec_t) -1;
+                return USEC_INFINITY;
 
         if ((usec_t) ts->tv_sec > (UINT64_MAX - (ts->tv_nsec / NSEC_PER_USEC)) / USEC_PER_SEC)
-                return (usec_t) -1;
+                return USEC_INFINITY;
 
         return
                 (usec_t) ts->tv_sec * USEC_PER_SEC +
@@ -109,7 +111,7 @@ usec_t timespec_load(const struct timespec *ts) {
 struct timespec *timespec_store(struct timespec *ts, usec_t u)  {
         assert(ts);
 
-        if (u == (usec_t) -1) {
+        if (u == USEC_INFINITY) {
                 ts->tv_sec = (time_t) -1;
                 ts->tv_nsec = (long) -1;
                 return ts;
@@ -126,10 +128,10 @@ usec_t timeval_load(const struct timeval *tv) {
 
         if (tv->tv_sec == (time_t) -1 &&
             tv->tv_usec == (suseconds_t) -1)
-                return (usec_t) -1;
+                return USEC_INFINITY;
 
         if ((usec_t) tv->tv_sec > (UINT64_MAX - tv->tv_usec) / USEC_PER_SEC)
-                return (usec_t) -1;
+                return USEC_INFINITY;
 
         return
                 (usec_t) tv->tv_sec * USEC_PER_SEC +
@@ -139,7 +141,7 @@ usec_t timeval_load(const struct timeval *tv) {
 struct timeval *timeval_store(struct timeval *tv, usec_t u) {
         assert(tv);
 
-        if (u == (usec_t) -1) {
+        if (u == USEC_INFINITY) {
                 tv->tv_sec = (time_t) -1;
                 tv->tv_usec = (suseconds_t) -1;
         } else {
@@ -157,7 +159,7 @@ char *format_timestamp(char *buf, size_t l, usec_t t) {
         assert(buf);
         assert(l > 0);
 
-        if (t <= 0 || t == (usec_t) -1)
+        if (t <= 0 || t == USEC_INFINITY)
                 return NULL;
 
         sec = (time_t) (t / USEC_PER_SEC);
@@ -175,7 +177,7 @@ char *format_timestamp_us(char *buf, size_t l, usec_t t) {
         assert(buf);
         assert(l > 0);
 
-        if (t <= 0 || t == (usec_t) -1)
+        if (t <= 0 || t == USEC_INFINITY)
                 return NULL;
 
         sec = (time_t) (t / USEC_PER_SEC);
@@ -183,7 +185,7 @@ char *format_timestamp_us(char *buf, size_t l, usec_t t) {
 
         if (strftime(buf, l, "%a %Y-%m-%d %H:%M:%S", &tm) <= 0)
                 return NULL;
-        snprintf(buf + strlen(buf), l - strlen(buf), ".%06llu", t % USEC_PER_SEC);
+        snprintf(buf + strlen(buf), l - strlen(buf), ".%06llu", (unsigned long long) (t % USEC_PER_SEC));
         if (strftime(buf + strlen(buf), l - strlen(buf), " %Z", &tm) <= 0)
                 return NULL;
 
@@ -196,7 +198,7 @@ char *format_timestamp_relative(char *buf, size_t l, usec_t t) {
 
         n = now(CLOCK_REALTIME);
 
-        if (t <= 0 || (t == (usec_t) -1))
+        if (t <= 0 || (t == USEC_INFINITY))
                 return NULL;
 
         if (n > t) {
@@ -208,45 +210,45 @@ char *format_timestamp_relative(char *buf, size_t l, usec_t t) {
         }
 
         if (d >= USEC_PER_YEAR)
-                snprintf(buf, l, "%llu years %llu months %s",
-                         (unsigned long long) (d / USEC_PER_YEAR),
-                         (unsigned long long) ((d % USEC_PER_YEAR) / USEC_PER_MONTH), s);
+                snprintf(buf, l, USEC_FMT " years " USEC_FMT " months %s",
+                         d / USEC_PER_YEAR,
+                         (d % USEC_PER_YEAR) / USEC_PER_MONTH, s);
         else if (d >= USEC_PER_MONTH)
-                snprintf(buf, l, "%llu months %llu days %s",
-                         (unsigned long long) (d / USEC_PER_MONTH),
-                         (unsigned long long) ((d % USEC_PER_MONTH) / USEC_PER_DAY), s);
+                snprintf(buf, l, USEC_FMT " months " USEC_FMT " days %s",
+                         d / USEC_PER_MONTH,
+                         (d % USEC_PER_MONTH) / USEC_PER_DAY, s);
         else if (d >= USEC_PER_WEEK)
-                snprintf(buf, l, "%llu weeks %llu days %s",
-                         (unsigned long long) (d / USEC_PER_WEEK),
-                         (unsigned long long) ((d % USEC_PER_WEEK) / USEC_PER_DAY), s);
+                snprintf(buf, l, USEC_FMT " weeks " USEC_FMT " days %s",
+                         d / USEC_PER_WEEK,
+                         (d % USEC_PER_WEEK) / USEC_PER_DAY, s);
         else if (d >= 2*USEC_PER_DAY)
-                snprintf(buf, l, "%llu days %s", (unsigned long long) (d / USEC_PER_DAY), s);
+                snprintf(buf, l, USEC_FMT " days %s", d / USEC_PER_DAY, s);
         else if (d >= 25*USEC_PER_HOUR)
-                snprintf(buf, l, "1 day %lluh %s",
-                         (unsigned long long) ((d - USEC_PER_DAY) / USEC_PER_HOUR), s);
+                snprintf(buf, l, "1 day " USEC_FMT "h %s",
+                         (d - USEC_PER_DAY) / USEC_PER_HOUR, s);
         else if (d >= 6*USEC_PER_HOUR)
-                snprintf(buf, l, "%lluh %s",
-                         (unsigned long long) (d / USEC_PER_HOUR), s);
+                snprintf(buf, l, USEC_FMT "h %s",
+                         d / USEC_PER_HOUR, s);
         else if (d >= USEC_PER_HOUR)
-                snprintf(buf, l, "%lluh %llumin %s",
-                         (unsigned long long) (d / USEC_PER_HOUR),
-                         (unsigned long long) ((d % USEC_PER_HOUR) / USEC_PER_MINUTE), s);
+                snprintf(buf, l, USEC_FMT "h " USEC_FMT "min %s",
+                         d / USEC_PER_HOUR,
+                         (d % USEC_PER_HOUR) / USEC_PER_MINUTE, s);
         else if (d >= 5*USEC_PER_MINUTE)
-                snprintf(buf, l, "%llumin %s",
-                         (unsigned long long) (d / USEC_PER_MINUTE), s);
+                snprintf(buf, l, USEC_FMT "min %s",
+                         d / USEC_PER_MINUTE, s);
         else if (d >= USEC_PER_MINUTE)
-                snprintf(buf, l, "%llumin %llus %s",
-                         (unsigned long long) (d / USEC_PER_MINUTE),
-                         (unsigned long long) ((d % USEC_PER_MINUTE) / USEC_PER_SEC), s);
+                snprintf(buf, l, USEC_FMT "min " USEC_FMT "s %s",
+                         d / USEC_PER_MINUTE,
+                         (d % USEC_PER_MINUTE) / USEC_PER_SEC, s);
         else if (d >= USEC_PER_SEC)
-                snprintf(buf, l, "%llus %s",
-                         (unsigned long long) (d / USEC_PER_SEC), s);
+                snprintf(buf, l, USEC_FMT "s %s",
+                         d / USEC_PER_SEC, s);
         else if (d >= USEC_PER_MSEC)
-                snprintf(buf, l, "%llums %s",
-                         (unsigned long long) (d / USEC_PER_MSEC), s);
+                snprintf(buf, l, USEC_FMT "ms %s",
+                         d / USEC_PER_MSEC, s);
         else if (d > 0)
-                snprintf(buf, l, "%lluus %s",
-                         (unsigned long long) d, s);
+                snprintf(buf, l, USEC_FMT"us %s",
+                         d, s);
         else
                 snprintf(buf, l, "now");
 
@@ -277,7 +279,7 @@ char *format_timespan(char *buf, size_t l, usec_t t, usec_t accuracy) {
         assert(buf);
         assert(l > 0);
 
-        if (t == (usec_t) -1)
+        if (t == USEC_INFINITY)
                 return NULL;
 
         if (t <= 0) {
@@ -325,9 +327,9 @@ char *format_timespan(char *buf, size_t l, usec_t t, usec_t accuracy) {
 
                         if (j > 0) {
                                 k = snprintf(p, l,
-                                             "%s%llu.%0*llu%s",
+                                             "%s"USEC_FMT".%0*llu%s",
                                              p > buf ? " " : "",
-                                             (unsigned long long) a,
+                                             a,
                                              j,
                                              (unsigned long long) b,
                                              table[i].suffix);
@@ -340,9 +342,9 @@ char *format_timespan(char *buf, size_t l, usec_t t, usec_t accuracy) {
                 /* No? Then let's show it normally */
                 if (!done) {
                         k = snprintf(p, l,
-                                     "%s%llu%s",
+                                     "%s"USEC_FMT"%s",
                                      p > buf ? " " : "",
-                                     (unsigned long long) a,
+                                     a,
                                      table[i].suffix);
 
                         t = b;
@@ -370,10 +372,10 @@ void dual_timestamp_serialize(FILE *f, const char *name, dual_timestamp *t) {
         if (!dual_timestamp_is_set(t))
                 return;
 
-        fprintf(f, "%s=%llu %llu\n",
+        fprintf(f, "%s="USEC_FMT" "USEC_FMT"\n",
                 name,
-                (unsigned long long) t->realtime,
-                (unsigned long long) t->monotonic);
+                t->realtime,
+                t->monotonic);
 }
 
 void dual_timestamp_deserialize(const char *value, dual_timestamp *t) {
@@ -432,6 +434,7 @@ int parse_timestamp(const char *t, usec_t *usec) {
          *   tomorrow             (time is set to 00:00:00)
          *   +5min
          *   -5days
+         *   @2147483647          (seconds since epoch)
          *
          */
 
@@ -460,21 +463,23 @@ int parse_timestamp(const char *t, usec_t *usec) {
                 goto finish;
 
         } else if (t[0] == '+') {
-
                 r = parse_sec(t+1, &plus);
                 if (r < 0)
                         return r;
 
                 goto finish;
-        } else if (t[0] == '-') {
 
+        } else if (t[0] == '-') {
                 r = parse_sec(t+1, &minus);
                 if (r < 0)
                         return r;
 
                 goto finish;
 
-        } else if (endswith(t, " ago")) {
+        } else if (t[0] == '@')
+                return parse_sec(t + 1, usec);
+
+        else if (endswith(t, " ago")) {
                 _cleanup_free_ char *z;
 
                 z = strndup(t, strlen(t) - 4);
@@ -822,4 +827,124 @@ bool ntp_synced(void) {
                 return false;
 
         return true;
+}
+
+int get_timezones(char ***ret) {
+        _cleanup_fclose_ FILE *f = NULL;
+        _cleanup_strv_free_ char **zones = NULL;
+        size_t n_zones = 0, n_allocated = 0;
+
+        assert(ret);
+
+        zones = strv_new("UTC", NULL);
+        if (!zones)
+                return -ENOMEM;
+
+        n_allocated = 2;
+        n_zones = 1;
+
+        f = fopen("/usr/share/zoneinfo/zone.tab", "re");
+        if (f) {
+                char l[LINE_MAX];
+
+                FOREACH_LINE(l, f, return -errno) {
+                        char *p, *w;
+                        size_t k;
+
+                        p = strstrip(l);
+
+                        if (isempty(p) || *p == '#')
+                                continue;
+
+                        /* Skip over country code */
+                        p += strcspn(p, WHITESPACE);
+                        p += strspn(p, WHITESPACE);
+
+                        /* Skip over coordinates */
+                        p += strcspn(p, WHITESPACE);
+                        p += strspn(p, WHITESPACE);
+
+                        /* Found timezone name */
+                        k = strcspn(p, WHITESPACE);
+                        if (k <= 0)
+                                continue;
+
+                        w = strndup(p, k);
+                        if (!w)
+                                return -ENOMEM;
+
+                        if (!GREEDY_REALLOC(zones, n_allocated, n_zones + 2)) {
+                                free(w);
+                                return -ENOMEM;
+                        }
+
+                        zones[n_zones++] = w;
+                        zones[n_zones] = NULL;
+                }
+
+                strv_sort(zones);
+
+        } else if (errno != ENOENT)
+                return -errno;
+
+        *ret = zones;
+        zones = NULL;
+
+        return 0;
+}
+
+bool timezone_is_valid(const char *name) {
+        bool slash = false;
+        const char *p, *t;
+        struct stat st;
+
+        if (!name || *name == 0 || *name == '/')
+                return false;
+
+        for (p = name; *p; p++) {
+                if (!(*p >= '0' && *p <= '9') &&
+                    !(*p >= 'a' && *p <= 'z') &&
+                    !(*p >= 'A' && *p <= 'Z') &&
+                    !(*p == '-' || *p == '_' || *p == '+' || *p == '/'))
+                        return false;
+
+                if (*p == '/') {
+
+                        if (slash)
+                                return false;
+
+                        slash = true;
+                } else
+                        slash = false;
+        }
+
+        if (slash)
+                return false;
+
+        t = strappenda("/usr/share/zoneinfo/", name);
+        if (stat(t, &st) < 0)
+                return false;
+
+        if (!S_ISREG(st.st_mode))
+                return false;
+
+        return true;
+}
+
+clockid_t clock_boottime_or_monotonic(void) {
+        static clockid_t clock = -1;
+        int fd;
+
+        if (clock != -1)
+                return clock;
+
+        fd = timerfd_create(CLOCK_BOOTTIME, TFD_NONBLOCK|TFD_CLOEXEC);
+        if (fd < 0)
+                clock = CLOCK_MONOTONIC;
+        else {
+                safe_close(fd);
+                clock = CLOCK_BOOTTIME;
+        }
+
+        return clock;
 }

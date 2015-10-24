@@ -22,6 +22,7 @@
 ***/
 
 #include <alloca.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <time.h>
 #include <sys/time.h>
@@ -58,7 +59,32 @@
 #  error Unknown uid_t size
 #endif
 
+#if SIZEOF_GID_T == 4
+#  define GID_FMT "%" PRIu32
+#elif SIZEOF_GID_T == 2
+#  define GID_FMT "%" PRIu16
+#else
+#  error Unknown gid_t size
+#endif
+
+#if SIZEOF_TIME_T == 8
+#  define PRI_TIME PRIu64
+#elif SIZEOF_TIME_T == 4
+#  define PRI_TIME PRIu32
+#else
+#  error Unknown time_t size
+#endif
+
+#if SIZEOF_RLIM_T == 8
+#  define RLIM_FMT "%" PRIu64
+#elif SIZEOF_RLIM_T == 4
+#  define RLIM_FMT "%" PRIu32
+#else
+#  error Unknown rlim_t size
+#endif
+
 #include "macro.h"
+#include "missing.h"
 #include "time-util.h"
 
 /* What is interpreted as whitespace? */
@@ -67,6 +93,12 @@
 #define QUOTES     "\"\'"
 #define COMMENTS   "#;"
 #define GLOB_CHARS "*?["
+
+/* What characters are special in the shell? */
+/* must be escaped outside and inside double-quotes */
+#define SHELL_NEED_ESCAPE "\"\\`$"
+/* can be escaped or double-quoted */
+#define SHELL_NEED_QUOTES SHELL_NEED_ESCAPE GLOB_CHARS "'()<>|&;"
 
 #define FORMAT_BYTES_MAX 8
 
@@ -95,6 +127,8 @@ bool streq_ptr(const char *a, const char *b) _pure_;
 #define new0(t, n) ((t*) calloc((n), sizeof(t)))
 
 #define newa(t, n) ((t*) alloca(sizeof(t)*(n)))
+
+#define newa0(t, n) ((t*) alloca0(sizeof(t)*(n)))
 
 #define newdup(t, p, n) ((t*) memdup_multiply(p, sizeof(t), (n)))
 
@@ -138,10 +172,12 @@ static inline const char *startswith_no_case(const char *s, const char *prefix) 
 
 char *endswith(const char *s, const char *postfix) _pure_;
 
-bool first_word(const char *s, const char *word) _pure_;
+char *first_word(const char *s, const char *word) _pure_;
 
 int close_nointr(int fd);
-void close_nointr_nofail(int fd);
+int safe_close(int fd);
+void safe_close_pair(int p[]);
+
 void close_many(const int fds[], unsigned n_fd);
 
 int parse_size(const char *t, off_t base, off_t *size);
@@ -158,6 +194,8 @@ int safe_atollu(const char *s, unsigned long long *ret_u);
 int safe_atolli(const char *s, long long int *ret_i);
 
 int safe_atod(const char *s, double *ret_d);
+
+int safe_atou8(const char *s, uint8_t *ret);
 
 #if __WORDSIZE == 32
 static inline int safe_atolu(const char *s, unsigned long *ret_u) {
@@ -199,7 +237,7 @@ static inline int safe_atoi64(const char *s, int64_t *ret_i) {
         return safe_atolli(s, (long long int*) ret_i);
 }
 
-char *split(const char *c, size_t *l, const char *separator, bool quoted, char **state);
+const char* split(const char **state, size_t *l, const char *separator, bool quoted);
 
 #define FOREACH_WORD(word, length, s, state)                            \
         _FOREACH_WORD(word, length, s, WHITESPACE, false, state)
@@ -210,11 +248,8 @@ char *split(const char *c, size_t *l, const char *separator, bool quoted, char *
 #define FOREACH_WORD_QUOTED(word, length, s, state)                     \
         _FOREACH_WORD(word, length, s, WHITESPACE, true, state)
 
-#define FOREACH_WORD_SEPARATOR_QUOTED(word, length, s, separator, state)       \
-        _FOREACH_WORD(word, length, s, separator, true, state)
-
 #define _FOREACH_WORD(word, length, s, separator, quoted, state)        \
-        for ((state) = NULL, (word) = split((s), &(length), (separator), (quoted), &(state)); (word); (word) = split((s), &(length), (separator), (quoted), &(state)))
+        for ((state) = (s), (word) = split(&(state), &(length), (separator), (quoted)); (word); (word) = split(&(state), &(length), (separator), (quoted)))
 
 pid_t get_parent_of_pid(pid_t pid, pid_t *ppid);
 int get_starttime_of_pid(pid_t pid, unsigned long long *st);
@@ -225,6 +260,7 @@ char *strnappend(const char *s, const char *suffix, size_t length);
 char *replace_env(const char *format, char **env);
 char **replace_env_argv(char **argv, char **env);
 
+int readlinkat_malloc(int fd, const char *p, char **ret);
 int readlink_malloc(const char *p, char **r);
 int readlink_and_make_absolute(const char *p, char **r);
 int readlink_and_canonicalize(const char *p, char **r);
@@ -354,7 +390,8 @@ bool fstype_is_network(const char *fstype);
 int chvt(int vt);
 
 int read_one_char(FILE *f, char *ret, usec_t timeout, bool *need_nl);
-int ask(char *ret, const char *replies, const char *text, ...) _printf_(3, 4);
+int ask_char(char *ret, const char *replies, const char *text, ...) _printf_(3, 4);
+int ask_string(char **ret, const char *text, ...) _printf_(2, 3);
 
 int reset_terminal_fd(int fd, bool switch_to_text);
 int reset_terminal(const char *name);
@@ -369,7 +406,6 @@ int ignore_signals(int sig, ...);
 int default_signals(int sig, ...);
 int sigaction_many(const struct sigaction *sa, ...);
 
-int close_pipe(int p[]);
 int fopen_temporary(const char *path, FILE **_f, char **_temp_path);
 
 ssize_t loop_read(int fd, void *buf, size_t nbytes, bool do_poll);
@@ -383,6 +419,7 @@ char* dirname_malloc(const char *path);
 void rename_process(const char name[8]);
 
 void sigset_add_many(sigset_t *ss, ...);
+int sigprocmask_many(int how, ...);
 
 bool hostname_is_set(void);
 
@@ -443,12 +480,15 @@ static inline const char *ansi_highlight_off(void) {
         return on_tty() ? ANSI_HIGHLIGHT_OFF : "";
 }
 
+int files_same(const char *filea, const char *fileb);
+
 int running_in_chroot(void);
 
 char *ellipsize(const char *s, size_t length, unsigned percent);
                                    /* bytes                 columns */
 char *ellipsize_mem(const char *s, size_t old_length, size_t new_length, unsigned percent);
 
+int touch_file(const char *path, bool parents, usec_t stamp, uid_t uid, gid_t gid, mode_t mode);
 int touch(const char *path);
 
 char *unquote(const char *s, const char *quotes);
@@ -461,6 +501,7 @@ noreturn void freeze(void);
 
 bool null_or_empty(struct stat *st) _pure_;
 int null_or_empty_path(const char *fn);
+int null_or_empty_fd(int fd);
 
 DIR *xopendirat(int dirfd, const char *name, int flags);
 
@@ -473,7 +514,7 @@ bool tty_is_console(const char *tty) _pure_;
 int vtnr_from_tty(const char *tty);
 const char *default_term_for_tty(const char *tty);
 
-void execute_directory(const char *directory, DIR *_d, char *argv[]);
+void execute_directory(const char *directory, DIR *_d, usec_t timeout, char *argv[]);
 
 int kill_and_sigcont(pid_t pid, int sig);
 
@@ -484,6 +525,8 @@ bool plymouth_running(void);
 bool hostname_is_valid(const char *s) _pure_;
 char* hostname_cleanup(char *s, bool lowercase);
 
+bool machine_name_is_valid(const char *s) _pure_;
+
 char* strshorten(char *s, size_t l);
 
 int terminal_vhangup_fd(int fd);
@@ -491,9 +534,9 @@ int terminal_vhangup(const char *name);
 
 int vt_disallocate(const char *name);
 
-int copy_file(const char *from, const char *to, int flags);
-
 int symlink_atomic(const char *from, const char *to);
+int mknod_atomic(const char *path, mode_t mode, dev_t dev);
+int mkfifo_atomic(const char *path, mode_t mode);
 
 int fchmod_umask(int fd, mode_t mode);
 
@@ -514,14 +557,17 @@ int glob_extend(char ***strv, const char *path);
 
 int dirent_ensure_type(DIR *d, struct dirent *de);
 
-int in_search_path(const char *path, char **search);
 int get_files_in_directory(const char *path, char ***list);
 
 char *strjoin(const char *x, ...) _sentinel_;
 
 bool is_main_thread(void);
 
-bool in_charset(const char *s, const char* charset) _pure_;
+static inline bool _pure_ in_charset(const char *s, const char* charset) {
+        assert(s);
+        assert(charset);
+        return s[strspn(s, charset)] == '\0';
+}
 
 int block_get_whole_disk(dev_t d, dev_t *ret);
 
@@ -606,16 +652,15 @@ static inline void freep(void *p) {
         struct __useless_struct_to_allow_trailing_semicolon__
 
 static inline void closep(int *fd) {
-        if (*fd >= 0)
-                close_nointr_nofail(*fd);
+        safe_close(*fd);
 }
 
 static inline void umaskp(mode_t *u) {
         umask(*u);
 }
 
-static inline void close_pipep(int (*p)[2]) {
-        close_pipe(*p);
+static inline void close_pairp(int (*p)[2]) {
+        safe_close_pair(*p);
 }
 
 DEFINE_TRIVIAL_CLEANUP_FUNC(FILE*, fclose);
@@ -631,17 +676,24 @@ DEFINE_TRIVIAL_CLEANUP_FUNC(FILE*, endmntent);
 #define _cleanup_pclose_ _cleanup_(pclosep)
 #define _cleanup_closedir_ _cleanup_(closedirp)
 #define _cleanup_endmntent_ _cleanup_(endmntentp)
-#define _cleanup_close_pipe_ _cleanup_(close_pipep)
+#define _cleanup_close_pair_ _cleanup_(close_pairp)
 
 _malloc_  _alloc_(1, 2) static inline void *malloc_multiply(size_t a, size_t b) {
-        if (_unlikely_(b == 0 || a > ((size_t) -1) / b))
+        if (_unlikely_(b != 0 && a > ((size_t) -1) / b))
                 return NULL;
 
         return malloc(a * b);
 }
 
+_alloc_(2, 3) static inline void *realloc_multiply(void *p, size_t a, size_t b) {
+        if (_unlikely_(b != 0 && a > ((size_t) -1) / b))
+                return NULL;
+
+        return realloc(p, a * b);
+}
+
 _alloc_(2, 3) static inline void *memdup_multiply(const void *p, size_t a, size_t b) {
-        if (_unlikely_(b == 0 || a > ((size_t) -1) / b))
+        if (_unlikely_(b != 0 && a > ((size_t) -1) / b))
                 return NULL;
 
         return memdup(p, a * b);
@@ -650,7 +702,7 @@ _alloc_(2, 3) static inline void *memdup_multiply(const void *p, size_t a, size_
 bool filename_is_safe(const char *p) _pure_;
 bool path_is_safe(const char *p) _pure_;
 bool string_is_safe(const char *p) _pure_;
-bool string_has_cc(const char *p) _pure_;
+bool string_has_cc(const char *p, const char *ok) _pure_;
 
 /**
  * Check if a string contains any glob patterns.
@@ -666,14 +718,17 @@ void *xbsearch_r(const void *key, const void *base, size_t nmemb, size_t size,
 bool is_locale_utf8(void);
 
 typedef enum DrawSpecialChar {
-        DRAW_TREE_VERT,
+        DRAW_TREE_VERTICAL,
         DRAW_TREE_BRANCH,
         DRAW_TREE_RIGHT,
         DRAW_TREE_SPACE,
         DRAW_TRIANGULAR_BULLET,
         DRAW_BLACK_CIRCLE,
+        DRAW_ARROW,
+        DRAW_DASH,
         _DRAW_SPECIAL_CHAR_MAX
 } DrawSpecialChar;
+
 const char *draw_special_char(DrawSpecialChar ch);
 
 char *strreplace(const char *text, const char *old_string, const char *new_string);
@@ -682,8 +737,8 @@ char *strip_tab_ansi(char **p, size_t *l);
 
 int on_ac_power(void);
 
-int search_and_fopen(const char *path, const char *mode, const char **search, FILE **_f);
-int search_and_fopen_nulstr(const char *path, const char *mode, const char *search, FILE **_f);
+int search_and_fopen(const char *path, const char *mode, const char *root, const char **search, FILE **_f);
+int search_and_fopen_nulstr(const char *path, const char *mode, const char *root, const char *search, FILE **_f);
 
 #define FOREACH_LINE(line, f, on_error)                         \
         for (;;)                                                \
@@ -716,12 +771,13 @@ void *unhexmem(const char *p, size_t l);
 char *strextend(char **x, ...) _sentinel_;
 char *strrep(const char *s, unsigned n);
 
-void* greedy_realloc(void **p, size_t *allocated, size_t need);
-void* greedy_realloc0(void **p, size_t *allocated, size_t need);
-#define GREEDY_REALLOC(array, allocated, need) \
-        greedy_realloc((void**) &(array), &(allocated), sizeof((array)[0]) * (need))
-#define GREEDY_REALLOC0(array, allocated, need) \
-        greedy_realloc0((void**) &(array), &(allocated), sizeof((array)[0]) * (need))
+void* greedy_realloc(void **p, size_t *allocated, size_t need, size_t size);
+void* greedy_realloc0(void **p, size_t *allocated, size_t need, size_t size);
+#define GREEDY_REALLOC(array, allocated, need)                          \
+        greedy_realloc((void**) &(array), &(allocated), (need), sizeof((array)[0]))
+
+#define GREEDY_REALLOC0(array, allocated, need)                         \
+        greedy_realloc0((void**) &(array), &(allocated), (need), sizeof((array)[0]))
 
 static inline void _reset_errno_(int *saved_errno) {
         errno = *saved_errno;
@@ -759,6 +815,12 @@ static inline unsigned u32ctz(uint32_t n) {
 #endif
 }
 
+static inline int log2i(int x) {
+        assert(x > 0);
+
+        return __SIZEOF_INT__ * 8 - __builtin_clz(x) - 1;
+}
+
 static inline bool logind_running(void) {
         return access("/run/systemd/seats/", F_OK) >= 0;
 }
@@ -782,16 +844,19 @@ int unlink_noerrno(const char *path);
                 (void *) memset(_new_, 0, _len_);       \
         })
 
-#define strappenda(a, b)                                \
-        ({                                              \
-                const char *_a_ = (a), *_b_ = (b);      \
-                char *_c_;                              \
-                size_t _x_, _y_;                        \
-                _x_ = strlen(_a_);                      \
-                _y_ = strlen(_b_);                      \
-                _c_ = alloca(_x_ + _y_ + 1);            \
-                strcpy(stpcpy(_c_, _a_), _b_);          \
-                _c_;                                    \
+#define strappenda(a, ...)                                       \
+        ({                                                       \
+                int _len = strlen(a);                            \
+                unsigned _i;                                     \
+                char *_d_, *_p_;                                 \
+                const char *_appendees_[] = { __VA_ARGS__ };     \
+                for (_i = 0; _i < ELEMENTSOF(_appendees_); _i++) \
+                        _len += strlen(_appendees_[_i]);         \
+                _d_ = alloca(_len + 1);                          \
+                _p_ = stpcpy(_d_, a);                            \
+                for (_i = 0; _i < ELEMENTSOF(_appendees_); _i++) \
+                        _p_ = stpcpy(_p_, _appendees_[_i]);      \
+                _d_;                                             \
         })
 
 #define procfs_file_alloca(pid, field)                                  \
@@ -852,12 +917,12 @@ static inline void qsort_safe(void *base, size_t nmemb, size_t size,
 }
 
 int proc_cmdline(char **ret);
-int parse_proc_cmdline(int (*parse_word)(const char *word));
+int parse_proc_cmdline(int (*parse_word)(const char *key, const char *value));
 
 int container_get_leader(const char *machine, pid_t *pid);
 
-int namespace_open(pid_t pid, int *pidns_fd, int *mntns_fd, int *root_fd);
-int namespace_enter(int pidns_fd, int mntns_fd, int root_fd);
+int namespace_open(pid_t pid, int *pidns_fd, int *mntns_fd, int *netns_fd, int *root_fd);
+int namespace_enter(int pidns_fd, int mntns_fd, int netns_fd, int root_fd);
 
 bool pid_is_alive(pid_t pid);
 bool pid_is_unwaited(pid_t pid);
@@ -874,3 +939,34 @@ int fd_warn_permissions(const char *path, int fd);
 
 unsigned long personality_from_string(const char *p);
 const char *personality_to_string(unsigned long);
+
+uint64_t physical_memory(void);
+
+char* mount_test_option(const char *haystack, const char *needle);
+
+void hexdump(FILE *f, const void *p, size_t s);
+
+union file_handle_union {
+        struct file_handle handle;
+        char padding[sizeof(struct file_handle) + MAX_HANDLE_SZ];
+};
+
+int update_reboot_param_file(const char *param);
+
+int umount_recursive(const char *target, int flags);
+
+int bind_remount_recursive(const char *prefix, bool ro);
+
+int fflush_and_check(FILE *f);
+
+char *tempfn_xxxxxx(const char *p);
+char *tempfn_random(const char *p);
+
+bool is_localhost(const char *hostname);
+
+int take_password_lock(const char *root);
+
+int is_symlink(const char *path);
+
+int unquote_first_word(const char **p, char **ret);
+int unquote_many_words(const char **p, ...) _sentinel_;

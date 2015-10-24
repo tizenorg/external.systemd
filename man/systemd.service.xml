@@ -519,6 +519,20 @@ ExecStart=/bin/echo $ONE $TWO ${TWO}</programlisting>
                                 following:</para>
 
                                 <programlisting>/bin/kill -HUP $MAINPID</programlisting>
+
+                                <para>Note however that reloading a
+                                daemon by sending a signal (as with
+                                the example line above) is usually not
+                                a good choice, because this is an
+                                asynchronous operation and hence not
+                                suitable to order reloads of multiple
+                                services against each other. It is
+                                strongly recommended to set
+                                <varname>ExecReload=</varname> to a
+                                command that not only triggers a
+                                configuration reload of the daemon,
+                                but also synchronously waits for it to
+                                complete.</para>
                                 </listitem>
                         </varlistentry>
 
@@ -591,11 +605,12 @@ ExecStart=/bin/echo $ONE $TWO ${TWO}</programlisting>
                                 time span value such as "5min
                                 20s". Pass <literal>0</literal> to
                                 disable the timeout logic. Defaults to
-                                <varname>TimeoutStartSec=</varname> from
+                                <varname>DefaultTimeoutStartSec=</varname> from
                                 the manager configuration file, except
                                 when <varname>Type=oneshot</varname> is
                                 used, in which case the timeout
-                                is disabled by default.
+                                is disabled by default
+                                (see <citerefentry><refentrytitle>systemd-systemd.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>).
                                 </para></listitem>
                         </varlistentry>
 
@@ -614,8 +629,9 @@ ExecStart=/bin/echo $ONE $TWO ${TWO}</programlisting>
                                 time span value such as "5min
                                 20s". Pass <literal>0</literal> to disable
                                 the timeout logic. Defaults to
-                                <varname>TimeoutStartSec=</varname> from the
-                                manager configuration file.
+                                <varname>DefaultTimeoutStopSec=</varname> from the
+                                manager configuration file
+                                (see <citerefentry><refentrytitle>systemd-systemd.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>).
                                 </para></listitem>
                         </varlistentry>
 
@@ -689,51 +705,151 @@ ExecStart=/bin/echo $ONE $TWO ${TWO}</programlisting>
                                 <option>no</option>,
                                 <option>on-success</option>,
                                 <option>on-failure</option>,
+                                <option>on-abnormal</option>,
                                 <option>on-watchdog</option>,
                                 <option>on-abort</option>, or
                                 <option>always</option>. If set to
                                 <option>no</option> (the default), the
-                                service will not be restarted. If set to
-                                <option>on-success</option>, it will be
-                                restarted only when the service process
-                                exits cleanly.
-                                In this context, a clean exit means
-                                an exit code of 0, or one of the signals
+                                service will not be restarted. If set
+                                to <option>on-success</option>, it
+                                will be restarted only when the
+                                service process exits cleanly.  In
+                                this context, a clean exit means an
+                                exit code of 0, or one of the signals
                                 <constant>SIGHUP</constant>,
                                 <constant>SIGINT</constant>,
-                                <constant>SIGTERM</constant>,
-                                or <constant>SIGPIPE</constant>, and
-                                additionally, exit statuses and signals
-                                specified in <varname>SuccessExitStatus=</varname>.
+                                <constant>SIGTERM</constant> or
+                                <constant>SIGPIPE</constant>, and
+                                additionally, exit statuses and
+                                signals specified in
+                                <varname>SuccessExitStatus=</varname>.
                                 If set to <option>on-failure</option>,
                                 the service will be restarted when the
-                                process exits with a non-zero exit code,
-                                is terminated by a signal (including on
-                                core dump), when an operation (such as
-                                service reload) times out, and when the
-                                configured watchdog timeout is triggered.
-                                If set to
-                                <option>on-abort</option>, the service
-                                will be restarted only if the service
-                                process exits due to an uncaught
-                                signal not specified as a clean exit
-                                status.
-                                If set to
-                                <option>on-watchdog</option>, the service
-                                will be restarted only if the watchdog
-                                timeout for the service expires.
-                                If set to
+                                process exits with a non-zero exit
+                                code, is terminated by a signal
+                                (including on core dump, but excluding
+                                the aforementiond four signals), when
+                                an operation (such as service reload)
+                                times out, and when the configured
+                                watchdog timeout is triggered.  If set
+                                to <option>on-abnormal</option>, the
+                                service will be restarted when the
+                                process is terminated by a signal
+                                (including on core dump, excluding the
+                                aforementioned four signals), when an
+                                operation times out, or when the
+                                watchdog timeout is triggered. If set
+                                to <option>on-abort</option>, the
+                                service will be restarted only if the
+                                service process exits due to an
+                                uncaught signal not specified as a
+                                clean exit status.  If set to
+                                <option>on-watchdog</option>, the
+                                service will be restarted only if the
+                                watchdog timeout for the service
+                                expires.  If set to
                                 <option>always</option>, the service
-                                will be restarted regardless of whether
-                                it exited cleanly or not, got
+                                will be restarted regardless of
+                                whether it exited cleanly or not, got
                                 terminated abnormally by a signal, or
                                 hit a timeout.</para>
 
-                                <para>In addition to the above settings,
-                                the service will not be restarted if the
-                                exit code or signal is specified in
+                                <table>
+                                        <title>Exit causes and the effect of the <varname>Restart=</varname> settings on them</title>
+
+                                        <tgroup cols='2'>
+                                                <colspec colname='path' />
+                                                <colspec colname='expl' />
+                                                <thead>
+                                                        <row>
+                                                                <entry>Restart settings/Exit causes</entry>
+                                                                <entry><option>no</option></entry>
+                                                                <entry><option>always</option></entry>
+                                                                <entry><option>on-success</option></entry>
+                                                                <entry><option>on-failure</option></entry>
+                                                                <entry><option>on-abnormal</option></entry>
+                                                                <entry><option>on-abort</option></entry>
+                                                                <entry><option>on-watchdog</option></entry>
+                                                        </row>
+                                                </thead>
+                                                <tbody>
+                                                        <row>
+                                                                <entry>Clean exit code or signal</entry>
+                                                                <entry/>
+                                                                <entry>X</entry>
+                                                                <entry>X</entry>
+                                                                <entry/>
+                                                                <entry/>
+                                                                <entry/>
+                                                                <entry/>
+                                                        </row>
+                                                        <row>
+                                                                <entry>Unclean exit code</entry>
+                                                                <entry/>
+                                                                <entry>X</entry>
+                                                                <entry/>
+                                                                <entry>X</entry>
+                                                                <entry/>
+                                                                <entry/>
+                                                                <entry/>
+                                                        </row>
+                                                        <row>
+                                                                <entry>Unclean signal</entry>
+                                                                <entry/>
+                                                                <entry>X</entry>
+                                                                <entry/>
+                                                                <entry>X</entry>
+                                                                <entry>X</entry>
+                                                                <entry>X</entry>
+                                                                <entry/>
+                                                        </row>
+                                                        <row>
+                                                                <entry>Timeout</entry>
+                                                                <entry/>
+                                                                <entry>X</entry>
+                                                                <entry/>
+                                                                <entry>X</entry>
+                                                                <entry>X</entry>
+                                                                <entry/>
+                                                                <entry/>
+                                                        </row>
+                                                        <row>
+                                                                <entry>Watchdog</entry>
+                                                                <entry/>
+                                                                <entry>X</entry>
+                                                                <entry/>
+                                                                <entry>X</entry>
+                                                                <entry>X</entry>
+                                                                <entry/>
+                                                                <entry>X</entry>
+                                                        </row>
+                                                </tbody>
+                                        </tgroup>
+                                </table>
+
+                                <para>As exceptions to the setting
+                                above the service will not be
+                                restarted if the exit code or signal
+                                is specified in
                                 <varname>RestartPreventExitStatus=</varname>
-                                (see below).</para></listitem>
+                                (see below). Also, the services will
+                                always be restarted if the exit code
+                                or signal is specified in
+                                <varname>RestartForceExitStatus=</varname>
+                                (see below).</para>
+
+                                <para>Setting this to
+                                <option>on-failure</option> is the
+                                recommended choice for long-running
+                                services, in order to increase
+                                reliability by attempting automatic
+                                recovery from errors. For services
+                                that shall be able to terminate on
+                                their own choice (and avoid
+                                immediate restarting),
+                                <option>on-abnormal</option> is an
+                                alternative choice.</para>
+                                </listitem>
                         </varlistentry>
 
                         <varlistentry>
@@ -748,7 +864,7 @@ ExecStart=/bin/echo $ONE $TWO ${TWO}</programlisting>
                                 definitions can either be numeric exit
                                 codes or termination signal names,
                                 separated by spaces. For example:
-                                <programlisting>SuccessExitStatus=1 2 8 <constant>SIGKILL</constant></programlisting>
+                                <programlisting>SuccessExitStatus=1 2 8 SIGKILL</programlisting>
                                 ensures that exit codes 1, 2, 8 and
                                 the termination signal
                                 <constant>SIGKILL</constant> are
@@ -788,9 +904,8 @@ ExecStart=/bin/echo $ONE $TWO ${TWO}</programlisting>
                                 spaces. Defaults to the empty list, so
                                 that, by default, no exit status is
                                 excluded from the configured restart
-                                logic. Example:
-                                <literal>RestartPreventExitStatus=1 6
-                                SIGABRT</literal>, ensures that exit
+                                logic. For example:
+                                <programlisting>RestartPreventExitStatus=1 6 SIGABRT</programlisting> ensures that exit
                                 codes 1 and 6 and the termination
                                 signal <constant>SIGABRT</constant> will
                                 not result in automatic service
@@ -802,6 +917,18 @@ ExecStart=/bin/echo $ONE $TWO ${TWO}</programlisting>
                                 list is reset and all prior assignments
                                 of this option will have no
                                 effect.</para></listitem>
+                        </varlistentry>
+
+                        <varlistentry>
+                                <term><varname>RestartForceExitStatus=</varname></term>
+                                <listitem><para>Takes a list of exit
+                                status definitions that when returned
+                                by the main service process will force
+                                automatic service restarts, regardless
+                                of the restart setting configured with
+                                <varname>Restart=</varname>. The
+                                argument format is similar to
+                                <varname>RestartPreventExitStatus=</varname>.</para></listitem>
                         </varlistentry>
 
                         <varlistentry>
@@ -1015,6 +1142,30 @@ ExecStart=/bin/echo $ONE $TWO ${TWO}</programlisting>
                                 system call, which might result in
                                 data loss. Defaults to
                                 <option>none</option>.</para></listitem>
+                        </varlistentry>
+
+                        <varlistentry>
+                                <term><varname>RebootArgument=</varname></term>
+                                <listitem><para>Configure the optional
+                                argument for the
+                                <citerefentry><refentrytitle>reboot</refentrytitle><manvolnum>2</manvolnum></citerefentry>
+                                system call if
+                                <varname>StartLimitAction=</varname>
+                                is a reboot action. This works just
+                                like the optional argument to
+                                <command>systemctl reboot</command>
+                                command.</para></listitem>
+                        </varlistentry>
+
+                        <varlistentry>
+                                <term><varname>FailureAction=</varname></term>
+                                <listitem><para>Configure the action
+                                to take when the service enters a failed
+                                state. Takes the same values as
+                                <varname>StartLimitAction=</varname>
+                                and executes the same actions.
+                                Defaults to <option>none</option>.
+                                </para></listitem>
                         </varlistentry>
 
                 </variablelist>

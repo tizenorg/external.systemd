@@ -27,7 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <systemd/sd-daemon.h>
+#include "systemd/sd-daemon.h"
 
 #include "strv.h"
 #include "util.h"
@@ -42,8 +42,7 @@ static const char *arg_status = NULL;
 static bool arg_booted = false;
 static const char *arg_readahead = NULL;
 
-static int help(void) {
-
+static void help(void) {
         printf("%s [OPTIONS...] [VARIABLE=VALUE...]\n\n"
                "Notify the init system about service status updates.\n\n"
                "  -h --help             Show this help\n"
@@ -54,8 +53,6 @@ static int help(void) {
                "     --booted           Returns 0 if the system was booted up with systemd, non-zero otherwise\n"
                "     --readahead=ACTION Controls read-ahead operations\n",
                program_invocation_short_name);
-
-        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -90,7 +87,8 @@ static int parse_argv(int argc, char *argv[]) {
                 switch (c) {
 
                 case 'h':
-                        return help();
+                        help();
+                        return 0;
 
                 case ARG_VERSION:
                         puts(PACKAGE_STRING);
@@ -147,25 +145,25 @@ static int parse_argv(int argc, char *argv[]) {
 }
 
 int main(int argc, char* argv[]) {
-        char* our_env[4], **final_env = NULL;
+        _cleanup_free_ char *status = NULL, *cpid = NULL, *n = NULL;
+        _cleanup_strv_free_ char **final_env = NULL;
+        char* our_env[4];
         unsigned i = 0;
-        char *status = NULL, *cpid = NULL, *n = NULL;
-        int r, retval = EXIT_FAILURE;
+        int r;
 
         log_parse_environment();
         log_open();
 
         r = parse_argv(argc, argv);
-        if (r <= 0) {
-                retval = r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        if (r <= 0)
                 goto finish;
-        }
 
         if (arg_booted)
                 return sd_booted() <= 0;
 
         if (arg_readahead) {
-                if ((r = sd_readahead(arg_readahead)) < 0) {
+                r = sd_readahead(arg_readahead);
+                if (r < 0) {
                         log_error("Failed to issue read-ahead control command: %s", strerror(-r));
                         goto finish;
                 }
@@ -175,8 +173,9 @@ int main(int argc, char* argv[]) {
                 our_env[i++] = (char*) "READY=1";
 
         if (arg_status) {
-                if (!(status = strappend("STATUS=", arg_status))) {
-                        log_error("Failed to allocate STATUS string.");
+                status = strappend("STATUS=", arg_status);
+                if (!status) {
+                        r = log_oom();
                         goto finish;
                 }
 
@@ -184,8 +183,8 @@ int main(int argc, char* argv[]) {
         }
 
         if (arg_pid > 0) {
-                if (asprintf(&cpid, "MAINPID=%lu", (unsigned long) arg_pid) < 0) {
-                        log_error("Failed to allocate MAINPID string.");
+                if (asprintf(&cpid, "MAINPID="PID_FMT, arg_pid) < 0) {
+                        r = log_oom();
                         goto finish;
                 }
 
@@ -194,34 +193,32 @@ int main(int argc, char* argv[]) {
 
         our_env[i++] = NULL;
 
-        if (!(final_env = strv_env_merge(2, our_env, argv + optind))) {
-                log_error("Failed to merge string sets.");
+        final_env = strv_env_merge(2, our_env, argv + optind);
+        if (!final_env) {
+                r = log_oom();
                 goto finish;
         }
 
         if (strv_length(final_env) <= 0) {
-                retval = EXIT_SUCCESS;
+                r = 0;
                 goto finish;
         }
 
-        if (!(n = strv_join(final_env, "\n"))) {
-                log_error("Failed to concatenate strings.");
+        n = strv_join(final_env, "\n");
+        if (!n) {
+                r = log_oom();
                 goto finish;
         }
 
-        if ((r = sd_notify(false, n)) < 0) {
+        r = sd_pid_notify(arg_pid, false, n);
+        if (r < 0) {
                 log_error("Failed to notify init system: %s", strerror(-r));
                 goto finish;
         }
 
-        retval = r <= 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        if (r == 0)
+                r = -ENOTSUP;
 
 finish:
-        free(status);
-        free(cpid);
-        free(n);
-
-        strv_free(final_env);
-
-        return retval;
+        return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }

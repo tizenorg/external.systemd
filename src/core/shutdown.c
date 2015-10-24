@@ -74,9 +74,7 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 1);
         assert(argv);
 
-        opterr = 0;
-
-        while ((c = getopt_long(argc, argv, ":", options, NULL)) >= 0)
+        while ((c = getopt_long(argc, argv, "", options, NULL)) >= 0)
                 switch (c) {
 
                 case ARG_LOG_LEVEL:
@@ -115,11 +113,6 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
 
                 case '?':
-                        log_error("Unknown option %s.", argv[optind-1]);
-                        return -EINVAL;
-
-                case ':':
-                        log_error("Missing argument to %s.", argv[optind-1]);
                         return -EINVAL;
 
                 default:
@@ -220,7 +213,7 @@ static int pivot_to_new_root(void) {
 }
 
 int main(int argc, char *argv[]) {
-        bool need_umount = true, need_swapoff = true, need_loop_detach = true, need_dm_detach = true;
+        bool need_umount, need_swapoff, need_loop_detach, need_dm_detach;
         bool in_container, use_watchdog = false;
         _cleanup_free_ char *cgroup = NULL;
         char *arguments[3];
@@ -245,8 +238,6 @@ int main(int argc, char *argv[]) {
                 r = -EPERM;
                 goto error;
         }
-
-        in_container = detect_container(NULL) > 0;
 
         if (streq(arg_verb, "reboot"))
                 cmd = RB_AUTOBOOT;
@@ -275,11 +266,12 @@ int main(int argc, char *argv[]) {
         log_info("Sending SIGKILL to remaining processes...");
         broadcast_signal(SIGKILL, true, false);
 
-        if (in_container) {
-                need_swapoff = false;
-                need_dm_detach = false;
-                need_loop_detach = false;
-        }
+        in_container = detect_container(NULL) > 0;
+
+        need_umount = true;
+        need_swapoff = !in_container;
+        need_loop_detach = !in_container;
+        need_dm_detach = !in_container;
 
         /* Unmount all mountpoints, swaps, and loopback devices */
         for (retries = 0; retries < FINALIZE_ATTEMPTS; retries++) {
@@ -347,28 +339,36 @@ int main(int argc, char *argv[]) {
                         if (retries > 0)
                                 log_info("All filesystems, swaps, loop devices, DM devices detached.");
                         /* Yay, done */
-                        break;
+                        goto initrd_jump;
                 }
 
                 /* If in this iteration we didn't manage to
                  * unmount/deactivate anything, we simply give up */
                 if (!changed) {
-                        log_error("Cannot finalize remaining file systems and devices, giving up.");
-                        break;
+                        log_info("Cannot finalize remaining%s%s%s%s continuing.",
+                                 need_umount ? " file systems," : "",
+                                 need_swapoff ? " swap devices," : "",
+                                 need_loop_detach ? " loop devices," : "",
+                                 need_dm_detach ? " DM devices," : "");
+                        goto initrd_jump;
                 }
 
-                log_debug("Couldn't finalize remaining file systems and devices after %u retries, trying again.", retries+1);
+                log_debug("After %u retries, couldn't finalize remaining %s%s%s%s trying again.",
+                          retries + 1,
+                          need_umount ? " file systems," : "",
+                          need_swapoff ? " swap devices," : "",
+                          need_loop_detach ? " loop devices," : "",
+                          need_dm_detach ? " DM devices," : "");
         }
 
-        if (retries >= FINALIZE_ATTEMPTS)
-                log_error("Too many iterations, giving up.");
-        else
-                log_info("Storage is finalized.");
+        log_error("Too many iterations, giving up.");
+
+ initrd_jump:
 
         arguments[0] = NULL;
         arguments[1] = arg_verb;
         arguments[2] = NULL;
-        execute_directory(SYSTEM_SHUTDOWN_PATH, NULL, arguments);
+        execute_directory(SYSTEM_SHUTDOWN_PATH, NULL, DEFAULT_TIMEOUT_USEC, arguments);
 
         if (!in_container && !in_initrd() &&
             access("/run/initramfs/shutdown", X_OK) == 0) {
@@ -383,6 +383,13 @@ int main(int argc, char *argv[]) {
                         log_error("Failed to execute shutdown binary: %m");
                 }
         }
+
+        if (need_umount || need_swapoff || need_loop_detach || need_dm_detach)
+                log_error("Failed to finalize %s%s%s%s ignoring",
+                          need_umount ? " file systems," : "",
+                          need_swapoff ? " swap devices," : "",
+                          need_loop_detach ? " loop devices," : "",
+                          need_dm_detach ? " DM devices," : "");
 
         /* The kernel will automaticall flush ATA disks and suchlike
          * on reboot(), but the file systems need to be synce'd

@@ -1,3 +1,4 @@
+/*-*- Mode: C; c-basic-offset: 8; indent-tabs-mode: nil -*-*/
 /***
   This file is part of systemd.
 
@@ -24,7 +25,6 @@
 #include <errno.h>
 #include <string.h>
 #include <getopt.h>
-#include <syslog.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
 
@@ -303,38 +303,14 @@ out:
 
 static int test_queue(struct udev *udev) {
         struct udev_queue *udev_queue;
-        unsigned long long int seqnum;
-        struct udev_list_entry *list_entry;
 
         udev_queue = udev_queue_new(udev);
         if (udev_queue == NULL)
                 return -1;
-        seqnum = udev_queue_get_kernel_seqnum(udev_queue);
-        printf("seqnum kernel: %llu\n", seqnum);
-        seqnum = udev_queue_get_udev_seqnum(udev_queue);
-        printf("seqnum udev  : %llu\n", seqnum);
 
         if (udev_queue_get_queue_is_empty(udev_queue))
                 printf("queue is empty\n");
-        printf("get queue list\n");
-        udev_list_entry_foreach(list_entry, udev_queue_get_queued_list_entry(udev_queue))
-                printf("queued: '%s' [%s]\n", udev_list_entry_get_name(list_entry), udev_list_entry_get_value(list_entry));
-        printf("\n");
-        printf("get queue list again\n");
-        udev_list_entry_foreach(list_entry, udev_queue_get_queued_list_entry(udev_queue))
-                printf("queued: '%s' [%s]\n", udev_list_entry_get_name(list_entry), udev_list_entry_get_value(list_entry));
-        printf("\n");
 
-        list_entry = udev_queue_get_queued_list_entry(udev_queue);
-        if (list_entry != NULL) {
-                printf("event [%llu] is queued\n", seqnum);
-                seqnum = strtoull(udev_list_entry_get_value(list_entry), NULL, 10);
-                if (udev_queue_get_seqnum_is_finished(udev_queue, seqnum))
-                        printf("event [%llu] is not finished\n", seqnum);
-                else
-                        printf("event [%llu] is finished\n", seqnum);
-        }
-        printf("\n");
         udev_queue_unref(udev_queue);
         return 0;
 }
@@ -447,6 +423,7 @@ int main(int argc, char *argv[]) {
         const char *syspath = "/devices/virtual/mem/null";
         const char *subsystem = NULL;
         char path[1024];
+        int c;
 
         udev = udev_new();
         printf("context: %p\n", udev);
@@ -457,34 +434,38 @@ int main(int argc, char *argv[]) {
         udev_set_log_fn(udev, log_fn);
         printf("set log: %p\n", log_fn);
 
-        for (;;) {
-                int option;
 
-                option = getopt_long(argc, argv, "+p:s:dhV", options, NULL);
-                if (option == -1)
-                        break;
+        while ((c = getopt_long(argc, argv, "p:s:dhV", options, NULL)) >= 0)
+                switch (c) {
 
-                switch (option) {
                 case 'p':
                         syspath = optarg;
                         break;
+
                 case 's':
                         subsystem = optarg;
                         break;
+
                 case 'd':
                         if (udev_get_log_priority(udev) < LOG_INFO)
                                 udev_set_log_priority(udev, LOG_INFO);
                         break;
+
                 case 'h':
                         printf("--debug --syspath= --subsystem= --help\n");
                         goto out;
+
                 case 'V':
                         printf("%s\n", VERSION);
                         goto out;
-                default:
+
+                case '?':
                         goto out;
+
+                default:
+                        assert_not_reached("Unhandled option code.");
                 }
-        }
+
 
         /* add sys path if needed */
         if (!startswith(syspath, "/sys")) {

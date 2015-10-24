@@ -61,14 +61,14 @@
                 is a service that writes SysV runlevel changes to utmp
                 and wtmp, as well as the audit logs, as they
                 occur. <filename>systemd-update-utmp.service</filename>
-                does the same for system reboots and shut-down requests.</para>
+                does the same for system reboots and shutdown requests.</para>
         </refsect1>
 
         <refsect1>
                 <title>See Also</title>
                 <para>
                         <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-                        <citerefentry><refentrytitle>utmp</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
+                        <citerefentry project='man-pages'><refentrytitle>utmp</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
                         <citerefentry><refentrytitle>auditd</refentrytitle><manvolnum>8</manvolnum></citerefentry>
                 </para>
         </refsect1>

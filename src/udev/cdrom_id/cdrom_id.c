@@ -37,19 +37,12 @@
 #include "libudev.h"
 #include "libudev-private.h"
 
-static bool debug;
-
 _printf_(6,0)
 static void log_fn(struct udev *udev, int priority,
                    const char *file, int line, const char *fn,
                    const char *format, va_list args)
 {
-        if (debug) {
-                fprintf(stderr, "%s: ", fn);
-                vfprintf(stderr, format, args);
-        } else {
-                vsyslog(priority, format, args);
-        }
+        log_metav(priority, file, line, fn, format, args);
 }
 
 /* device info */
@@ -556,7 +549,7 @@ static int cd_profiles(struct udev *udev, int fd)
         if ((err != 0)) {
                 info_scsi_cmd_err(udev, "GET CONFIGURATION", err);
                 /* handle pre-MMC2 drives which do not support GET CONFIGURATION */
-                if (SK(err) == 0x5 && ASC(err) == 0x20) {
+                if (SK(err) == 0x5 && (ASC(err) == 0x20 || ASC(err) == 0x24)) {
                         log_debug("drive is pre-MMC2 and does not support 46h get configuration command");
                         log_debug("trying to work around the problem");
                         ret = cd_profiles_old_mmc(udev, fd);
@@ -875,11 +868,13 @@ int main(int argc, char *argv[])
         int cnt;
         int rc = 0;
 
+        log_parse_environment();
+        log_open();
+
         udev = udev_new();
         if (udev == NULL)
                 goto exit;
 
-        log_open();
         udev_set_log_fn(udev, log_fn);
 
         while (1) {
@@ -900,9 +895,10 @@ int main(int argc, char *argv[])
                         eject = true;
                         break;
                 case 'd':
-                        debug = true;
+                        log_set_target(LOG_TARGET_CONSOLE);
                         log_set_max_level(LOG_DEBUG);
                         udev_set_log_priority(udev, LOG_DEBUG);
+                        log_open();
                         break;
                 case 'h':
                         printf("Usage: cdrom_id [options] <device>\n"

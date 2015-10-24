@@ -27,6 +27,9 @@
 #include <pwd.h>
 #include <locale.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <net/if.h>
 
 #include "sd-bus.h"
 #include "log.h"
@@ -165,6 +168,109 @@ static int show_unit_cgroup(sd_bus *bus, const char *unit, pid_t leader) {
         return 0;
 }
 
+static int print_addresses(sd_bus *bus, const char *name, int ifi, const char *prefix, const char *prefix2) {
+        _cleanup_bus_message_unref_ sd_bus_message *reply = NULL;
+        int r;
+
+        assert(bus);
+        assert(name);
+        assert(prefix);
+        assert(prefix2);
+
+        r = sd_bus_call_method(bus,
+                               "org.freedesktop.machine1",
+                               "/org/freedesktop/machine1",
+                               "org.freedesktop.machine1.Manager",
+                               "GetMachineAddresses",
+                               NULL,
+                               &reply,
+                               "s", name);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_enter_container(reply, 'a', "(iay)");
+        if (r < 0)
+                return bus_log_parse_error(r);
+
+        while ((r = sd_bus_message_enter_container(reply, 'r', "iay")) > 0) {
+                int family;
+                const void *a;
+                size_t sz;
+                char buffer[MAX(INET6_ADDRSTRLEN, INET_ADDRSTRLEN)];
+
+                r = sd_bus_message_read(reply, "i", &family);
+                if (r < 0)
+                        return bus_log_parse_error(r);
+
+                r = sd_bus_message_read_array(reply, 'y', &a, &sz);
+                if (r < 0)
+                        return bus_log_parse_error(r);
+
+                fputs(prefix, stdout);
+                fputs(inet_ntop(family, a, buffer, sizeof(buffer)), stdout);
+                if (family == AF_INET6 && ifi > 0)
+                        printf("%%%i", ifi);
+                fputc('\n', stdout);
+
+                r = sd_bus_message_exit_container(reply);
+                if (r < 0)
+                        return bus_log_parse_error(r);
+
+                if (prefix != prefix2)
+                        prefix = prefix2;
+        }
+        if (r < 0)
+                return bus_log_parse_error(r);
+
+        r = sd_bus_message_exit_container(reply);
+        if (r < 0)
+                return bus_log_parse_error(r);
+
+        return 0;
+}
+
+static int print_os_release(sd_bus *bus, const char *name, const char *prefix) {
+        _cleanup_bus_message_unref_ sd_bus_message *reply = NULL;
+        const char *k, *v, *pretty = NULL;
+        int r;
+
+        assert(bus);
+        assert(name);
+        assert(prefix);
+
+        r = sd_bus_call_method(bus,
+                               "org.freedesktop.machine1",
+                               "/org/freedesktop/machine1",
+                               "org.freedesktop.machine1.Manager",
+                               "GetMachineOSRelease",
+                               NULL,
+                               &reply,
+                               "s", name);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_enter_container(reply, 'a', "{ss}");
+        if (r < 0)
+                return bus_log_parse_error(r);
+
+        while ((r = sd_bus_message_read(reply, "{ss}", &k, &v)) > 0) {
+                if (streq(k, "PRETTY_NAME"))
+                        pretty = v;
+
+        }
+        if (r < 0)
+                return bus_log_parse_error(r);
+
+        r = sd_bus_message_exit_container(reply);
+        if (r < 0)
+                return bus_log_parse_error(r);
+
+        if (pretty)
+                printf("%s%s\n", prefix, pretty);
+
+        return 0;
+}
+
 typedef struct MachineStatusInfo {
         char *name;
         sd_id128_t id;
@@ -174,11 +280,15 @@ typedef struct MachineStatusInfo {
         char *root_directory;
         pid_t leader;
         usec_t timestamp;
+        int *netif;
+        unsigned n_netif;
 } MachineStatusInfo;
 
 static void print_machine_status_info(sd_bus *bus, MachineStatusInfo *i) {
         char since1[FORMAT_TIMESTAMP_RELATIVE_MAX], *s1;
         char since2[FORMAT_TIMESTAMP_MAX], *s2;
+        int ifi = -1;
+
         assert(i);
 
         fputs(strna(i->name), stdout);
@@ -221,23 +331,74 @@ static void print_machine_status_info(sd_bus *bus, MachineStatusInfo *i) {
         if (i->root_directory)
                 printf("\t    Root: %s\n", i->root_directory);
 
+        if (i->n_netif > 0) {
+                unsigned c;
+
+                fputs("\t   Iface:", stdout);
+
+                for (c = 0; c < i->n_netif; c++) {
+                        char name[IF_NAMESIZE+1] = "";
+
+                        if (if_indextoname(i->netif[c], name)) {
+                                fputc(' ', stdout);
+                                fputs(name, stdout);
+
+                                if (ifi < 0)
+                                        ifi = i->netif[c];
+                                else
+                                        ifi = 0;
+                        } else
+                                printf(" %i", i->netif[c]);
+                }
+
+                fputc('\n', stdout);
+        }
+
+        print_addresses(bus, i->name, ifi,
+                       "\t Address: ",
+                       "\t          ");
+
+        print_os_release(bus, i->name, "\t      OS: ");
+
         if (i->unit) {
                 printf("\t    Unit: %s\n", i->unit);
                 show_unit_cgroup(bus, i->unit, i->leader);
         }
 }
 
+static int map_netif(sd_bus *bus, const char *member, sd_bus_message *m, sd_bus_error *error, void *userdata) {
+        MachineStatusInfo *i = userdata;
+        size_t l;
+        const void *v;
+        int r;
+
+        assert_cc(sizeof(int32_t) == sizeof(int));
+        r = sd_bus_message_read_array(m, SD_BUS_TYPE_INT32, &v, &l);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                return -EBADMSG;
+
+        i->n_netif = l / sizeof(int32_t);
+        i->netif = memdup(v, l);
+        if (!i->netif)
+                return -ENOMEM;
+
+        return 0;
+}
+
 static int show_info(const char *verb, sd_bus *bus, const char *path, bool *new_line) {
 
         static const struct bus_properties_map map[]  = {
-                { "Name",          "s",  NULL,          offsetof(MachineStatusInfo, name) },
-                { "Class",         "s",  NULL,          offsetof(MachineStatusInfo, class) },
-                { "Service",       "s",  NULL,          offsetof(MachineStatusInfo, service) },
-                { "Unit",          "s",  NULL,          offsetof(MachineStatusInfo, unit) },
-                { "RootDirectory", "s",  NULL,          offsetof(MachineStatusInfo, root_directory) },
-                { "Leader",        "u",  NULL,          offsetof(MachineStatusInfo, leader) },
-                { "Timestamp",     "t",  NULL,          offsetof(MachineStatusInfo, timestamp) },
-                { "Id",            "ay", bus_map_id128, offsetof(MachineStatusInfo, id) },
+                { "Name",              "s",  NULL,          offsetof(MachineStatusInfo, name) },
+                { "Class",             "s",  NULL,          offsetof(MachineStatusInfo, class) },
+                { "Service",           "s",  NULL,          offsetof(MachineStatusInfo, service) },
+                { "Unit",              "s",  NULL,          offsetof(MachineStatusInfo, unit) },
+                { "RootDirectory",     "s",  NULL,          offsetof(MachineStatusInfo, root_directory) },
+                { "Leader",            "u",  NULL,          offsetof(MachineStatusInfo, leader) },
+                { "Timestamp",         "t",  NULL,          offsetof(MachineStatusInfo, timestamp) },
+                { "Id",                "ay", bus_map_id128, offsetof(MachineStatusInfo, id) },
+                { "NetworkInterfaces", "ai", map_netif,     0 },
                 {}
         };
 
@@ -268,6 +429,7 @@ static int show_info(const char *verb, sd_bus *bus, const char *path, bool *new_
         free(info.service);
         free(info.unit);
         free(info.root_directory);
+        free(info.netif);
 
         return r;
 }
@@ -370,6 +532,20 @@ static int kill_machine(sd_bus *bus, char **args, unsigned n) {
         return 0;
 }
 
+static int reboot_machine(sd_bus *bus, char **args, unsigned n) {
+        arg_kill_who = "leader";
+        arg_signal = SIGINT; /* sysvinit + systemd */
+
+        return kill_machine(bus, args, n);
+}
+
+static int poweroff_machine(sd_bus *bus, char **args, unsigned n) {
+        arg_kill_who = "leader";
+        arg_signal = SIGRTMIN+4; /* only systemd */
+
+        return kill_machine(bus, args, n);
+}
+
 static int terminate_machine(sd_bus *bus, char **args, unsigned n) {
         _cleanup_bus_error_free_ sd_bus_error error = SD_BUS_ERROR_NULL;
         unsigned i;
@@ -397,71 +573,8 @@ static int terminate_machine(sd_bus *bus, char **args, unsigned n) {
         return 0;
 }
 
-static int reboot_machine(sd_bus *bus, char **args, unsigned n) {
-        _cleanup_bus_error_free_ sd_bus_error error = SD_BUS_ERROR_NULL;
-        unsigned i;
-        int r;
-
-        assert(args);
-
-        if (arg_transport != BUS_TRANSPORT_LOCAL) {
-                log_error("Reboot only supported on local machines.");
-                return -ENOTSUP;
-        }
-
-        for (i = 1; i < n; i++) {
-                _cleanup_bus_message_unref_ sd_bus_message *reply = NULL, *reply2 = NULL;
-                const char *path;
-                uint32_t leader;
-
-                r = sd_bus_call_method(
-                                bus,
-                                "org.freedesktop.machine1",
-                                "/org/freedesktop/machine1",
-                                "org.freedesktop.machine1.Manager",
-                                "GetMachine",
-                                &error,
-                                &reply,
-                                "s", args[i]);
-
-                if (r < 0) {
-                        log_error("Could not get path to machine: %s", bus_error_message(&error, -r));
-                        return r;
-                }
-
-                r = sd_bus_message_read(reply, "o", &path);
-                if (r < 0)
-                        return bus_log_parse_error(r);
-
-                r = sd_bus_get_property(
-                                bus,
-                                "org.freedesktop.machine1",
-                                path,
-                                "org.freedesktop.machine1.Machine",
-                                "Leader",
-                                &error,
-                                &reply2,
-                                "u");
-                if (r < 0) {
-                        log_error("Failed to retrieve PID of leader: %s", strerror(-r));
-                        return r;
-                }
-
-                r = sd_bus_message_read(reply2, "u", &leader);
-                if (r < 0)
-                        return bus_log_parse_error(r);
-
-                if (kill(leader, SIGINT) < 0) {
-                        log_error("Failed to kill init process " PID_FMT ": %m", (pid_t) leader);
-                        return -errno;
-                }
-        }
-
-        return 0;
-}
-
 static int openpt_in_namespace(pid_t pid, int flags) {
-        _cleanup_close_pipe_ int pair[2] = { -1, -1 };
+        _cleanup_close_pair_ int pair[2] = { -1, -1 };
         _cleanup_close_ int pidnsfd = -1, mntnsfd = -1, rootfd = -1;
         union {
                 struct cmsghdr cmsghdr;
@@ -476,7 +589,7 @@ static int openpt_in_namespace(pid_t pid, int flags) {
         pid_t child;
         siginfo_t si;
 
-        r = namespace_open(pid, &pidnsfd, &mntnsfd, &rootfd);
+        r = namespace_open(pid, &pidnsfd, &mntnsfd, NULL, &rootfd);
         if (r < 0)
                 return r;
 
@@ -488,10 +601,9 @@ static int openpt_in_namespace(pid_t pid, int flags) {
                 return -errno;
 
         if (child == 0) {
-                close_nointr_nofail(pair[0]);
-                pair[0] = -1;
+                pair[0] = safe_close(pair[0]);
 
-                r = namespace_enter(pidnsfd, mntnsfd, rootfd);
+                r = namespace_enter(pidnsfd, mntnsfd, -1, rootfd);
                 if (r < 0)
                         _exit(EXIT_FAILURE);
 
@@ -513,14 +625,13 @@ static int openpt_in_namespace(pid_t pid, int flags) {
                 _exit(EXIT_SUCCESS);
         }
 
-        close_nointr_nofail(pair[1]);
-        pair[1] = -1;
+        pair[1] = safe_close(pair[1]);
 
         r = wait_for_terminate(child, &si);
-        if (r < 0 || si.si_code != CLD_EXITED || si.si_status != EXIT_SUCCESS) {
-
-                return r < 0 ? r : -EIO;
-        }
+        if (r < 0)
+                return r;
+        if (si.si_code != CLD_EXITED || si.si_status != EXIT_SUCCESS)
+                return -EIO;
 
         if (recvmsg(pair[0], &mh, MSG_NOSIGNAL|MSG_CMSG_CLOEXEC) < 0)
                 return -errno;
@@ -550,7 +661,7 @@ static int openpt_in_namespace(pid_t pid, int flags) {
 static int login_machine(sd_bus *bus, char **args, unsigned n) {
         _cleanup_bus_message_unref_ sd_bus_message *reply = NULL, *reply2 = NULL, *reply3 = NULL;
         _cleanup_bus_error_free_ sd_bus_error error = SD_BUS_ERROR_NULL;
-        _cleanup_bus_unref_ sd_bus *container_bus = NULL;
+        _cleanup_bus_close_unref_ sd_bus *container_bus = NULL;
         _cleanup_close_ int master = -1;
         _cleanup_free_ char *getty = NULL;
         const char *path, *pty, *p;
@@ -668,8 +779,7 @@ static int login_machine(sd_bus *bus, char **args, unsigned n) {
         return 0;
 }
 
-static int help(void) {
-
+static void help(void) {
         printf("%s [OPTIONS...] {COMMAND} ...\n\n"
                "Send control commands to or query the virtual machine and container registration manager.\n\n"
                "  -h --help              Show this help\n"
@@ -687,13 +797,12 @@ static int help(void) {
                "  list                   List running VMs and containers\n"
                "  status NAME...         Show VM/container status\n"
                "  show NAME...           Show properties of one or more VMs/containers\n"
-               "  terminate NAME...      Terminate one or more VMs/containers\n"
-               "  kill NAME...           Send signal to processes of a VM/container\n"
+               "  login NAME             Get a login prompt on a container\n"
+               "  poweroff NAME...       Power off one or more containers\n"
                "  reboot NAME...         Reboot one or more containers\n"
-               "  login NAME             Get a login prompt on a container\n",
+               "  kill NAME...           Send signal to processes of a VM/container\n"
+               "  terminate NAME...      Terminate one or more VMs/containers\n",
                program_invocation_short_name);
-
-        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -725,12 +834,13 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "hp:als:H:M:", options, NULL)) >= 0) {
+        while ((c = getopt_long(argc, argv, "hp:als:H:M:", options, NULL)) >= 0)
 
                 switch (c) {
 
                 case 'h':
-                        return help();
+                        help();
+                        return 0;
 
                 case ARG_VERSION:
                         puts(PACKAGE_STRING);
@@ -792,7 +902,6 @@ static int parse_argv(int argc, char *argv[]) {
                 default:
                         assert_not_reached("Unhandled option");
                 }
-        }
 
         return 1;
 }
@@ -814,6 +923,7 @@ static int machinectl_main(sd_bus *bus, int argc, char *argv[]) {
                 { "show",                  MORE,   1, show              },
                 { "terminate",             MORE,   2, terminate_machine },
                 { "reboot",                MORE,   2, reboot_machine    },
+                { "poweroff",              MORE,   2, poweroff_machine  },
                 { "kill",                  MORE,   2, kill_machine      },
                 { "login",                 MORE,   2, login_machine     },
         };
@@ -879,7 +989,7 @@ static int machinectl_main(sd_bus *bus, int argc, char *argv[]) {
 }
 
 int main(int argc, char*argv[]) {
-        _cleanup_bus_unref_ sd_bus *bus = NULL;
+        _cleanup_bus_close_unref_ sd_bus *bus = NULL;
         int r;
 
         setlocale(LC_ALL, "");

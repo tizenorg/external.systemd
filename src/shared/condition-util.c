@@ -26,7 +26,7 @@
 #include <sys/statvfs.h>
 #include <fnmatch.h>
 
-#include <systemd/sd-id128.h>
+#include "systemd/sd-id128.h"
 #include "util.h"
 #include "condition-util.h"
 #include "virt.h"
@@ -74,7 +74,8 @@ void condition_free_list(Condition *first) {
 }
 
 bool condition_test_kernel_command_line(Condition *c) {
-        char *line, *w, *state, *word = NULL;
+        char *line, *word = NULL;
+        const char *w, *state;
         bool equal;
         int r;
         size_t l, pl;
@@ -113,6 +114,8 @@ bool condition_test_kernel_command_line(Condition *c) {
                 }
 
         }
+        if (!isempty(state))
+                log_warning("Trailing garbage and the end of kernel commandline, ignoring.");
 
         free(word);
         free(line);
@@ -177,10 +180,9 @@ bool condition_test_architecture(Condition *c) {
 }
 
 bool condition_test_host(Condition *c) {
+        _cleanup_free_ char *h = NULL;
         sd_id128_t x, y;
-        char *h;
         int r;
-        bool b;
 
         assert(c);
         assert(c->parameter);
@@ -199,10 +201,7 @@ bool condition_test_host(Condition *c) {
         if (!h)
                 return c->negate;
 
-        b = fnmatch(c->parameter, h, FNM_CASEFOLD) == 0;
-        free(h);
-
-        return b == !c->negate;
+        return (fnmatch(c->parameter, h, FNM_CASEFOLD) == 0) == !c->negate;
 }
 
 bool condition_test_ac_power(Condition *c) {
@@ -260,6 +259,8 @@ static const char* const condition_type_table[_CONDITION_TYPE_MAX] = {
         [CONDITION_HOST] = "ConditionHost",
         [CONDITION_AC_POWER] = "ConditionACPower",
         [CONDITION_ARCHITECTURE] = "ConditionArchitecture",
+        [CONDITION_NEEDS_UPDATE] = "ConditionNeedsUpdate",
+        [CONDITION_FIRST_BOOT] = "ConditionFirstBoot",
         [CONDITION_NULL] = "ConditionNull"
 };
 

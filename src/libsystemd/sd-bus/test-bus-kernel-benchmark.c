@@ -47,7 +47,7 @@ static void server(sd_bus *b, size_t *result) {
                 assert_se(r >= 0);
 
                 if (r == 0)
-                        assert_se(sd_bus_wait(b, (usec_t) -1) >= 0);
+                        assert_se(sd_bus_wait(b, USEC_INFINITY) >= 0);
                 if (!m)
                         continue;
 
@@ -270,7 +270,7 @@ int main(int argc, char *argv[]) {
                 CPU_SET(0, &cpuset);
                 pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 
-                close_nointr_nofail(bus_ref);
+                safe_close(bus_ref);
                 sd_bus_unref(b);
 
                 switch (mode) {

@@ -69,20 +69,13 @@ static int add_modules(const char *p) {
         return 0;
 }
 
-static int parse_proc_cmdline_word(const char *word) {
+static int parse_proc_cmdline_item(const char *key, const char *value) {
         int r;
 
-        if (startswith(word, "modules-load=")) {
-                r = add_modules(word + 13);
+        if (STR_IN_SET(key, "modules-load", "rd.modules-load") && value) {
+                r = add_modules(value);
                 if (r < 0)
                         return r;
-
-        } else if (startswith(word, "rd.modules-load=")) {
-                if (in_initrd()) {
-                        r = add_modules(word + 16);
-                        if (r < 0)
-                                return r;
-                }
         }
 
         return 0;
@@ -152,7 +145,7 @@ static int apply_file(struct kmod_ctx *ctx, const char *path, bool ignore_enoent
         assert(ctx);
         assert(path);
 
-        r = search_and_fopen_nulstr(path, "re", conf_file_dirs, &f);
+        r = search_and_fopen_nulstr(path, "re", NULL, conf_file_dirs, &f);
         if (r < 0) {
                 if (ignore_enoent && r == -ENOENT)
                         return 0;
@@ -188,15 +181,12 @@ static int apply_file(struct kmod_ctx *ctx, const char *path, bool ignore_enoent
         return r;
 }
 
-static int help(void) {
-
+static void help(void) {
         printf("%s [OPTIONS...] [CONFIGURATION FILE...]\n\n"
                "Loads statically configured kernel modules.\n\n"
                "  -h --help             Show this help\n"
                "     --version          Show package version\n",
                program_invocation_short_name);
-
-        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -216,12 +206,13 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "h", options, NULL)) >= 0) {
+        while ((c = getopt_long(argc, argv, "h", options, NULL)) >= 0)
 
                 switch (c) {
 
                 case 'h':
-                        return help();
+                        help();
+                        return 0;
 
                 case ARG_VERSION:
                         puts(PACKAGE_STRING);
@@ -234,7 +225,6 @@ static int parse_argv(int argc, char *argv[]) {
                 default:
                         assert_not_reached("Unhandled option");
                 }
-        }
 
         return 1;
 }
@@ -253,7 +243,7 @@ int main(int argc, char *argv[]) {
 
         umask(0022);
 
-        if (parse_proc_cmdline(parse_proc_cmdline_word) < 0)
+        if (parse_proc_cmdline(parse_proc_cmdline_item) < 0)
                 return EXIT_FAILURE;
 
         ctx = kmod_new(NULL, NULL);

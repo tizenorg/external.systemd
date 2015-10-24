@@ -4,6 +4,7 @@
   This file is part of systemd.
 
   Copyright 2010 Lennart Poettering
+  Copyright 2014 Holger Hans Peter Freyther
 
   systemd is free software; you can redistribute it and/or modify it
   under the terms of the GNU Lesser General Public License as published by
@@ -37,14 +38,16 @@
 #include "bus-errors.h"
 #include "fileio.h"
 #include "udev-util.h"
+#include "path-util.h"
 
 static bool arg_skip = false;
 static bool arg_force = false;
 static bool arg_show_progress = false;
+static const char *arg_repair = "-a";
 
 static void start_target(const char *target) {
         _cleanup_bus_error_free_ sd_bus_error error = SD_BUS_ERROR_NULL;
-        _cleanup_bus_unref_ sd_bus *bus = NULL;
+        _cleanup_bus_close_unref_ sd_bus *bus = NULL;
         int r;
 
         assert(target);
@@ -72,21 +75,38 @@ static void start_target(const char *target) {
                 log_error("Failed to start unit: %s", bus_error_message(&error, -r));
 }
 
-static int parse_proc_cmdline_word(const char *w) {
-        if (streq(w, "fsck.mode=auto"))
-                arg_force = arg_skip = false;
-        else if (streq(w, "fsck.mode=force"))
-                arg_force = true;
-        else if (streq(w, "fsck.mode=skip"))
-                arg_skip = true;
-        else if (startswith(w, "fsck"))
-                log_warning("Invalid fsck parameter. Ignoring.");
+static int parse_proc_cmdline_item(const char *key, const char *value) {
+
+        if (streq(key, "fsck.mode") && value) {
+
+                if (streq(value, "auto"))
+                        arg_force = arg_skip = false;
+                else if (streq(value, "force"))
+                        arg_force = true;
+                else if (streq(value, "skip"))
+                        arg_skip = true;
+                else
+                        log_warning("Invalid fsck.mode= parameter '%s'. Ignoring.", value);
+
+        } else if (streq(key, "fsck.repair") && value) {
+
+                if (streq(value, "preen"))
+                        arg_repair = "-a";
+                else if (streq(value, "yes"))
+                        arg_repair = "-y";
+                else if (streq(value, "no"))
+                        arg_repair = "-n";
+                else
+                        log_warning("Invalid fsck.repair= parameter '%s'. Ignoring.", value);
+        }
+
 #ifdef HAVE_SYSV_COMPAT
-        else if (streq(w, "fastboot")) {
-                log_error("Please pass 'fsck.mode=skip' rather than 'fastboot' on the kernel command line.");
+        else if (streq(key, "fastboot") && !value) {
+                log_warning("Please pass 'fsck.mode=skip' rather than 'fastboot' on the kernel command line.");
                 arg_skip = true;
-        } else if (streq(w, "forcefsck")) {
-                log_error("Please pass 'fsck.mode=force' rather than 'forcefsck' on the kernel command line.");
+
+        } else if (streq(key, "forcefsck") && !value) {
+                log_warning("Please pass 'fsck.mode=force' rather than 'forcefsck' on the kernel command line.");
                 arg_force = true;
         }
 #endif
@@ -95,6 +115,7 @@ static int parse_proc_cmdline_word(const char *w) {
 }
 
 static void test_files(void) {
+
 #ifdef HAVE_SYSV_COMPAT
         if (access("/fastboot", F_OK) >= 0) {
                 log_error("Please pass 'fsck.mode=skip' on the kernel command line rather than creating /fastboot on the root file system.");
@@ -137,7 +158,7 @@ static int process_progress(int fd) {
 
         f = fdopen(fd, "r");
         if (!f) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return -errno;
         }
 
@@ -215,7 +236,7 @@ int main(int argc, char *argv[]) {
 
         umask(0022);
 
-        parse_proc_cmdline(parse_proc_cmdline_word);
+        parse_proc_cmdline(parse_proc_cmdline_item);
         test_files();
 
         if (!arg_force && arg_skip)
@@ -280,15 +301,12 @@ int main(int argc, char *argv[]) {
 
         type = udev_device_get_property_value(udev_device, "ID_FS_TYPE");
         if (type) {
-                const char *checker = strappenda("/sbin/fsck.", type);
-                r = access(checker, X_OK);
-                if (r < 0) {
-                        if (errno == ENOENT) {
-                                log_info("%s doesn't exist, not checking file system.", checker);
-                                return EXIT_SUCCESS;
-                        } else
-                                log_warning("%s cannot be used: %m", checker);
-                }
+                r = fsck_exists(type);
+                if (r == -ENOENT) {
+                        log_info("fsck.%s doesn't exist, not checking file system on %s", type, device);
+                        return EXIT_SUCCESS;
+                } else if (r < 0)
+                        log_warning("fsck.%s cannot be used for %s: %s", type, device, strerror(-r));
         }
 
         if (arg_show_progress)
@@ -298,9 +316,20 @@ int main(int argc, char *argv[]) {
                 }
 
         cmdline[i++] = "/sbin/fsck";
-        cmdline[i++] = "-a";
+        cmdline[i++] =  arg_repair;
         cmdline[i++] = "-T";
-        cmdline[i++] = "-l";
+
+        /*
+         * Disable locking which conflict with udev's event
+         * ownershipi, until util-linux moves the flock
+         * synchronization file which prevents multiple fsck running
+         * on the same rotationg media, from the disk device
+         * node to a privately owned regular file.
+         *
+         * https://bugs.freedesktop.org/show_bug.cgi?id=79576#c5
+         *
+         * cmdline[i++] = "-l";
+         */
 
         if (!root_directory)
                 cmdline[i++] = "-M";
@@ -324,15 +353,12 @@ int main(int argc, char *argv[]) {
         } else if (pid == 0) {
                 /* Child */
                 if (progress_pipe[0] >= 0)
-                        close_nointr_nofail(progress_pipe[0]);
+                        safe_close(progress_pipe[0]);
                 execv(cmdline[0], (char**) cmdline);
                 _exit(8); /* Operational error */
         }
 
-        if (progress_pipe[1] >= 0) {
-                close_nointr_nofail(progress_pipe[1]);
-                progress_pipe[1] = -1;
-        }
+        progress_pipe[1] = safe_close(progress_pipe[1]);
 
         if (progress_pipe[0] >= 0) {
                 process_progress(progress_pipe[0]);
@@ -372,7 +398,7 @@ int main(int argc, char *argv[]) {
                 touch("/run/systemd/quotacheck");
 
 finish:
-        close_pipe(progress_pipe);
+        safe_close_pair(progress_pipe);
 
         return r;
 }

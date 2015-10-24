@@ -39,7 +39,13 @@ unsigned strv_length(char * const *l) _pure_;
 int strv_extend_strv(char ***a, char **b);
 int strv_extend_strv_concat(char ***a, char **b, const char *suffix);
 int strv_extend(char ***l, const char *value);
+int strv_extendf(char ***l, const char *format, ...) _printf_(2,0);
 int strv_push(char ***l, char *value);
+int strv_push_pair(char ***l, char *a, char *b);
+int strv_push_prepend(char ***l, char *value);
+int strv_consume(char ***l, char *value);
+int strv_consume_pair(char ***l, char *a, char *b);
+int strv_consume_prepend(char ***l, char *value);
 
 char **strv_remove(char **l, const char *s);
 char **strv_uniq(char **l);
@@ -58,7 +64,7 @@ static inline bool strv_isempty(char * const *l) {
 }
 
 char **strv_split(const char *s, const char *separator);
-char **strv_split_quoted(const char *s);
+int strv_split_quoted(char ***t, const char *s);
 char **strv_split_newlines(const char *s);
 
 char *strv_join(char **l, const char *separator);
@@ -115,3 +121,17 @@ void strv_print(char **l);
                 }                                               \
                 _l;                                             \
         })
+
+#define STR_IN_SET(x, ...) strv_contains(STRV_MAKE(__VA_ARGS__), x)
+
+#define FOREACH_STRING(x, ...)                               \
+        for (char **_l = ({                                  \
+                char **_ll = STRV_MAKE(__VA_ARGS__);         \
+                x = _ll ? _ll[0] : NULL;                     \
+                _ll;                                         \
+        });                                                  \
+        _l && *_l;                                           \
+        x = ({                                               \
+                _l ++;                                       \
+                _l[0];                                       \
+        }))

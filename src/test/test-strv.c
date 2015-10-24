@@ -141,6 +141,7 @@ static void test_strv_quote_unquote(const char* const *split, const char *quoted
         _cleanup_free_ char *p;
         _cleanup_strv_free_ char **s;
         char **t;
+        int r;
 
         p = strv_join_quoted((char **)split);
         assert_se(p);
@@ -148,7 +149,8 @@ static void test_strv_quote_unquote(const char* const *split, const char *quoted
         assert_se(p);
         assert_se(streq(p, quoted));
 
-        s = strv_split_quoted(quoted);
+        r = strv_split_quoted(&s, quoted);
+        assert_se(r == 0);
         assert_se(s);
         STRV_FOREACH(t, s) {
                 assert_se(*t);
@@ -157,18 +159,33 @@ static void test_strv_quote_unquote(const char* const *split, const char *quoted
         }
 }
 
-static void test_strv_quote_unquote2(const char *quoted, const char ** list) {
+static void test_strv_unquote(const char *quoted, const char **list) {
         _cleanup_strv_free_ char **s;
+        _cleanup_free_ char *j;
         unsigned i = 0;
         char **t;
+        int r;
 
-        s = strv_split_quoted(quoted);
+        r = strv_split_quoted(&s, quoted);
+        assert_se(r == 0);
         assert_se(s);
+        j = strv_join(s, " | ");
+        assert(j);
+        puts(j);
 
         STRV_FOREACH(t, s)
                 assert_se(streq(list[i++], *t));
 
         assert_se(list[i] == NULL);
+}
+
+static void test_invalid_unquote(const char *quoted) {
+        char **s = NULL;
+        int r;
+
+        r = strv_split_quoted(&s, quoted);
+        assert(s == NULL);
+        assert(r == -EINVAL);
 }
 
 static void test_strv_split(void) {
@@ -323,6 +340,20 @@ static void test_strv_extend(void) {
         assert_se(streq(b[0], "test3"));
 }
 
+static void test_strv_extendf(void) {
+        _cleanup_strv_free_ char **a = NULL, **b = NULL;
+
+        a = strv_new("test", "test1", NULL);
+        assert_se(a);
+        assert_se(strv_extendf(&a, "test2 %s %d %s", "foo", 128, "bar") >= 0);
+        assert_se(strv_extendf(&b, "test3 %s %s %d", "bar", "foo", 128) >= 0);
+
+        assert_se(streq(a[0], "test"));
+        assert_se(streq(a[1], "test1"));
+        assert_se(streq(a[2], "test2 foo 128 bar"));
+        assert_se(streq(b[0], "test3 bar foo 128"));
+}
+
 static void test_strv_foreach(void) {
         _cleanup_strv_free_ char **a;
         unsigned i = 0;
@@ -385,6 +416,23 @@ static void test_strv_from_stdarg_alloca(void) {
         test_strv_from_stdarg_alloca_one(STRV_MAKE_EMPTY, NULL);
 }
 
+static void test_strv_push(void) {
+        _cleanup_strv_free_ char **a = NULL;
+        char *i, *j;
+
+        assert_se(i = strdup("foo"));
+        assert_se(strv_push(&a, i) >= 0);
+
+        assert_se(i = strdup("a"));
+        assert_se(j = strdup("b"));
+        assert_se(strv_push_pair(&a, i, j) >= 0);
+
+        assert_se(streq_ptr(a[0], "foo"));
+        assert_se(streq_ptr(a[1], "a"));
+        assert_se(streq_ptr(a[2], "b"));
+        assert_se(streq_ptr(a[3], NULL));
+}
+
 int main(int argc, char *argv[]) {
         test_specifier_printf();
         test_strv_foreach();
@@ -400,17 +448,25 @@ int main(int argc, char *argv[]) {
         test_strv_quote_unquote(input_table_quotes, QUOTES_STRING);
         test_strv_quote_unquote(input_table_spaces, SPACES_STRING);
 
-        test_strv_quote_unquote2("    foo=bar     \"waldo\"    zzz    ", (const char*[]) { "foo=bar", "waldo", "zzz", NULL });
-        test_strv_quote_unquote2("", (const char*[]) { NULL });
-        test_strv_quote_unquote2(" ", (const char*[]) { NULL });
-        test_strv_quote_unquote2("   ", (const char*[]) { NULL });
-        test_strv_quote_unquote2("   x", (const char*[]) { "x", NULL });
-        test_strv_quote_unquote2("x   ", (const char*[]) { "x", NULL });
-        test_strv_quote_unquote2("  x   ", (const char*[]) { "x", NULL });
-        test_strv_quote_unquote2("  \"x\"   ", (const char*[]) { "x", NULL });
-        test_strv_quote_unquote2("  \'x\'   ", (const char*[]) { "x", NULL });
-        test_strv_quote_unquote2("  \'x\"\'   ", (const char*[]) { "x\"", NULL });
-        test_strv_quote_unquote2("  \"x\'\"   ", (const char*[]) { "x\'", NULL });
+        test_strv_unquote("    foo=bar     \"waldo\"    zzz    ", (const char*[]) { "foo=bar", "waldo", "zzz", NULL });
+        test_strv_unquote("", (const char*[]) { NULL });
+        test_strv_unquote(" ", (const char*[]) { NULL });
+        test_strv_unquote("   ", (const char*[]) { NULL });
+        test_strv_unquote("   x", (const char*[]) { "x", NULL });
+        test_strv_unquote("x   ", (const char*[]) { "x", NULL });
+        test_strv_unquote("  x   ", (const char*[]) { "x", NULL });
+        test_strv_unquote("  \"x\"   ", (const char*[]) { "x", NULL });
+        test_strv_unquote("  'x'   ", (const char*[]) { "x", NULL });
+        test_strv_unquote("  'x\"'   ", (const char*[]) { "x\"", NULL });
+        test_strv_unquote("  \"x'\"   ", (const char*[]) { "x'", NULL });
+        test_strv_unquote("a  '--b=c \"d e\"'", (const char*[]) { "a", "--b=c \"d e\"", NULL });
+
+        test_invalid_unquote("a  --b='c \"d e\"'");
+        test_invalid_unquote("a  --b='c \"d e\" '");
+        test_invalid_unquote("a  --b='c \"d e\"garbage");
+        test_invalid_unquote("'");
+        test_invalid_unquote("\"");
+        test_invalid_unquote("'x'y");
 
         test_strv_split();
         test_strv_split_newlines();
@@ -421,7 +477,9 @@ int main(int argc, char *argv[]) {
         test_strv_extend_strv();
         test_strv_extend_strv_concat();
         test_strv_extend();
+        test_strv_extendf();
         test_strv_from_stdarg_alloca();
+        test_strv_push();
 
         return 0;
 }

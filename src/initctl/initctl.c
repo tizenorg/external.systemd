@@ -218,7 +218,7 @@ static int fifo_process(Fifo *f) {
                         return 0;
 
                 log_warning("Failed to read from fifo: %m");
-                return -1;
+                return -errno;
         }
 
         f->bytes_read += l;
@@ -245,7 +245,7 @@ static void fifo_free(Fifo *f) {
                 if (f->server)
                         epoll_ctl(f->server->epoll_fd, EPOLL_CTL_DEL, f->fd, NULL);
 
-                close_nointr_nofail(f->fd);
+                safe_close(f->fd);
         }
 
         free(f);
@@ -257,8 +257,7 @@ static void server_done(Server *s) {
         while (s->fifos)
                 fifo_free(s->fifos);
 
-        if (s->epoll_fd >= 0)
-                close_nointr_nofail(s->epoll_fd);
+        safe_close(s->epoll_fd);
 
         if (s->bus) {
                 sd_bus_flush(s->bus);
@@ -384,7 +383,8 @@ int main(int argc, char *argv[]) {
 
         umask(0022);
 
-        if ((n = sd_listen_fds(true)) < 0) {
+        n = sd_listen_fds(true);
+        if (n < 0) {
                 log_error("Failed to read listening file descriptors from environment: %s", strerror(-r));
                 return EXIT_FAILURE;
         }
@@ -397,7 +397,7 @@ int main(int argc, char *argv[]) {
         if (server_init(&server, (unsigned) n) < 0)
                 return EXIT_FAILURE;
 
-        log_debug("systemd-initctl running as pid %lu", (unsigned long) getpid());
+        log_debug("systemd-initctl running as pid "PID_FMT, getpid());
 
         sd_notify(false,
                   "READY=1\n"
@@ -427,7 +427,7 @@ int main(int argc, char *argv[]) {
 
         r = EXIT_SUCCESS;
 
-        log_debug("systemd-initctl stopped as pid %lu", (unsigned long) getpid());
+        log_debug("systemd-initctl stopped as pid "PID_FMT, getpid());
 
 fail:
         sd_notify(false,

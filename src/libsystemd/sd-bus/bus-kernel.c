@@ -36,6 +36,7 @@
 #include "bus-kernel.h"
 #include "bus-bloom.h"
 #include "bus-util.h"
+#include "bus-label.h"
 #include "cgroup-util.h"
 
 #define UNIQUE_NAME_MAX (3+DECIMAL_STR_MAX(uint64_t))
@@ -265,7 +266,7 @@ static int bus_message_setup_kmsg(sd_bus *b, sd_bus_message *m) {
                 well_known ? 0 :
                 m->destination ? unique : KDBUS_DST_ID_BROADCAST;
         m->kdbus->payload_type = KDBUS_PAYLOAD_DBUS;
-        m->kdbus->cookie = m->header->serial;
+        m->kdbus->cookie = (uint64_t) m->header->serial;
         m->kdbus->priority = m->priority;
 
         if (m->header->flags & BUS_MESSAGE_NO_REPLY_EXPECTED)
@@ -400,10 +401,8 @@ static int bus_kernel_make_message(sd_bus *bus, struct kdbus_msg *k) {
         if (n_bytes != total)
                 return -EBADMSG;
 
-        /* on kdbus we only speak native endian gvariant, never dbus1
-         * marshalling or reverse endian */
-        if (h->version != 2 ||
-            h->endian != BUS_NATIVE_ENDIAN)
+        /* on kdbus we only speak native endian, never reverse endian */
+        if (h->endian != BUS_NATIVE_ENDIAN)
                 return -EPROTOTYPE;
 
         r = bus_message_from_header(bus, h, sizeof(struct bus_header), fds, n_fds, NULL, seclabel, 0, &m);
@@ -541,11 +540,9 @@ static int bus_kernel_make_message(sd_bus *bus, struct kdbus_msg *k) {
                         m->creds.cgroup = d->str;
                         m->creds.mask |= (SD_BUS_CREDS_CGROUP|SD_BUS_CREDS_UNIT|SD_BUS_CREDS_USER_UNIT|SD_BUS_CREDS_SLICE|SD_BUS_CREDS_SESSION|SD_BUS_CREDS_OWNER_UID) & bus->creds_mask;
 
-                        if (!bus->cgroup_root) {
-                                r = cg_get_root_path(&bus->cgroup_root);
-                                if (r < 0)
-                                        goto fail;
-                        }
+                        r = bus_get_root_path(bus);
+                        if (r < 0)
+                                goto fail;
 
                         m->creds.cgroup_root = bus->cgroup_root;
 
@@ -658,7 +655,7 @@ int bus_kernel_take_fd(sd_bus *b) {
         b->use_memfd = 1;
 
         if (b->connection_name) {
-                g = sd_bus_label_escape(b->connection_name);
+                g = bus_label_escape(b->connection_name);
                 if (!g)
                         return -ENOMEM;
 
@@ -678,7 +675,7 @@ int bus_kernel_take_fd(sd_bus *b) {
                 } else {
                         _cleanup_free_ char *e = NULL;
 
-                        e = sd_bus_label_escape(pr);
+                        e = bus_label_escape(pr);
                         if (!e)
                                 return -ENOMEM;
 
@@ -691,7 +688,7 @@ int bus_kernel_take_fd(sd_bus *b) {
                         name = g;
                 }
 
-                b->connection_name = sd_bus_label_unescape(name);
+                b->connection_name = bus_label_unescape(name);
                 if (!b->connection_name)
                         return -ENOMEM;
         }
@@ -768,7 +765,7 @@ int bus_kernel_take_fd(sd_bus *b) {
         b->is_kernel = true;
         b->bus_client = true;
         b->can_fds = !!(hello->conn_flags & KDBUS_HELLO_ACCEPT_FD);
-        b->message_version = 2;
+        b->message_version = 1;
         b->message_endian = BUS_NATIVE_ENDIAN;
 
         /* the kernel told us the UUID of the underlying bus */
@@ -810,7 +807,7 @@ static void close_kdbus_msg(sd_bus *bus, struct kdbus_msg *k) {
                 if (d->type == KDBUS_ITEM_FDS)
                         close_many(d->fds, (d->size - offsetof(struct kdbus_item, fds)) / sizeof(int));
                 else if (d->type == KDBUS_ITEM_PAYLOAD_MEMFD)
-                        close_nointr_nofail(d->memfd.fd);
+                        safe_close(d->memfd.fd);
         }
 }
 
@@ -1119,7 +1116,7 @@ int bus_kernel_pop_memfd(sd_bus *bus, void **address, size_t *mapped, size_t *al
 
                 assert(bus->connection_name);
 
-                g = sd_bus_label_escape(bus->connection_name);
+                g = bus_label_escape(bus->connection_name);
                 if (!g)
                         return -ENOMEM;
 
@@ -1164,7 +1161,7 @@ static void close_and_munmap(int fd, void *address, size_t size) {
         if (size > 0)
                 assert_se(munmap(address, PAGE_ALIGN(size)) >= 0);
 
-        close_nointr_nofail(fd);
+        safe_close(fd);
 }
 
 void bus_kernel_push_memfd(sd_bus *bus, int fd, void *address, size_t mapped, size_t allocated) {
@@ -1304,22 +1301,22 @@ int bus_kernel_create_bus(const char *name, bool world, char **s) {
         make->size += ALIGN8(n->size);
 
         n = KDBUS_ITEM_NEXT(n);
-        sprintf(n->str, "%lu-%s", (unsigned long) getuid(), name);
+        sprintf(n->str, UID_FMT "-%s", getuid(), name);
         n->size = offsetof(struct kdbus_item, str) + strlen(n->str) + 1;
         n->type = KDBUS_ITEM_MAKE_NAME;
         make->size += ALIGN8(n->size);
 
-        make->flags = KDBUS_MAKE_POLICY_OPEN | (world ? KDBUS_MAKE_ACCESS_WORLD : 0);
+        make->flags = world ? KDBUS_MAKE_ACCESS_WORLD : 0;
 
         if (ioctl(fd, KDBUS_CMD_BUS_MAKE, make) < 0) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return -errno;
         }
 
         /* The higher 32bit of the flags field are considered
          * 'incompatible flags'. Refuse them all for now. */
         if (make->flags > 0xFFFFFFFFULL) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return -ENOTSUP;
         }
 
@@ -1328,7 +1325,7 @@ int bus_kernel_create_bus(const char *name, bool world, char **s) {
 
                 p = strjoin("/dev/kdbus/", n->str, "/bus", NULL);
                 if (!p) {
-                        close_nointr_nofail(fd);
+                        safe_close(fd);
                         return -ENOMEM;
                 }
 
@@ -1338,52 +1335,164 @@ int bus_kernel_create_bus(const char *name, bool world, char **s) {
         return fd;
 }
 
-int bus_kernel_create_starter(const char *bus, const char *name) {
-        struct kdbus_cmd_hello *hello;
-        struct kdbus_item *n;
+static int bus_kernel_translate_access(BusNamePolicyAccess access) {
+        assert(access >= 0);
+        assert(access < _BUSNAME_POLICY_ACCESS_MAX);
+
+        switch (access) {
+
+        case BUSNAME_POLICY_ACCESS_SEE:
+                return KDBUS_POLICY_SEE;
+
+        case BUSNAME_POLICY_ACCESS_TALK:
+                return KDBUS_POLICY_TALK;
+
+        case BUSNAME_POLICY_ACCESS_OWN:
+                return KDBUS_POLICY_OWN;
+
+        default:
+                assert_not_reached("Unknown policy access");
+        }
+}
+
+static int bus_kernel_translate_policy(const BusNamePolicy *policy, struct kdbus_item *item) {
+        int r;
+
+        assert(policy);
+        assert(item);
+
+        switch (policy->type) {
+
+        case BUSNAME_POLICY_TYPE_USER: {
+                const char *user = policy->name;
+                uid_t uid;
+
+                r = get_user_creds(&user, &uid, NULL, NULL, NULL);
+                if (r < 0)
+                        return r;
+
+                item->policy_access.type = KDBUS_POLICY_ACCESS_USER;
+                item->policy_access.id = uid;
+                break;
+        }
+
+        case BUSNAME_POLICY_TYPE_GROUP: {
+                const char *group = policy->name;
+                gid_t gid;
+
+                r = get_group_creds(&group, &gid);
+                if (r < 0)
+                        return r;
+
+                item->policy_access.type = KDBUS_POLICY_ACCESS_GROUP;
+                item->policy_access.id = gid;
+                break;
+        }
+
+        default:
+                assert_not_reached("Unknown policy type");
+        }
+
+        item->policy_access.access = bus_kernel_translate_access(policy->access);
+
+        return 0;
+}
+
+int bus_kernel_open_bus_fd(const char *bus, char **path) {
         char *p;
         int fd;
+        size_t len;
 
-        assert(bus);
-        assert(name);
+        len = strlen("/dev/kdbus/") + DECIMAL_STR_MAX(uid_t) + 1 + strlen(bus) + strlen("/bus") + 1;
 
-        p = alloca(sizeof("/dev/kdbus/") - 1 + DECIMAL_STR_MAX(uid_t) + 1 + strlen(bus) + sizeof("/bus"));
-        sprintf(p, "/dev/kdbus/%lu-%s/bus", (unsigned long) getuid(), bus);
+        if (path) {
+                p = malloc(len);
+                if (!p)
+                        return -ENOMEM;
+                *path = p;
+        } else
+                p = alloca(len);
+        sprintf(p, "/dev/kdbus/" UID_FMT "-%s/bus", getuid(), bus);
 
         fd = open(p, O_RDWR|O_NOCTTY|O_CLOEXEC);
         if (fd < 0)
                 return -errno;
 
-        hello = alloca0(ALIGN8(offsetof(struct kdbus_cmd_hello, items) +
-                               offsetof(struct kdbus_item, str) +
-                               strlen(name) + 1));
+        return fd;
+}
+
+int bus_kernel_make_starter(
+                int fd,
+                const char *name,
+                bool activating,
+                bool accept_fd,
+                BusNamePolicy *policy,
+                BusNamePolicyAccess world_policy) {
+
+        struct kdbus_cmd_hello *hello;
+        struct kdbus_item *n;
+        size_t policy_cnt = 0;
+        BusNamePolicy *po;
+        size_t size;
+        int r;
+
+        assert(fd >= 0);
+        assert(name);
+
+        LIST_FOREACH(policy, po, policy)
+                policy_cnt++;
+
+        if (world_policy >= 0)
+                policy_cnt++;
+
+        size = ALIGN8(offsetof(struct kdbus_cmd_hello, items)) +
+               ALIGN8(offsetof(struct kdbus_item, str) + strlen(name) + 1) +
+               policy_cnt * ALIGN8(offsetof(struct kdbus_item, policy_access) + sizeof(struct kdbus_policy_access));
+
+        hello = alloca0(size);
 
         n = hello->items;
         strcpy(n->str, name);
         n->size = offsetof(struct kdbus_item, str) + strlen(n->str) + 1;
         n->type = KDBUS_ITEM_NAME;
+        n = KDBUS_ITEM_NEXT(n);
 
-        hello->size = ALIGN8(offsetof(struct kdbus_cmd_hello, items) + n->size);
-        hello->conn_flags = KDBUS_HELLO_ACTIVATOR;
-        hello->pool_size = KDBUS_POOL_SIZE;
+        LIST_FOREACH(policy, po, policy) {
+                n->type = KDBUS_ITEM_POLICY_ACCESS;
+                n->size = offsetof(struct kdbus_item, policy_access) + sizeof(struct kdbus_policy_access);
 
-        if (ioctl(fd, KDBUS_CMD_HELLO, hello) < 0) {
-                close_nointr_nofail(fd);
-                return -errno;
+                r = bus_kernel_translate_policy(po, n);
+                if (r < 0)
+                        return r;
+
+                n = KDBUS_ITEM_NEXT(n);
         }
+
+        if (world_policy >= 0) {
+                n->type = KDBUS_ITEM_POLICY_ACCESS;
+                n->size = offsetof(struct kdbus_item, policy_access) + sizeof(struct kdbus_policy_access);
+                n->policy_access.type = KDBUS_POLICY_ACCESS_WORLD;
+                n->policy_access.access = bus_kernel_translate_access(world_policy);
+        }
+
+        hello->size = size;
+        hello->conn_flags =
+                (activating ? KDBUS_HELLO_ACTIVATOR : KDBUS_HELLO_POLICY_HOLDER) |
+                (accept_fd ? KDBUS_HELLO_ACCEPT_FD : 0);
+        hello->pool_size = KDBUS_POOL_SIZE;
+        hello->attach_flags = _KDBUS_ATTACH_ALL;
+
+        if (ioctl(fd, KDBUS_CMD_HELLO, hello) < 0)
+                return -errno;
 
         /* The higher 32bit of both flags fields are considered
          * 'incompatible flags'. Refuse them all for now. */
         if (hello->bus_flags > 0xFFFFFFFFULL ||
-            hello->conn_flags > 0xFFFFFFFFULL) {
-                close_nointr_nofail(fd);
+            hello->conn_flags > 0xFFFFFFFFULL)
                 return -ENOTSUP;
-        }
 
-        if (!bloom_validate_parameters((size_t) hello->bloom.size, (unsigned) hello->bloom.n_hash)) {
-                close_nointr_nofail(fd);
+        if (!bloom_validate_parameters((size_t) hello->bloom.size, (unsigned) hello->bloom.n_hash))
                 return -ENOTSUP;
-        }
 
         return fd;
 }
@@ -1410,17 +1519,17 @@ int bus_kernel_create_domain(const char *name, char **s) {
         n->type = KDBUS_ITEM_MAKE_NAME;
 
         make->size = ALIGN8(offsetof(struct kdbus_cmd_make, items) + n->size);
-        make->flags = KDBUS_MAKE_POLICY_OPEN | KDBUS_MAKE_ACCESS_WORLD;
+        make->flags = KDBUS_MAKE_ACCESS_WORLD;
 
         if (ioctl(fd, KDBUS_CMD_DOMAIN_MAKE, make) < 0) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return -errno;
         }
 
         /* The higher 32bit of the flags field are considered
          * 'incompatible flags'. Refuse them all for now. */
         if (make->flags > 0xFFFFFFFFULL) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return -ENOTSUP;
         }
 
@@ -1429,7 +1538,7 @@ int bus_kernel_create_domain(const char *name, char **s) {
 
                 p = strappend("/dev/kdbus/domain/", name);
                 if (!p) {
-                        close_nointr_nofail(fd);
+                        safe_close(fd);
                         return -ENOMEM;
                 }
 
@@ -1441,17 +1550,13 @@ int bus_kernel_create_domain(const char *name, char **s) {
 
 int bus_kernel_create_monitor(const char *bus) {
         struct kdbus_cmd_hello *hello;
-        char *p;
         int fd;
 
         assert(bus);
 
-        p = alloca(sizeof("/dev/kdbus/") - 1 + DECIMAL_STR_MAX(uid_t) + 1 + strlen(bus) + sizeof("/bus"));
-        sprintf(p, "/dev/kdbus/%lu-%s/bus", (unsigned long) getuid(), bus);
-
-        fd = open(p, O_RDWR|O_NOCTTY|O_CLOEXEC);
+        fd = bus_kernel_open_bus_fd(bus, NULL);
         if (fd < 0)
-                return -errno;
+                return fd;
 
         hello = alloca0(sizeof(struct kdbus_cmd_hello));
         hello->size = sizeof(struct kdbus_cmd_hello);
@@ -1459,7 +1564,7 @@ int bus_kernel_create_monitor(const char *bus) {
         hello->pool_size = KDBUS_POOL_SIZE;
 
         if (ioctl(fd, KDBUS_CMD_HELLO, hello) < 0) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return -errno;
         }
 
@@ -1467,7 +1572,7 @@ int bus_kernel_create_monitor(const char *bus) {
          * 'incompatible flags'. Refuse them all for now. */
         if (hello->bus_flags > 0xFFFFFFFFULL ||
             hello->conn_flags > 0xFFFFFFFFULL) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return -ENOTSUP;
         }
 

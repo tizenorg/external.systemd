@@ -63,6 +63,10 @@
         _Pragma("GCC diagnostic push");                                 \
         _Pragma("GCC diagnostic ignored \"-Wnonnull\"")
 
+#define DISABLE_WARNING_SHADOW                                          \
+        _Pragma("GCC diagnostic push");                                 \
+        _Pragma("GCC diagnostic ignored \"-Wshadow\"")
+
 #define REENABLE_WARNING                                                \
         _Pragma("GCC diagnostic pop")
 
@@ -98,7 +102,20 @@ static inline size_t ALIGN_TO(size_t l, size_t ali) {
         return ((l + ali - 1) & ~(ali - 1));
 }
 
-#define ALIGN_TO_PTR(p, ali) ((void*) ALIGN_TO((unsigned long) p))
+#define ALIGN_TO_PTR(p, ali) ((void*) ALIGN_TO((unsigned long) p, ali))
+
+/* align to next higher power-of-2 (except for: 0 => 0, overflow => 0) */
+static inline unsigned long ALIGN_POWER2(unsigned long u) {
+        /* clz(0) is undefined */
+        if (u == 1)
+                return 1;
+
+        /* left-shift overflow is undefined */
+        if (__builtin_clzl(u - 1UL) < 1)
+                return 0;
+
+        return 1UL << (sizeof(u) * 8 - __builtin_clzl(u - 1UL));
+}
 
 #define ELEMENTSOF(x) (sizeof(x)/sizeof((x)[0]))
 
@@ -116,40 +133,55 @@ static inline size_t ALIGN_TO(size_t l, size_t ali) {
                 })
 
 #undef MAX
-#define MAX(a,b)                                 \
-        __extension__ ({                         \
-                        typeof(a) _a = (a);      \
-                        typeof(b) _b = (b);      \
-                        _a > _b ? _a : _b;       \
+#define MAX(a,b)                                        \
+        __extension__ ({                                \
+                        const typeof(a) _a = (a);       \
+                        const typeof(b) _b = (b);       \
+                        _a > _b ? _a : _b;              \
                 })
 
-#define MAX3(x,y,z)                              \
-        __extension__ ({                         \
-                        typeof(x) _c = MAX(x,y); \
-                        MAX(_c, z);              \
+/* evaluates to (void) if _A or _B are not constant or of different types */
+#define CONST_MAX(_A, _B) \
+        __extension__ (__builtin_choose_expr(                           \
+                __builtin_constant_p(_A) &&                             \
+                __builtin_constant_p(_B) &&                             \
+                __builtin_types_compatible_p(typeof(_A), typeof(_B)),   \
+                ((_A) > (_B)) ? (_A) : (_B),                            \
+                (void)0))
+
+#define MAX3(x,y,z)                                     \
+        __extension__ ({                                \
+                        const typeof(x) _c = MAX(x,y);  \
+                        MAX(_c, z);                     \
                 })
 
 #undef MIN
-#define MIN(a,b)                                \
-        __extension__ ({                        \
-                        typeof(a) _a = (a);     \
-                        typeof(b) _b = (b);     \
-                        _a < _b ? _a : _b;      \
+#define MIN(a,b)                                        \
+        __extension__ ({                                \
+                        const typeof(a) _a = (a);       \
+                        const typeof(b) _b = (b);       \
+                        _a < _b ? _a : _b;              \
                 })
 
-#define LESS_BY(A,B)                            \
-        __extension__ ({                        \
-                        typeof(A) _A = (A);     \
-                        typeof(B) _B = (B);     \
-                        _A > _B ? _A - _B : 0;  \
+#define MIN3(x,y,z)                                     \
+        __extension__ ({                                \
+                        const typeof(x) _c = MIN(x,y);  \
+                        MIN(_c, z);                     \
+                })
+
+#define LESS_BY(A,B)                                    \
+        __extension__ ({                                \
+                        const typeof(A) _A = (A);       \
+                        const typeof(B) _B = (B);       \
+                        _A > _B ? _A - _B : 0;          \
                 })
 
 #ifndef CLAMP
 #define CLAMP(x, low, high)                                             \
         __extension__ ({                                                \
-                        typeof(x) _x = (x);                             \
-                        typeof(low) _low = (low);                       \
-                        typeof(high) _high = (high);                    \
+                        const typeof(x) _x = (x);                       \
+                        const typeof(low) _low = (low);                 \
+                        const typeof(high) _high = (high);              \
                         ((_x > _high) ? _high : ((_x < _low) ? _low : _x)); \
                 })
 #endif
@@ -217,6 +249,9 @@ static inline size_t ALIGN_TO(size_t l, size_t ali) {
 #define INT64_TO_PTR(u) ((void *) ((intptr_t) (u)))
 #define PTR_TO_UINT64(p) ((uint64_t) ((uintptr_t) (p)))
 #define UINT64_TO_PTR(u) ((void *) ((uintptr_t) (u)))
+
+#define PTR_TO_SIZE(p) ((size_t) ((uintptr_t) (p)))
+#define SIZE_TO_PTR(u) ((void *) ((uintptr_t) (u)))
 
 #define memzero(x,l) (memset((x), 0, (l)))
 #define zero(x) (memzero(&(x), sizeof(x)))
@@ -324,13 +359,14 @@ do {                                                                    \
 #define SET_FLAG(v, flag, b) \
         (v) = (b) ? ((v) | (flag)) : ((v) & ~(flag))
 
-#define IN_SET(x, ...)                                                  \
+#define IN_SET(x, y, ...)                                               \
         ({                                                              \
-                const typeof(x) _x = (x);                               \
+                const typeof(y) _y = (y);                               \
+                const typeof(_y) _x = (x);                              \
                 unsigned _i;                                            \
                 bool _found = false;                                    \
-                for (_i = 0; _i < sizeof((const typeof(_x)[]) { __VA_ARGS__ })/sizeof(const typeof(_x)); _i++) \
-                        if (((const typeof(_x)[]) { __VA_ARGS__ })[_i] == _x) { \
+                for (_i = 0; _i < 1 + sizeof((const typeof(_x)[]) { __VA_ARGS__ })/sizeof(const typeof(_x)); _i++) \
+                        if (((const typeof(_x)[]) { _y, __VA_ARGS__ })[_i] == _x) { \
                                 _found = true;                          \
                                 break;                                  \
                         }                                               \

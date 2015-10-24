@@ -37,7 +37,7 @@
 #include "special.h"
 #include "async.h"
 #include "virt.h"
-#include "dbus-client-track.h"
+#include "dbus.h"
 
 Job* job_new_raw(Unit *unit) {
         Job *j;
@@ -90,7 +90,8 @@ void job_free(Job *j) {
 
         sd_event_source_unref(j->timer_event_source);
 
-        bus_client_track_free(j->subscribed);
+        sd_bus_track_unref(j->clients);
+        strv_free(j->deserialized_clients);
 
         free(j);
 }
@@ -872,7 +873,12 @@ int job_start_timer(Job *j) {
         if (j->unit->job_timeout <= 0)
                 return 0;
 
-        r = sd_event_add_monotonic(j->manager->event, &j->timer_event_source, j->begin_usec + j->unit->job_timeout, 0, job_dispatch_timer, j);
+        r = sd_event_add_time(
+                        j->manager->event,
+                        &j->timer_event_source,
+                        CLOCK_MONOTONIC,
+                        j->begin_usec + j->unit->job_timeout, 0,
+                        job_dispatch_timer, j);
         if (r < 0)
                 return r;
 
@@ -931,7 +937,7 @@ int job_serialize(Job *j, FILE *f, FDSet *fds) {
         if (j->begin_usec > 0)
                 fprintf(f, "job-begin="USEC_FMT"\n", j->begin_usec);
 
-        bus_client_track_serialize(j->manager, f, j->subscribed);
+        bus_track_serialize(j->clients, f);
 
         /* End marker */
         fputc('\n', f);
@@ -1035,13 +1041,10 @@ int job_deserialize(Job *j, FILE *f, FDSet *fds) {
                         else
                                 j->begin_usec = ull;
 
-                } else {
-                        char t[strlen(l) + 1 + strlen(v) + 1];
+                } else if (streq(l, "subscribed")) {
 
-                        strcpy(stpcpy(stpcpy(t, l), "="), v);
-
-                        if (bus_client_track_deserialize_item(j->manager, &j->subscribed, t) == 0)
-                                log_debug("Unknown deserialization key '%s'", l);
+                        if (strv_extend(&j->deserialized_clients, v) < 0)
+                                return log_oom();
                 }
         }
 }
@@ -1051,13 +1054,27 @@ int job_coldplug(Job *j) {
 
         assert(j);
 
+        /* After deserialization is complete and the bus connection
+         * set up again, let's start watching our subscribers again */
+        r = bus_track_coldplug(j->manager, &j->clients, &j->deserialized_clients);
+        if (r < 0)
+                return r;
+
+        if (j->state == JOB_WAITING)
+                job_add_to_run_queue(j);
+
         if (j->begin_usec == 0 || j->unit->job_timeout == 0)
                 return 0;
 
         if (j->timer_event_source)
                 j->timer_event_source = sd_event_source_unref(j->timer_event_source);
 
-        r = sd_event_add_monotonic(j->manager->event, &j->timer_event_source, j->begin_usec + j->unit->job_timeout, 0, job_dispatch_timer, j);
+        r = sd_event_add_time(
+                        j->manager->event,
+                        &j->timer_event_source,
+                        CLOCK_MONOTONIC,
+                        j->begin_usec + j->unit->job_timeout, 0,
+                        job_dispatch_timer, j);
         if (r < 0)
                 log_debug("Failed to restart timeout for job: %s", strerror(-r));
 
@@ -1146,9 +1163,9 @@ static const char* const job_mode_table[_JOB_MODE_MAX] = {
         [JOB_REPLACE] = "replace",
         [JOB_REPLACE_IRREVERSIBLY] = "replace-irreversibly",
         [JOB_ISOLATE] = "isolate",
+        [JOB_FLUSH] = "flush",
         [JOB_IGNORE_DEPENDENCIES] = "ignore-dependencies",
         [JOB_IGNORE_REQUIREMENTS] = "ignore-requirements",
-        [JOB_FLUSH] = "flush",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(job_mode, JobMode);

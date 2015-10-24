@@ -70,10 +70,31 @@ int manager_handle_action(
                 return 0;
         }
 
-        /* If we are docked don't react to lid closing */
         if (inhibit_key == INHIBIT_HANDLE_LID_SWITCH) {
+                int n;
+
+                /* If we are docked don't react to lid closing */
                 if (manager_is_docked(m)) {
                         log_debug("Ignoring lid switch request, system is docked.");
+                        return 0;
+                }
+
+                /* If we have more than one display connected,
+                 * don't react to lid closing. */
+                n = manager_count_displays(m);
+                if (n < 0)
+                        log_warning("Display counting failed: %s", strerror(-n));
+                else if (n > 1) {
+                        log_debug("Ignoring lid switch request, %i displays connected.", n);
+                        return 0;
+                }
+
+                /* If the last system suspend or startup is too close,
+                 * let's not suspend for now, to give USB docking
+                 * stations some time to settle so that we can
+                 * properly watch its displays. */
+                if (m->lid_switch_ignore_event_source) {
+                        log_debug("Ignoring lid switch request, system startup or resume too close.");
                         return 0;
                 }
         }
@@ -130,17 +151,17 @@ int manager_handle_action(
 
                 /* If this is just a recheck of the lid switch then don't warn about anything */
                 if (!is_edge) {
-                        log_debug("Refusing operation, %s is inhibited by UID %lu/%s, PID %lu/%s.",
+                        log_debug("Refusing operation, %s is inhibited by UID "UID_FMT"/%s, PID "PID_FMT"/%s.",
                                   inhibit_what_to_string(inhibit_operation),
-                                  (unsigned long) offending->uid, strna(u),
-                                  (unsigned long) offending->pid, strna(comm));
+                                  offending->uid, strna(u),
+                                  offending->pid, strna(comm));
                         return 0;
                 }
 
-                log_error("Refusing operation, %s is inhibited by UID %lu/%s, PID %lu/%s.",
+                log_error("Refusing operation, %s is inhibited by UID "UID_FMT"/%s, PID "PID_FMT"/%s.",
                           inhibit_what_to_string(inhibit_operation),
-                          (unsigned long) offending->uid, strna(u),
-                          (unsigned long) offending->pid, strna(comm));
+                          offending->uid, strna(u),
+                          offending->pid, strna(comm));
 
                 warn_melody();
                 return -EPERM;

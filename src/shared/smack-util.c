@@ -23,10 +23,9 @@
 
 #include <unistd.h>
 #include <string.h>
-#ifdef HAVE_XATTR
-#include <attr/xattr.h>
-#endif
+#include <sys/xattr.h>
 
+#include "util.h"
 #include "smack-util.h"
 
 bool use_smack(void) {
@@ -57,6 +56,60 @@ int smack_label_path(const char *path, const char *label) {
 #endif
 }
 
+int smack_label_get_path(const char *path, char **label) {
+        int i;
+        int r = 0;
+        char buf[SMACK_LABEL_LEN + 1];
+        char *result = NULL;
+
+        assert(path);
+
+#ifdef HAVE_SMACK
+        if (!use_smack())
+                return 0;
+
+        r = lgetxattr(path, "security.SMACK64", buf, SMACK_LABEL_LEN + 1);
+        if (r < 0)
+                return -errno;
+        else if (buf[0] == '\0' || buf[0] == '-')
+                return -EINVAL;
+
+        result = calloc(r + 1, 1);
+        if (result == NULL)
+                 return -errno;
+
+        for (i = 0; i < (SMACK_LABEL_LEN + 1) && buf[i]; i++) {
+                if (buf[i] <= ' ' || buf[i] > '~')
+                    return -EINVAL;
+                switch (buf[i]) {
+                case '/':
+                case '"':
+                case '\\':
+                case '\'':
+                        return -EINVAL;
+                default:
+                        break;
+                }
+
+                if (result)
+                        result[i] = buf[i];
+        }
+
+        if (result && i < (SMACK_LABEL_LEN + 1))
+                result[i] = '\0';
+
+        if (i < 0) {
+                free(result);
+                return -EINVAL;
+        }
+        *label = result;
+
+        return i;
+#endif
+
+        return r;
+}
+
 int smack_label_fd(int fd, const char *label) {
 #ifdef HAVE_SMACK
         if (!use_smack())
@@ -66,6 +119,25 @@ int smack_label_fd(int fd, const char *label) {
 #else
         return 0;
 #endif
+}
+
+int smack_label_apply_pid(pid_t pid, const char *label) {
+        int r = 0;
+        const char *p;
+
+        assert(label);
+
+#ifdef HAVE_SMACK
+        if (!use_smack())
+                return 0;
+
+        p = procfs_file_alloca(pid, "attr/current");
+        r = write_string_file(p, label);
+        if (r < 0)
+                return r;
+#endif
+
+        return r;
 }
 
 int smack_label_ip_out_fd(int fd, const char *label) {

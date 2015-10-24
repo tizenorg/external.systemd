@@ -32,6 +32,7 @@
 #include "audit.h"
 #include "bus-util.h"
 #include "bus-error.h"
+#include "udev-util.h"
 #include "logind.h"
 
 int manager_add_device(Manager *m, const char *sysfs, bool master, Device **_device) {
@@ -41,19 +42,14 @@ int manager_add_device(Manager *m, const char *sysfs, bool master, Device **_dev
         assert(sysfs);
 
         d = hashmap_get(m->devices, sysfs);
-        if (d) {
-                if (_device)
-                        *_device = d;
-
+        if (d)
                 /* we support adding master-flags, but not removing them */
                 d->master = d->master || master;
-
-                return 0;
+        else {
+                d = device_new(m, sysfs, master);
+                if (!d)
+                        return -ENOMEM;
         }
-
-        d = device_new(m, sysfs, master);
-        if (!d)
-                return -ENOMEM;
 
         if (_device)
                 *_device = d;
@@ -68,16 +64,11 @@ int manager_add_seat(Manager *m, const char *id, Seat **_seat) {
         assert(id);
 
         s = hashmap_get(m->seats, id);
-        if (s) {
-                if (_seat)
-                        *_seat = s;
-
-                return 0;
+        if (!s) {
+                s = seat_new(m, id);
+                if (!s)
+                        return -ENOMEM;
         }
-
-        s = seat_new(m, id);
-        if (!s)
-                return -ENOMEM;
 
         if (_seat)
                 *_seat = s;
@@ -92,16 +83,11 @@ int manager_add_session(Manager *m, const char *id, Session **_session) {
         assert(id);
 
         s = hashmap_get(m->sessions, id);
-        if (s) {
-                if (_session)
-                        *_session = s;
-
-                return 0;
+        if (!s) {
+                s = session_new(m, id);
+                if (!s)
+                        return -ENOMEM;
         }
-
-        s = session_new(m, id);
-        if (!s)
-                return -ENOMEM;
 
         if (_session)
                 *_session = s;
@@ -116,16 +102,11 @@ int manager_add_user(Manager *m, uid_t uid, gid_t gid, const char *name, User **
         assert(name);
 
         u = hashmap_get(m->users, ULONG_TO_PTR((unsigned long) uid));
-        if (u) {
-                if (_user)
-                        *_user = u;
-
-                return 0;
+        if (!u) {
+                u = user_new(m, uid, gid, name);
+                if (!u)
+                        return -ENOMEM;
         }
-
-        u = user_new(m, uid, gid, name);
-        if (!u)
-                return -ENOMEM;
 
         if (_user)
                 *_user = u;
@@ -192,16 +173,11 @@ int manager_add_button(Manager *m, const char *name, Button **_button) {
         assert(name);
 
         b = hashmap_get(m->buttons, name);
-        if (b) {
-                if (_button)
-                        *_button = b;
-
-                return 0;
+        if (!b) {
+                b = button_new(m, name);
+                if (!b)
+                        return -ENOMEM;
         }
-
-        b = button_new(m, name);
-        if (!b)
-                return -ENOMEM;
 
         if (_button)
                 *_button = b;
@@ -276,9 +252,11 @@ int manager_process_seat_device(Manager *m, struct udev_device *d) {
                         return 0;
                 }
 
-                /* ignore non-master devices for unknown seats */
+                seat = hashmap_get(m->seats, sn);
                 master = udev_device_has_tag(d, "master-of-seat");
-                if (!master && !(seat = hashmap_get(m->seats, sn)))
+
+                /* Ignore non-master devices for unknown seats */
+                if (!master && !seat)
                         return 0;
 
                 r = manager_add_device(m, udev_device_get_syspath(d), master, &device);
@@ -438,7 +416,8 @@ bool manager_shall_kill(Manager *m, const char *user) {
 
 static int vt_is_busy(unsigned int vtnr) {
         struct vt_stat vt_stat;
-        int r = 0, fd;
+        int r = 0;
+        _cleanup_close_ int fd;
 
         assert(vtnr >= 1);
 
@@ -457,14 +436,12 @@ static int vt_is_busy(unsigned int vtnr) {
         else
                 r = !!(vt_stat.v_state & (1 << vtnr));
 
-        close_nointr_nofail(fd);
-
         return r;
 }
 
 int manager_spawn_autovt(Manager *m, unsigned int vtnr) {
         _cleanup_bus_error_free_ sd_bus_error error = SD_BUS_ERROR_NULL;
-        _cleanup_free_ char *name = NULL;
+        char name[sizeof("autovt@tty.service") + DECIMAL_STR_MAX(unsigned int)];
         int r;
 
         assert(m);
@@ -486,9 +463,7 @@ int manager_spawn_autovt(Manager *m, unsigned int vtnr) {
                         return -EBUSY;
         }
 
-        if (asprintf(&name, "autovt@tty%u.service", vtnr) < 0)
-                return log_oom();
-
+        snprintf(name, sizeof(name), "autovt@tty%u.service", vtnr);
         r = sd_bus_call_method(
                         m->bus,
                         "org.freedesktop.systemd1",
@@ -513,4 +488,52 @@ bool manager_is_docked(Manager *m) {
                         return true;
 
         return false;
+}
+
+int manager_count_displays(Manager *m) {
+        _cleanup_udev_enumerate_unref_ struct udev_enumerate *e = NULL;
+        struct udev_list_entry *item = NULL, *first = NULL;
+        int r;
+        int n = 0;
+
+        e = udev_enumerate_new(m->udev);
+        if (!e)
+                return -ENOMEM;
+
+        r = udev_enumerate_add_match_subsystem(e, "drm");
+        if (r < 0)
+                return r;
+
+        r = udev_enumerate_scan_devices(e);
+        if (r < 0)
+                return r;
+
+        first = udev_enumerate_get_list_entry(e);
+        udev_list_entry_foreach(item, first) {
+                _cleanup_udev_device_unref_ struct udev_device *d = NULL;
+                struct udev_device *p;
+                const char *status;
+
+                d = udev_device_new_from_syspath(m->udev, udev_list_entry_get_name(item));
+                if (!d)
+                        return -ENOMEM;
+
+                p = udev_device_get_parent(d);
+                if (!p)
+                        continue;
+
+                /* If the parent shares the same subsystem as the
+                 * device we are looking at then it is a connector,
+                 * which is what we are interested in. */
+                if (!streq_ptr(udev_device_get_subsystem(p), "drm"))
+                        continue;
+
+                /* We count any connector which is not explicitly
+                 * "disconnected" as connected. */
+                status = udev_device_get_sysattr_value(d, "status");
+                if (!streq_ptr(status, "disconnected"))
+                        n++;
+        }
+
+        return n;
 }

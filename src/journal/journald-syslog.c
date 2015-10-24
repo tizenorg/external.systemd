@@ -30,22 +30,23 @@
 #include "journald-syslog.h"
 #include "journald-kmsg.h"
 #include "journald-console.h"
+#include "journald-wall.h"
 
 /* Warn once every 30s if we missed syslog message */
 #define WARN_FORWARD_SYSLOG_MISSED_USEC (30 * USEC_PER_SEC)
 
 static void forward_syslog_iovec(Server *s, const struct iovec *iovec, unsigned n_iovec, struct ucred *ucred, struct timeval *tv) {
 
-        union sockaddr_union sa = {
+        static const union sockaddr_union sa = {
                 .un.sun_family = AF_UNIX,
                 .un.sun_path = "/run/systemd/journal/syslog",
         };
         struct msghdr msghdr = {
                 .msg_iov = (struct iovec *) iovec,
                 .msg_iovlen = n_iovec,
-                .msg_name = &sa,
+                .msg_name = (struct sockaddr*) &sa.sa,
                 .msg_namelen = offsetof(union sockaddr_union, un.sun_path)
-                               + sizeof("/run/systemd/journal/syslog") - 1,
+                               + strlen("/run/systemd/journal/syslog"),
         };
         struct cmsghdr *cmsg;
         union {
@@ -158,7 +159,7 @@ void server_forward_syslog(Server *s, int priority, const char *identifier, cons
                         identifier = ident_buf;
                 }
 
-                snprintf(header_pid, sizeof(header_pid), "[%lu]: ", (unsigned long) ucred->pid);
+                snprintf(header_pid, sizeof(header_pid), "["PID_FMT"]: ", ucred->pid);
                 char_array_0(header_pid);
 
                 if (identifier)
@@ -380,6 +381,9 @@ void server_process_syslog_message(
         if (s->forward_to_console)
                 server_forward_console(s, priority, identifier, buf, ucred);
 
+        if (s->forward_to_wall)
+                server_forward_wall(s, priority, identifier, buf, ucred);
+
         IOVEC_SET_STRING(iovec[n++], "_TRANSPORT=syslog");
 
         if (asprintf(&syslog_priority, "PRIORITY=%i", priority & LOG_PRIMASK) >= 0)
@@ -422,9 +426,9 @@ int server_open_syslog_socket(Server *s) {
         assert(s);
 
         if (s->syslog_fd < 0) {
-                union sockaddr_union sa = {
+                static const union sockaddr_union sa = {
                         .un.sun_family = AF_UNIX,
-                        .un.sun_path = "/dev/log",
+                        .un.sun_path = "/run/systemd/journal/dev-log",
                 };
 
                 s->syslog_fd = socket(AF_UNIX, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0);
@@ -437,7 +441,7 @@ int server_open_syslog_socket(Server *s) {
 
                 r = bind(s->syslog_fd, &sa.sa, offsetof(union sockaddr_union, un.sun_path) + strlen(sa.un.sun_path));
                 if (r < 0) {
-                        log_error("bind() failed: %m");
+                        log_error("bind(%s) failed: %m", sa.un.sun_path);
                         return -errno;
                 }
 

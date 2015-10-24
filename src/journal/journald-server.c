@@ -67,10 +67,11 @@
 #define DEFAULT_SYNC_INTERVAL_USEC (5*USEC_PER_MINUTE)
 #define DEFAULT_RATE_LIMIT_INTERVAL (30*USEC_PER_SEC)
 #define DEFAULT_RATE_LIMIT_BURST 1000
+#define DEFAULT_MAX_FILE_USEC USEC_PER_MONTH
 
 #define RECHECK_AVAILABLE_SPACE_USEC (30*USEC_PER_SEC)
 
-static const char* const storage_table[] = {
+static const char* const storage_table[_STORAGE_MAX] = {
         [STORAGE_AUTO] = "auto",
         [STORAGE_VOLATILE] = "volatile",
         [STORAGE_PERSISTENT] = "persistent",
@@ -80,10 +81,10 @@ static const char* const storage_table[] = {
 DEFINE_STRING_TABLE_LOOKUP(storage, Storage);
 DEFINE_CONFIG_PARSE_ENUM(config_parse_storage, storage, Storage, "Failed to parse storage setting");
 
-static const char* const split_mode_table[] = {
-        [SPLIT_NONE] = "none",
+static const char* const split_mode_table[_SPLIT_MAX] = {
+        [SPLIT_LOGIN] = "login",
         [SPLIT_UID] = "uid",
-        [SPLIT_LOGIN] = "login"
+        [SPLIT_NONE] = "none",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(split_mode, SplitMode);
@@ -205,7 +206,7 @@ void server_fix_perms(Server *s, JournalFile *f, uid_t uid) {
                 log_warning("Failed to fix access mode on %s, ignoring: %s", f->path, strerror(-r));
 
 #ifdef HAVE_ACL
-        if (uid <= 0)
+        if (uid <= SYSTEM_UID_MAX)
                 return;
 
         acl = acl_get_fd(f->fd);
@@ -258,7 +259,7 @@ static JournalFile* find_journal(Server *s, uid_t uid) {
         if (s->runtime_journal)
                 return s->runtime_journal;
 
-        if (uid <= 0)
+        if (uid <= SYSTEM_UID_MAX)
                 return s->system_journal;
 
         r = sd_id128_get_machine(&machine);
@@ -269,8 +270,8 @@ static JournalFile* find_journal(Server *s, uid_t uid) {
         if (f)
                 return f;
 
-        if (asprintf(&p, "/var/log/journal/" SD_ID128_FORMAT_STR "/user-%lu.journal",
-                     SD_ID128_FORMAT_VAL(machine), (unsigned long) uid) < 0)
+        if (asprintf(&p, "/var/log/journal/" SD_ID128_FORMAT_STR "/user-"UID_FMT".journal",
+                     SD_ID128_FORMAT_VAL(machine), uid) < 0)
                 return s->system_journal;
 
         while (hashmap_size(s->user_journals) >= USER_JOURNALS_MAX) {
@@ -295,6 +296,27 @@ static JournalFile* find_journal(Server *s, uid_t uid) {
         return f;
 }
 
+static int do_rotate(Server *s, JournalFile **f, const char* name,
+                     bool seal, uint32_t uid) {
+        int r;
+        assert(s);
+
+        if (!*f)
+                return -EINVAL;
+
+        r = journal_file_rotate(f, s->compress, seal);
+        if (r < 0)
+                if (*f)
+                        log_error("Failed to rotate %s: %s",
+                                  (*f)->path, strerror(-r));
+                else
+                        log_error("Failed to create new %s journal: %s",
+                                  name, strerror(-r));
+        else
+                server_fix_perms(s, *f, uid);
+        return r;
+}
+
 void server_rotate(Server *s) {
         JournalFile *f;
         void *k;
@@ -303,42 +325,16 @@ void server_rotate(Server *s) {
 
         log_debug("Rotating...");
 
-        if (s->runtime_journal) {
-                r = journal_file_rotate(&s->runtime_journal, s->compress, false);
-                if (r < 0)
-                        if (s->runtime_journal)
-                                log_error("Failed to rotate %s: %s", s->runtime_journal->path, strerror(-r));
-                        else
-                                log_error("Failed to create new runtime journal: %s", strerror(-r));
-                else
-                        server_fix_perms(s, s->runtime_journal, 0);
-        }
-
-        if (s->system_journal) {
-                r = journal_file_rotate(&s->system_journal, s->compress, s->seal);
-                if (r < 0)
-                        if (s->system_journal)
-                                log_error("Failed to rotate %s: %s", s->system_journal->path, strerror(-r));
-                        else
-                                log_error("Failed to create new system journal: %s", strerror(-r));
-
-                else
-                        server_fix_perms(s, s->system_journal, 0);
-        }
+        do_rotate(s, &s->runtime_journal, "runtime", false, 0);
+        do_rotate(s, &s->system_journal, "system", s->seal, 0);
 
         HASHMAP_FOREACH_KEY(f, k, s->user_journals, i) {
-                r = journal_file_rotate(&f, s->compress, s->seal);
-                if (r < 0)
-                        if (f)
-                                log_error("Failed to rotate %s: %s", f->path, strerror(-r));
-                        else {
-                                log_error("Failed to create user journal: %s", strerror(-r));
-                                hashmap_remove(s->user_journals, k);
-                        }
-                else {
+                r = do_rotate(s, &f, "user", s->seal, PTR_TO_UINT32(k));
+                if (r >= 0)
                         hashmap_replace(s->user_journals, k, f);
-                        server_fix_perms(s, f, PTR_TO_UINT32(k));
-                }
+                else if (!f)
+                        /* Old file has been closed and deallocated */
+                        hashmap_remove(s->user_journals, k);
         }
 }
 
@@ -369,6 +365,20 @@ void server_sync(Server *s) {
         s->sync_scheduled = false;
 }
 
+static void do_vacuum(Server *s, char *ids, JournalFile *f, const char* path,
+                      JournalMetrics *metrics) {
+        char *p;
+        int r;
+
+        if (!f)
+                return;
+
+        p = strappenda(path, ids);
+        r = journal_directory_vacuum(p, metrics->max_use, s->max_retention_usec, &s->oldest_file_usec);
+        if (r < 0 && r != -ENOENT)
+                log_error("Failed to vacuum %s: %s", p, strerror(-r));
+}
+
 void server_vacuum(Server *s) {
         char ids[33];
         sd_id128_t machine;
@@ -383,24 +393,10 @@ void server_vacuum(Server *s) {
                 log_error("Failed to get machine ID: %s", strerror(-r));
                 return;
         }
-
         sd_id128_to_string(machine, ids);
 
-        if (s->system_journal) {
-                char *p = strappenda("/var/log/journal/", ids);
-
-                r = journal_directory_vacuum(p, s->system_metrics.max_use, s->max_retention_usec, &s->oldest_file_usec);
-                if (r < 0 && r != -ENOENT)
-                        log_error("Failed to vacuum %s: %s", p, strerror(-r));
-        }
-
-        if (s->runtime_journal) {
-                char *p = strappenda("/run/log/journal/", ids);
-
-                r = journal_directory_vacuum(p, s->runtime_metrics.max_use, s->max_retention_usec, &s->oldest_file_usec);
-                if (r < 0 && r != -ENOENT)
-                        log_error("Failed to vacuum %s: %s", p, strerror(-r));
-        }
+        do_vacuum(s, ids, s->system_journal, "/var/log/journal/", &s->system_metrics);
+        do_vacuum(s, ids, s->runtime_journal, "/run/log/journal/", &s->runtime_metrics);
 
         s->cached_available_space_timestamp = 0;
 }
@@ -581,13 +577,13 @@ static void dispatch_message_real(
         if (ucred) {
                 realuid = ucred->uid;
 
-                sprintf(pid, "_PID=%lu", (unsigned long) ucred->pid);
+                sprintf(pid, "_PID="PID_FMT, ucred->pid);
                 IOVEC_SET_STRING(iovec[n++], pid);
 
-                sprintf(uid, "_UID=%lu", (unsigned long) ucred->uid);
+                sprintf(uid, "_UID="UID_FMT, ucred->uid);
                 IOVEC_SET_STRING(iovec[n++], uid);
 
-                sprintf(gid, "_GID=%lu", (unsigned long) ucred->gid);
+                sprintf(gid, "_GID="GID_FMT, ucred->gid);
                 IOVEC_SET_STRING(iovec[n++], gid);
 
                 r = get_process_comm(ucred->pid, &t);
@@ -621,13 +617,13 @@ static void dispatch_message_real(
 #ifdef HAVE_AUDIT
                 r = audit_session_from_pid(ucred->pid, &audit);
                 if (r >= 0) {
-                        sprintf(audit_session, "_AUDIT_SESSION=%lu", (unsigned long) audit);
+                        sprintf(audit_session, "_AUDIT_SESSION=%"PRIu32, audit);
                         IOVEC_SET_STRING(iovec[n++], audit_session);
                 }
 
                 r = audit_loginuid_from_pid(ucred->pid, &loginuid);
                 if (r >= 0) {
-                        sprintf(audit_loginuid, "_AUDIT_LOGINUID=%lu", (unsigned long) loginuid);
+                        sprintf(audit_loginuid, "_AUDIT_LOGINUID="UID_FMT, loginuid);
                         IOVEC_SET_STRING(iovec[n++], audit_loginuid);
                 }
 #endif
@@ -649,7 +645,7 @@ static void dispatch_message_real(
                         if (cg_path_get_owner_uid(c, &owner) >= 0) {
                                 owner_valid = true;
 
-                                sprintf(owner_uid, "_SYSTEMD_OWNER_UID=%lu", (unsigned long) owner);
+                                sprintf(owner_uid, "_SYSTEMD_OWNER_UID="UID_FMT, owner);
                                 IOVEC_SET_STRING(iovec[n++], owner_uid);
                         }
 
@@ -686,7 +682,7 @@ static void dispatch_message_real(
 #ifdef HAVE_SELINUX
                 if (use_selinux()) {
                         if (label) {
-                                x = alloca(sizeof("_SELINUX_CONTEXT=") + label_len);
+                                x = alloca(strlen("_SELINUX_CONTEXT=") + label_len + 1);
 
                                 *((char*) mempcpy(stpcpy(x, "_SELINUX_CONTEXT="), label, label_len)) = 0;
                                 IOVEC_SET_STRING(iovec[n++], x);
@@ -708,13 +704,13 @@ static void dispatch_message_real(
         if (object_pid) {
                 r = get_process_uid(object_pid, &object_uid);
                 if (r >= 0) {
-                        sprintf(o_uid, "OBJECT_UID=%lu", (unsigned long) object_uid);
+                        sprintf(o_uid, "OBJECT_UID="UID_FMT, object_uid);
                         IOVEC_SET_STRING(iovec[n++], o_uid);
                 }
 
                 r = get_process_gid(object_pid, &object_gid);
                 if (r >= 0) {
-                        sprintf(o_gid, "OBJECT_GID=%lu", (unsigned long) object_gid);
+                        sprintf(o_gid, "OBJECT_GID="GID_FMT, object_gid);
                         IOVEC_SET_STRING(iovec[n++], o_gid);
                 }
 
@@ -742,13 +738,13 @@ static void dispatch_message_real(
 #ifdef HAVE_AUDIT
                 r = audit_session_from_pid(object_pid, &audit);
                 if (r >= 0) {
-                        sprintf(o_audit_session, "OBJECT_AUDIT_SESSION=%lu", (unsigned long) audit);
+                        sprintf(o_audit_session, "OBJECT_AUDIT_SESSION=%"PRIu32, audit);
                         IOVEC_SET_STRING(iovec[n++], o_audit_session);
                 }
 
                 r = audit_loginuid_from_pid(object_pid, &loginuid);
                 if (r >= 0) {
-                        sprintf(o_audit_loginuid, "OBJECT_AUDIT_LOGINUID=%lu", (unsigned long) loginuid);
+                        sprintf(o_audit_loginuid, "OBJECT_AUDIT_LOGINUID="UID_FMT, loginuid);
                         IOVEC_SET_STRING(iovec[n++], o_audit_loginuid);
                 }
 #endif
@@ -766,7 +762,7 @@ static void dispatch_message_real(
                         }
 
                         if (cg_path_get_owner_uid(c, &owner) >= 0) {
-                                sprintf(o_owner_uid, "OBJECT_SYSTEMD_OWNER_UID=%lu", (unsigned long) owner);
+                                sprintf(o_owner_uid, "OBJECT_SYSTEMD_OWNER_UID="UID_FMT, owner);
                                 IOVEC_SET_STRING(iovec[n++], o_owner_uid);
                         }
 
@@ -810,12 +806,11 @@ static void dispatch_message_real(
                 /* Split up strictly by any UID */
                 journal_uid = realuid;
         else if (s->split_mode == SPLIT_LOGIN && realuid > 0 && owner_valid && owner > 0)
-                /* Split up by login UIDs, this avoids creation of
-                 * individual journals for system UIDs.  We do this
-                 * only if the realuid is not root, in order not to
-                 * accidentally leak privileged information to the
-                 * user that is logged by a privileged process that is
-                 * part of an unprivileged session.*/
+                /* Split up by login UIDs.  We do this only if the
+                 * realuid is not root, in order not to accidentally
+                 * leak privileged information to the user that is
+                 * logged by a privileged process that is part of an
+                 * unprivileged session.*/
                 journal_uid = owner;
         else
                 journal_uid = 0;
@@ -995,7 +990,10 @@ static int system_journal_open(Server *s) {
                         /* OK, we really need the runtime journal, so create
                          * it if necessary. */
 
-                        (void) mkdir_parents(fn, 0755);
+                        (void) mkdir("/run/log", 0755);
+                        (void) mkdir("/run/log/journal", 0755);
+                        (void) mkdir_parents(fn, 0750);
+
                         r = journal_file_open_reliably(fn, O_RDWR|O_CREAT, 0640, s->compress, false, &s->runtime_metrics, s->mmap, NULL, &s->runtime_journal);
                         free(fn);
 
@@ -1131,15 +1129,13 @@ int process_datagram(sd_event_source *es, int fd, uint32_t revents, void *userda
                 union {
                         struct cmsghdr cmsghdr;
 
-                        /* We use NAME_MAX space for the
-                         * SELinux label here. The kernel
-                         * currently enforces no limit, but
-                         * according to suggestions from the
-                         * SELinux people this will change and
-                         * it will probably be identical to
-                         * NAME_MAX. For now we use that, but
-                         * this should be updated one day when
-                         * the final limit is known.*/
+                        /* We use NAME_MAX space for the SELinux label
+                         * here. The kernel currently enforces no
+                         * limit, but according to suggestions from
+                         * the SELinux people this will change and it
+                         * will probably be identical to NAME_MAX. For
+                         * now we use that, but this should be updated
+                         * one day when the final limit is known.*/
                         uint8_t buf[CMSG_SPACE(sizeof(struct ucred)) +
                                     CMSG_SPACE(sizeof(struct timeval)) +
                                     CMSG_SPACE(sizeof(int)) + /* fd */
@@ -1216,8 +1212,6 @@ int process_datagram(sd_event_source *es, int fd, uint32_t revents, void *userda
 
                 close_many(fds, n_fds);
         }
-
-        return 0;
 }
 
 static int dispatch_sigusr1(sd_event_source *es, const struct signalfd_siginfo *si, void *userdata) {
@@ -1229,6 +1223,9 @@ static int dispatch_sigusr1(sd_event_source *es, const struct signalfd_siginfo *
 
         touch("/run/systemd/journal/flushed");
         server_flush_to_var(s);
+#ifdef CONFIG_TIZEN
+        server_vacuum(s);
+#endif
         server_sync(s);
 
         return 0;
@@ -1288,7 +1285,7 @@ static int setup_signals(Server *s) {
 
 static int server_parse_proc_cmdline(Server *s) {
         _cleanup_free_ char *line = NULL;
-        char *w, *state;
+        const char *w, *state;
         size_t l;
         int r;
 
@@ -1323,35 +1320,27 @@ static int server_parse_proc_cmdline(Server *s) {
                                 log_warning("Failed to parse forward to console switch %s. Ignoring.", word + 36);
                         else
                                 s->forward_to_console = r;
+                } else if (startswith(word, "systemd.journald.forward_to_wall=")) {
+                        r = parse_boolean(word + 33);
+                        if (r < 0)
+                                log_warning("Failed to parse forward to wall switch %s. Ignoring.", word + 33);
+                        else
+                                s->forward_to_wall = r;
                 } else if (startswith(word, "systemd.journald"))
                         log_warning("Invalid systemd.journald parameter. Ignoring.");
         }
+        /* do not warn about state here, since probably systemd already did */
 
         return 0;
 }
 
 static int server_parse_config_file(Server *s) {
-        static const char fn[] = "/etc/systemd/journald.conf";
-        _cleanup_fclose_ FILE *f = NULL;
-        int r;
-
         assert(s);
 
-        f = fopen(fn, "re");
-        if (!f) {
-                if (errno == ENOENT)
-                        return 0;
-
-                log_warning("Failed to open configuration file %s: %m", fn);
-                return -errno;
-        }
-
-        r = config_parse(NULL, fn, f, "Journal\0", config_item_perf_lookup,
-                         (void*) journald_gperf_lookup, false, false, s);
-        if (r < 0)
-                log_warning("Failed to parse configuration file: %s", strerror(-r));
-
-        return r;
+        return config_parse(NULL, "/etc/systemd/journald.conf", NULL,
+                            "Journal\0",
+                            config_item_perf_lookup, journald_gperf_lookup,
+                            false, false, true, s);
 }
 
 static int server_dispatch_sync(sd_event_source *es, usec_t t, void *userdata) {
@@ -1380,14 +1369,19 @@ int server_schedule_sync(Server *s, int priority) {
         if (s->sync_interval_usec > 0) {
                 usec_t when;
 
-                r = sd_event_get_now_monotonic(s->event, &when);
+                r = sd_event_now(s->event, CLOCK_MONOTONIC, &when);
                 if (r < 0)
                         return r;
 
                 when += s->sync_interval_usec;
 
                 if (!s->sync_event_source) {
-                        r = sd_event_add_monotonic(s->event, &s->sync_event_source, when, 0, server_dispatch_sync, s);
+                        r = sd_event_add_time(
+                                        s->event,
+                                        &s->sync_event_source,
+                                        CLOCK_MONOTONIC,
+                                        when, 0,
+                                        server_dispatch_sync, s);
                         if (r < 0)
                                 return r;
 
@@ -1435,8 +1429,7 @@ static int server_open_hostname(Server *s) {
                 if (r == -EPERM) {
                         log_warning("Failed to register hostname fd in event loop: %s. Ignoring.",
                                         strerror(-r));
-                        close_nointr_nofail(s->hostname_fd);
-                        s->hostname_fd = -1;
+                        s->hostname_fd = safe_close(s->hostname_fd);
                         return 0;
                 }
 
@@ -1469,12 +1462,15 @@ int server_init(Server *s) {
         s->rate_limit_interval = DEFAULT_RATE_LIMIT_INTERVAL;
         s->rate_limit_burst = DEFAULT_RATE_LIMIT_BURST;
 
-        s->forward_to_syslog = true;
+        s->forward_to_wall = true;
+
+        s->max_file_usec = DEFAULT_MAX_FILE_USEC;
 
         s->max_level_store = LOG_DEBUG;
         s->max_level_syslog = LOG_DEBUG;
         s->max_level_kmsg = LOG_NOTICE;
         s->max_level_console = LOG_INFO;
+        s->max_level_wall = LOG_EMERG;
 
         memset(&s->system_metrics, 0xFF, sizeof(s->system_metrics));
         memset(&s->runtime_metrics, 0xFF, sizeof(s->runtime_metrics));
@@ -1532,7 +1528,8 @@ int server_init(Server *s) {
 
                         s->stdout_fd = fd;
 
-                } else if (sd_is_socket_unix(fd, SOCK_DGRAM, -1, "/dev/log", 0) > 0) {
+                } else if (sd_is_socket_unix(fd, SOCK_DGRAM, -1, "/dev/log", 0) > 0 ||
+                           sd_is_socket_unix(fd, SOCK_DGRAM, -1, "/run/systemd/journal/dev-log", 0) > 0) {
 
                         if (s->syslog_fd >= 0) {
                                 log_error("Too many /dev/log sockets passed.");
@@ -1559,9 +1556,11 @@ int server_init(Server *s) {
         if (r < 0)
                 return r;
 
+#ifndef CONFIG_TIZEN_WIP
         r = server_open_dev_kmsg(s);
         if (r < 0)
                 return r;
+#endif
 
         r = server_open_kernel_seqnum(s);
         if (r < 0)
@@ -1644,20 +1643,11 @@ void server_done(Server *s) {
         sd_event_source_unref(s->hostname_event_source);
         sd_event_unref(s->event);
 
-        if (s->syslog_fd >= 0)
-                close_nointr_nofail(s->syslog_fd);
-
-        if (s->native_fd >= 0)
-                close_nointr_nofail(s->native_fd);
-
-        if (s->stdout_fd >= 0)
-                close_nointr_nofail(s->stdout_fd);
-
-        if (s->dev_kmsg_fd >= 0)
-                close_nointr_nofail(s->dev_kmsg_fd);
-
-        if (s->hostname_fd >= 0)
-                close_nointr_nofail(s->hostname_fd);
+        safe_close(s->syslog_fd);
+        safe_close(s->native_fd);
+        safe_close(s->stdout_fd);
+        safe_close(s->dev_kmsg_fd);
+        safe_close(s->hostname_fd);
 
         if (s->rate_limit)
                 journal_rate_limit_free(s->rate_limit);

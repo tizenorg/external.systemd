@@ -23,7 +23,7 @@
 #include <linux/types.h>
 #endif
 
-#define KDBUS_IOC_MAGIC			0x95
+#define KDBUS_IOCTL_MAGIC		0x95
 #define KDBUS_SRC_ID_KERNEL		(0)
 #define KDBUS_DST_ID_NAME		(0)
 #define KDBUS_MATCH_ID_ANY		(~0ULL)
@@ -173,8 +173,8 @@ struct kdbus_memfd {
 
 /**
  * struct kdbus_name - a registered well-known name with its flags
- * @flags:		flags from KDBUS_NAME_*
- * @name:		well-known name
+ * @flags:		Flags from KDBUS_NAME_*
+ * @name:		Well-known name
  *
  * Attached to:
  *   KDBUS_ITEM_NAME
@@ -187,33 +187,14 @@ struct kdbus_name {
 /**
  * struct kdbus_policy_access - policy access item
  * @type:		One of KDBUS_POLICY_ACCESS_* types
- * @bits:		Access to grant. One of KDBUS_POLICY_*
+ * @access:		Access to grant
  * @id:			For KDBUS_POLICY_ACCESS_USER, the uid
  *			For KDBUS_POLICY_ACCESS_GROUP, the gid
- *
- * Embedded in:
- *   struct kdbus_policy
  */
 struct kdbus_policy_access {
 	__u64 type;	/* USER, GROUP, WORLD */
-	__u64 bits;	/* RECV, SEND, OWN */
+	__u64 access;	/* OWN, TALK, SEE */
 	__u64 id;	/* uid, gid, 0 */
-};
-
-/**
- * struct kdbus_policy - a policy item
- * @access:		Policy access details
- * @name:		Well-known name to grant access to
- *
- * Attached to:
- *   KDBUS_POLICY_ACCESS
- *   KDBUS_ITEM_POLICY_NAME
- */
-struct kdbus_policy {
-	union {
-		struct kdbus_policy_access access;
-		char name[0];
-	};
 };
 
 /**
@@ -252,8 +233,7 @@ struct kdbus_policy {
  * @KDBUS_ITEM_AUDIT:		The audit IDs
  * @KDBUS_ITEM_CONN_NAME:	The connection's human-readable name (debugging)
  * @_KDBUS_ITEM_POLICY_BASE:	Start of policy items
- * @KDBUS_ITEM_POLICY_NAME:	Policy in struct kdbus_policy
- * @KDBUS_ITEM_POLICY_ACCESS:	Policy in struct kdbus_policy
+ * @KDBUS_ITEM_POLICY_ACCESS:	Policy access block
  * @_KDBUS_ITEM_KERNEL_BASE:	Start of kernel-generated message items
  * @KDBUS_ITEM_NAME_ADD:	Notify in struct kdbus_notify_name_change
  * @KDBUS_ITEM_NAME_REMOVE:	Notify in struct kdbus_notify_name_change
@@ -294,8 +274,7 @@ enum kdbus_item_type {
 	KDBUS_ITEM_CONN_NAME,
 
 	_KDBUS_ITEM_POLICY_BASE	= 0x2000,
-	KDBUS_ITEM_POLICY_NAME = _KDBUS_ITEM_POLICY_BASE,
-	KDBUS_ITEM_POLICY_ACCESS,
+	KDBUS_ITEM_POLICY_ACCESS = _KDBUS_ITEM_POLICY_BASE,
 
 	_KDBUS_ITEM_KERNEL_BASE	= 0x8000,
 	KDBUS_ITEM_NAME_ADD	= _KDBUS_ITEM_KERNEL_BASE,
@@ -329,8 +308,7 @@ enum kdbus_item_type {
  *			KDBUS_ITEM_NAME_CHANGE
  * @id_change:		KDBUS_ITEM_ID_ADD
  *			KDBUS_ITEM_ID_REMOVE
- * @policy:		KDBUS_ITEM_POLICY_NAME
- *			KDBUS_ITEM_POLICY_ACCESS
+ * @policy:		KDBUS_ITEM_POLICY_ACCESS
  */
 struct kdbus_item {
 	__u64 size;
@@ -353,7 +331,7 @@ struct kdbus_item {
 		int fds[0];
 		struct kdbus_notify_name_change name_change;
 		struct kdbus_notify_id_change id_change;
-		struct kdbus_policy policy;
+		struct kdbus_policy_access policy_access;
 	};
 };
 
@@ -365,15 +343,15 @@ struct kdbus_item {
  *					respective reply carries the cookie
  *					in cookie_reply
  * @KDBUS_MSG_FLAGS_SYNC_REPLY:		Wait for destination connection to
- * 					reply to this message. The
- * 					KDBUS_CMD_MSG_SEND ioctl() will block
- * 					until the reply is received, and
- * 					offset_reply in struct kdbus_msg will
- * 					yield the offset in the sender's pool
- * 					where the reply can be found.
- * 					This flag is only valid if
- * 					@KDBUS_MSG_FLAGS_EXPECT_REPLY is set as
- * 					well.
+ *					reply to this message. The
+ *					KDBUS_CMD_MSG_SEND ioctl() will block
+ *					until the reply is received, and
+ *					offset_reply in struct kdbus_msg will
+ *					yield the offset in the sender's pool
+ *					where the reply can be found.
+ *					This flag is only valid if
+ *					@KDBUS_MSG_FLAGS_EXPECT_REPLY is set as
+ *					well.
  * @KDBUS_MSG_FLAGS_NO_AUTO_START:	Do not start a service, if the addressed
  *					name is not currently active
  */
@@ -410,7 +388,7 @@ enum kdbus_payload_type {
  * @cookie_reply:	A reply to the requesting message with the same
  *			cookie. The requesting connection can match its
  *			request and the reply with this value
- * @offset_reply:	If KDBUS_MSG_FLAGS_WAIT_FOR_REPLY, this field will
+ * @offset_reply:	If KDBUS_MSG_FLAGS_EXPECT_REPLY, this field will
  *			contain the offset in the sender's pool where the
  *			reply is stored.
  * @items:		A list of kdbus_items containing the message payload
@@ -441,8 +419,8 @@ struct kdbus_msg {
  * @KDBUS_RECV_DROP:		Drop and free the next queued message and all
  *				its resources without actually receiving it.
  * @KDBUS_RECV_USE_PRIORITY:	Only de-queue messages with the specified or
- * 				higher priority (lowest values); if not set,
- * 				the priority value is ignored.
+ *				higher priority (lowest values); if not set,
+ *				the priority value is ignored.
  */
 enum kdbus_recv_flags {
 	KDBUS_RECV_PEEK		= 1 <<  0,
@@ -456,8 +434,8 @@ enum kdbus_recv_flags {
  * @priority:		Minimum priority of the messages to de-queue. Lowest
  *			values have the highest priority.
  * @offset:		Returned offset in the pool where the message is
- * 			stored. The user must use KDBUS_CMD_FREE to free
- * 			the allocated memory.
+ *			stored. The user must use KDBUS_CMD_FREE to free
+ *			the allocated memory.
  *
  * This struct is used with the KDBUS_CMD_MSG_RECV ioctl.
  */
@@ -483,29 +461,17 @@ enum kdbus_policy_access_type {
 
 /**
  * enum kdbus_policy_access_flags - mode flags
- * @KDBUS_POLICY_RECV:		Allow receive
- * @KDBUS_POLICY_SEND:		Allow send
  * @KDBUS_POLICY_OWN:		Allow to own a well-known name
+ *				Implies KDBUS_POLICY_TALK and KDBUS_POLICY_SEE
+ * @KDBUS_POLICY_TALK:		Allow communication to a well-known name
+ *				Implies KDBUS_POLICY_SEE
+ * @KDBUS_POLICY_SEE:		Allow to see a well-known name
  */
 enum kdbus_policy_type {
-	KDBUS_POLICY_RECV		= 1 <<  2,
-	KDBUS_POLICY_SEND		= 1 <<  1,
-	KDBUS_POLICY_OWN		= 1 <<  0,
+	KDBUS_POLICY_SEE	= 0,
+	KDBUS_POLICY_TALK,
+	KDBUS_POLICY_OWN,
 };
-
-/**
- * struct kdbus_cmd_policy - a series of policies to upload
- * @size:		The total size of the structure
- * @policies:		The policies to upload
- *
- * A KDBUS_POLICY_NAME must always preceeds a KDBUS_POLICY_ACCESS entry.
- * A new KDBUS_POLICY_NAME can be added after KDBUS_POLICY_ACCESS for
- * chaining multiple policies together.
- */
-struct kdbus_cmd_policy {
-	__u64 size;
-	struct kdbus_item policies[0];
-} __attribute__((aligned(8)));
 
 /**
  * enum kdbus_hello_flags - flags for struct kdbus_cmd_hello
@@ -514,13 +480,20 @@ struct kdbus_cmd_policy {
  * @KDBUS_HELLO_ACTIVATOR:	Special-purpose connection which registers
  *				a well-know name for a process to be started
  *				when traffic arrives
+ * @KDBUS_HELLO_POLICY_HOLDER:	Special-purpose connection which registers
+ *				policy entries for a name. The provided name
+ *				is not activated and not registered with the
+ *				name database, it only allows unprivileged
+ *				connections to aquire a name, talk or discover
+ *				a service
  * @KDBUS_HELLO_MONITOR:	Special-purpose connection to monitor
  *				bus traffic
  */
 enum kdbus_hello_flags {
 	KDBUS_HELLO_ACCEPT_FD		=  1 <<  0,
 	KDBUS_HELLO_ACTIVATOR		=  1 <<  1,
-	KDBUS_HELLO_MONITOR		=  1 <<  2,
+	KDBUS_HELLO_POLICY_HOLDER	=  1 <<  2,
+	KDBUS_HELLO_MONITOR		=  1 <<  3,
 };
 
 /**
@@ -536,6 +509,7 @@ enum kdbus_hello_flags {
  * @KDBUS_ATTACH_SECLABEL:	The security label
  * @KDBUS_ATTACH_AUDIT:		The audit IDs
  * @KDBUS_ATTACH_CONN_NAME:	The human-readable connection name
+ * @_KDBUS_ATTACH_ALL:		All of the above
  */
 enum kdbus_attach_flags {
 	KDBUS_ATTACH_TIMESTAMP		=  1 <<  0,
@@ -549,6 +523,7 @@ enum kdbus_attach_flags {
 	KDBUS_ATTACH_SECLABEL		=  1 <<  8,
 	KDBUS_ATTACH_AUDIT		=  1 <<  9,
 	KDBUS_ATTACH_CONN_NAME		=  1 << 10,
+	_KDBUS_ATTACH_ALL		=  (1 << 11) - 1,
 };
 
 /**
@@ -584,11 +559,14 @@ struct kdbus_cmd_hello {
 	struct kdbus_item items[0];
 } __attribute__((aligned(8)));
 
-/* Flags for KDBUS_CMD_{BUS,EP,NS}_MAKE */
+/**
+ * enum kdbus_make_flags - Flags for KDBUS_CMD_{BUS,EP,NS}_MAKE
+ * @KDBUS_MAKE_ACCESS_GROUP:	Make the device node group-accessible
+ * @KDBUS_MAKE_ACCESS_WORLD:	Make the device node world-accessible
+ */
 enum kdbus_make_flags {
 	KDBUS_MAKE_ACCESS_GROUP		= 1 <<  0,
 	KDBUS_MAKE_ACCESS_WORLD		= 1 <<  1,
-	KDBUS_MAKE_POLICY_OPEN		= 1 <<  2,
 };
 
 /**
@@ -626,9 +604,7 @@ enum kdbus_name_flags {
  * struct kdbus_cmd_name - struct to describe a well-known name
  * @size:		The total size of the struct
  * @flags:		Flags for a name entry (KDBUS_NAME_*)
- * @owner_id:		The current owner of the name. For requests,
- *			privileged users may set this field to
- *			(de)register names on behalf of other connections.
+ * @owner_id:		The current owner of the name.
  * @conn_flags:		The flags of the owning connection (KDBUS_HELLO_*)
  * @name:		The well-known name
  *
@@ -726,13 +702,13 @@ struct kdbus_conn_info {
 };
 
 /**
- * struct kdbus_cmd_conn_update - update flags of a connection
+ * struct kdbus_cmd_update - update flags of a connection
  * @size:		The total size of the struct
  * @items:		A list of struct kdbus_item
  *
  * This struct is used with the KDBUS_CMD_CONN_UPDATE ioctl.
  */
-struct kdbus_cmd_conn_update {
+struct kdbus_cmd_update {
 	__u64 size;
 	struct kdbus_item items[0];
 } __attribute__((aligned(8)));
@@ -740,8 +716,6 @@ struct kdbus_cmd_conn_update {
 /**
  * struct kdbus_cmd_match - struct to add or remove matches
  * @size:		The total size of the struct
- * @owner_id:		Privileged users may (de)register matches on behalf
- *			of other peers
  * @cookie:		Userspace supplied cookie. When removing, the cookie
  *			identifies the match to remove
  * @items:		A list of items for additional information
@@ -751,7 +725,6 @@ struct kdbus_cmd_conn_update {
  */
 struct kdbus_cmd_match {
 	__u64 size;
-	__u64 owner_id;
 	__u64 cookie;
 	struct kdbus_item items[0];
 } __attribute__((aligned(8)));
@@ -781,7 +754,7 @@ struct kdbus_cmd_memfd_make {
  *				name. The bus is immediately shut down and
  *				cleaned up when the opened "control" device node
  *				is closed.
- * @KDBUS_CMD_DOMAIN_MAKE:		Similar to KDBUS_CMD_BUS_MAKE, but it creates a
+ * @KDBUS_CMD_DOMAIN_MAKE:	Similar to KDBUS_CMD_BUS_MAKE, but it creates a
  *				new kdbus domain.
  * @KDBUS_CMD_EP_MAKE:		Creates a new named special endpoint to talk to
  *				the bus. Such endpoints usually carry a more
@@ -800,8 +773,8 @@ struct kdbus_cmd_memfd_make {
  * @KDBUS_CMD_MSG_RECV:		Receive a message from the kernel which is
  *				placed in the receiver's pool.
  * @KDBUS_CMD_MSG_CANCEL:	Cancel a pending request of a message that
- * 				blocks while waiting for a reply. The parameter
- * 				denotes the cookie of the message in flight.
+ *				blocks while waiting for a reply. The parameter
+ *				denotes the cookie of the message in flight.
  * @KDBUS_CMD_FREE:		Release the allocated memory in the receiver's
  *				pool.
  * @KDBUS_CMD_NAME_ACQUIRE:	Request a well-known bus name to associate with
@@ -817,13 +790,13 @@ struct kdbus_cmd_memfd_make {
  *				necessarily represent the connected process or
  *				the actual state of the process.
  * @KDBUS_CMD_CONN_UPDATE:	Update the properties of a connection. Used to
- *				update the metadata subscription.
+ *				update the metadata subscription mask and
+ *				policy.
+ * @KDBUS_CMD_EP_UPDATE:	Update the properties of a custom enpoint. Used
+ *				to update the policy.
  * @KDBUS_CMD_MATCH_ADD:	Install a match which broadcast messages should
  *				be delivered to the connection.
  * @KDBUS_CMD_MATCH_REMOVE:	Remove a current match for broadcast messages.
- * @KDBUS_CMD_EP_POLICY_SET:	Set the policy of an endpoint. It is used to
- *				restrict the access for endpoints created with
- *				KDBUS_CMD_EP_MAKE.
  * @KDBUS_CMD_MEMFD_NEW:	Return a new file descriptor which provides an
  *				anonymous shared memory file and which can be
  *				used to pass around larger chunks of data.
@@ -852,35 +825,50 @@ struct kdbus_cmd_memfd_make {
  *				be changed as long as the file is shared.
  */
 enum kdbus_ioctl_type {
-	KDBUS_CMD_BUS_MAKE =		_IOW (KDBUS_IOC_MAGIC, 0x00, struct kdbus_cmd_make),
-	KDBUS_CMD_DOMAIN_MAKE =		_IOW (KDBUS_IOC_MAGIC, 0x10, struct kdbus_cmd_make),
-	KDBUS_CMD_EP_MAKE =		_IOW (KDBUS_IOC_MAGIC, 0x20, struct kdbus_cmd_make),
+	KDBUS_CMD_BUS_MAKE =		_IOW(KDBUS_IOCTL_MAGIC, 0x00,
+					     struct kdbus_cmd_make),
+	KDBUS_CMD_DOMAIN_MAKE =		_IOW(KDBUS_IOCTL_MAGIC, 0x10,
+					     struct kdbus_cmd_make),
+	KDBUS_CMD_EP_MAKE =		_IOW(KDBUS_IOCTL_MAGIC, 0x20,
+					     struct kdbus_cmd_make),
 
-	KDBUS_CMD_HELLO =		_IOWR(KDBUS_IOC_MAGIC, 0x30, struct kdbus_cmd_hello),
-	KDBUS_CMD_BYEBYE =		_IO  (KDBUS_IOC_MAGIC, 0x31),
+	KDBUS_CMD_HELLO =		_IOWR(KDBUS_IOCTL_MAGIC, 0x30,
+					      struct kdbus_cmd_hello),
+	KDBUS_CMD_BYEBYE =		_IO(KDBUS_IOCTL_MAGIC, 0x31),
 
-	KDBUS_CMD_MSG_SEND =		_IOWR(KDBUS_IOC_MAGIC, 0x40, struct kdbus_msg),
-	KDBUS_CMD_MSG_RECV =		_IOWR(KDBUS_IOC_MAGIC, 0x41, struct kdbus_cmd_recv),
-	KDBUS_CMD_MSG_CANCEL =		_IOW (KDBUS_IOC_MAGIC, 0x42, __u64 *),
-	KDBUS_CMD_FREE =		_IOW (KDBUS_IOC_MAGIC, 0x43, __u64 *),
+	KDBUS_CMD_MSG_SEND =		_IOWR(KDBUS_IOCTL_MAGIC, 0x40,
+					      struct kdbus_msg),
+	KDBUS_CMD_MSG_RECV =		_IOWR(KDBUS_IOCTL_MAGIC, 0x41,
+					      struct kdbus_cmd_recv),
+	KDBUS_CMD_MSG_CANCEL =		_IOW(KDBUS_IOCTL_MAGIC, 0x42, __u64 *),
+	KDBUS_CMD_FREE =		_IOW(KDBUS_IOCTL_MAGIC, 0x43, __u64 *),
 
-	KDBUS_CMD_NAME_ACQUIRE =	_IOWR(KDBUS_IOC_MAGIC, 0x50, struct kdbus_cmd_name),
-	KDBUS_CMD_NAME_RELEASE =	_IOW (KDBUS_IOC_MAGIC, 0x51, struct kdbus_cmd_name),
-	KDBUS_CMD_NAME_LIST =		_IOWR(KDBUS_IOC_MAGIC, 0x52, struct kdbus_cmd_name_list),
+	KDBUS_CMD_NAME_ACQUIRE =	_IOWR(KDBUS_IOCTL_MAGIC, 0x50,
+					      struct kdbus_cmd_name),
+	KDBUS_CMD_NAME_RELEASE =	_IOW(KDBUS_IOCTL_MAGIC, 0x51,
+					     struct kdbus_cmd_name),
+	KDBUS_CMD_NAME_LIST =		_IOWR(KDBUS_IOCTL_MAGIC, 0x52,
+					     struct kdbus_cmd_name_list),
 
-	KDBUS_CMD_CONN_INFO =		_IOWR(KDBUS_IOC_MAGIC, 0x60, struct kdbus_cmd_conn_info),
-	KDBUS_CMD_CONN_UPDATE =		_IOW (KDBUS_IOC_MAGIC, 0x61, struct kdbus_cmd_conn_update),
+	KDBUS_CMD_CONN_INFO =		_IOWR(KDBUS_IOCTL_MAGIC, 0x60,
+					      struct kdbus_cmd_conn_info),
+	KDBUS_CMD_CONN_UPDATE =		_IOW(KDBUS_IOCTL_MAGIC, 0x61,
+					     struct kdbus_cmd_update),
 
-	KDBUS_CMD_MATCH_ADD =		_IOW (KDBUS_IOC_MAGIC, 0x70, struct kdbus_cmd_match),
-	KDBUS_CMD_MATCH_REMOVE =	_IOW (KDBUS_IOC_MAGIC, 0x71, struct kdbus_cmd_match),
+	KDBUS_CMD_EP_UPDATE =		_IOW(KDBUS_IOCTL_MAGIC, 0x71,
+					     struct kdbus_cmd_update),
 
-	KDBUS_CMD_EP_POLICY_SET =	_IOW (KDBUS_IOC_MAGIC, 0x80, struct kdbus_cmd_policy),
+	KDBUS_CMD_MATCH_ADD =		_IOW(KDBUS_IOCTL_MAGIC, 0x80,
+					     struct kdbus_cmd_match),
+	KDBUS_CMD_MATCH_REMOVE =	_IOW(KDBUS_IOCTL_MAGIC, 0x81,
+					     struct kdbus_cmd_match),
 
-	KDBUS_CMD_MEMFD_NEW =		_IOWR(KDBUS_IOC_MAGIC, 0xc0, struct kdbus_cmd_memfd_make),
-	KDBUS_CMD_MEMFD_SIZE_GET =	_IOR (KDBUS_IOC_MAGIC, 0xc1, __u64 *),
-	KDBUS_CMD_MEMFD_SIZE_SET =	_IOW (KDBUS_IOC_MAGIC, 0xc2, __u64 *),
-	KDBUS_CMD_MEMFD_SEAL_GET =	_IOR (KDBUS_IOC_MAGIC, 0xc3, int *),
-	KDBUS_CMD_MEMFD_SEAL_SET =	_IO  (KDBUS_IOC_MAGIC, 0xc4),
+	KDBUS_CMD_MEMFD_NEW =		_IOWR(KDBUS_IOCTL_MAGIC, 0xc0,
+					      struct kdbus_cmd_memfd_make),
+	KDBUS_CMD_MEMFD_SIZE_GET =	_IOR(KDBUS_IOCTL_MAGIC, 0xc1, __u64 *),
+	KDBUS_CMD_MEMFD_SIZE_SET =	_IOW(KDBUS_IOCTL_MAGIC, 0xc2, __u64 *),
+	KDBUS_CMD_MEMFD_SEAL_GET =	_IOR(KDBUS_IOCTL_MAGIC, 0xc3, int *),
+	KDBUS_CMD_MEMFD_SEAL_SET =	_IO(KDBUS_IOCTL_MAGIC, 0xc4),
 };
 
 /*
@@ -891,6 +879,9 @@ enum kdbus_ioctl_type {
  * @EADDRNOTAVAIL:	A message flagged not to activate a service, addressed
  *			a service which is not currently running.
  * @EAGAIN:		No messages are queued at the moment.
+ * @EALREADY:		A requested name is already owned by the connection,
+ *			a connection is already disconnected, memfd is already
+ *			sealed or has the requested size.
  * @EBADF:		File descriptors passed with the message are not valid.
  * @EBADFD:		A bus connection is in a corrupted state.
  * @EBADMSG:		Passed data contains a combination of conflicting or
@@ -928,26 +919,25 @@ enum kdbus_ioctl_type {
  *			size.
  * @ENOBUFS:		There is no space left for the submitted data to fit
  *			into the receiver's pool.
- * @ENOENT:		The name to query information about is currently not on
- *			the bus.
+ * @ENOENT:		The to be cancelled message was not found.
  * @ENOMEM:		Out of memory.
  * @ENOMSG:		The queue is not empty, but no message with a matching
- * 			priority is currently queued.
+ *			priority is currently queued.
  * @ENOSYS:		The requested functionality is not available.
- * @ENOTSUPP:		The feature negotiation failed, a not supported feature
- *			was requested, or an unknown item type was received.
  * @ENOTTY:		An unknown ioctl command was received.
  * @ENOTUNIQ:		A specific data type was addressed to a broadcast
  *			address, but only direct addresses support this kind of
  *			data.
  * @ENXIO:		A unique address does not exist, or an offset in the
  *			receiver's pool does not represent a queued message.
+ * @EOPNOTSUPP:		The feature negotiation failed, a not supported feature
+ *			was requested, or an unknown item type was received.
  * @EPERM:		The policy prevented an operation. The requested
  *			resource is owned by another entity.
  * @EPIPE:		When sending a message, a synchronous reply from the
  *			receiving connection was expected but the connection
  *			died before answering.
- * @ESHUTDOWN:		A domain or endpoint is currently shutting down;
+ * @ESHUTDOWN:		A domain, bus or endpoint is currently shutting down;
  *			no further operations will be possible.
  * @ESRCH:		A requested well-known bus name is not found.
  * @ETIMEDOUT:		A synchronous wait for a message reply did not arrive

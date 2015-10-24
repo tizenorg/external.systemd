@@ -53,7 +53,7 @@ static int send_on_socket(int fd, const char *socket_name, const void *packet, s
 
         if (sendto(fd, packet, size, MSG_NOSIGNAL, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(socket_name)) < 0) {
                 log_error("Failed to send: %m");
-                return -1;
+                return -errno;
         }
 
         return 0;
@@ -91,7 +91,8 @@ int main(int argc, char *argv[]) {
                 goto finish;
         }
 
-        if ((fd = socket(AF_UNIX, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0)) < 0) {
+        fd = socket(AF_UNIX, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0);
+        if (fd < 0) {
                 log_error("socket() failed: %m");
                 goto finish;
         }
@@ -102,8 +103,7 @@ int main(int argc, char *argv[]) {
         r = EXIT_SUCCESS;
 
 finish:
-        if (fd >= 0)
-                close_nointr_nofail(fd);
+        safe_close(fd);
 
         return r;
 }

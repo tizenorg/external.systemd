@@ -25,15 +25,13 @@
 #include <ctype.h>
 #include <fcntl.h>
 #include <signal.h>
-#include <syslog.h>
 #include <getopt.h>
 #include <sys/signalfd.h>
 
 #include "udev.h"
 #include "udev-util.h"
 
-static int adm_test(struct udev *udev, int argc, char *argv[])
-{
+static int adm_test(struct udev *udev, int argc, char *argv[]) {
         int resolve_names = 1;
         char filename[UTIL_PATH_SIZE];
         const char *action = "add";
@@ -43,7 +41,6 @@ static int adm_test(struct udev *udev, int argc, char *argv[])
         _cleanup_udev_device_unref_ struct udev_device *dev = NULL;
         _cleanup_udev_event_unref_ struct udev_event *event = NULL;
         sigset_t mask, sigmask_orig;
-        int err;
         int rc = 0, c;
 
         static const struct option options[] = {
@@ -139,18 +136,16 @@ static int adm_test(struct udev *udev, int argc, char *argv[])
                 goto out;
         }
 
-        err = udev_event_execute_rules(event, rules, &sigmask_orig);
+        udev_event_execute_rules(event, 30 * USEC_PER_SEC, rules, &sigmask_orig);
 
         udev_list_entry_foreach(entry, udev_device_get_properties_list_entry(dev))
                 printf("%s=%s\n", udev_list_entry_get_name(entry), udev_list_entry_get_value(entry));
 
-        if (err == 0) {
-                udev_list_entry_foreach(entry, udev_list_get_entry(&event->run_list)) {
-                        char program[UTIL_PATH_SIZE];
+        udev_list_entry_foreach(entry, udev_list_get_entry(&event->run_list)) {
+                char program[UTIL_PATH_SIZE];
 
-                        udev_event_apply_format(event, udev_list_entry_get_name(entry), program, sizeof(program));
-                        printf("run: '%s'\n", program);
-                }
+                udev_event_apply_format(event, udev_list_entry_get_name(entry), program, sizeof(program));
+                printf("run: '%s'\n", program);
         }
 out:
         if (event != NULL && event->fd_signal >= 0)

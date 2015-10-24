@@ -51,6 +51,7 @@
 #include "dbus.h"
 #include "execute.h"
 #include "virt.h"
+#include "dropin.h"
 
 const UnitVTable * const unit_vtable[_UNIT_TYPE_MAX] = {
         [UNIT_SERVICE] = &service_vtable,
@@ -67,6 +68,8 @@ const UnitVTable * const unit_vtable[_UNIT_TYPE_MAX] = {
         [UNIT_SLICE] = &slice_vtable,
         [UNIT_SCOPE] = &scope_vtable
 };
+
+static int maybe_warn_about_dependency(const char *id, const char *other, UnitDependency dependency);
 
 Unit *unit_new(Manager *m, size_t size) {
         Unit *u;
@@ -101,104 +104,122 @@ bool unit_has_name(Unit *u, const char *name) {
         return !!set_get(u->names, (char*) name);
 }
 
+static void unit_init(Unit *u) {
+        CGroupContext *cc;
+        ExecContext *ec;
+        KillContext *kc;
+
+        assert(u);
+        assert(u->manager);
+        assert(u->type >= 0);
+
+        cc = unit_get_cgroup_context(u);
+        if (cc) {
+                cgroup_context_init(cc);
+
+                /* Copy in the manager defaults into the cgroup
+                 * context, _before_ the rest of the settings have
+                 * been initialized */
+
+                cc->cpu_accounting = u->manager->default_cpu_accounting;
+                cc->blockio_accounting = u->manager->default_blockio_accounting;
+                cc->memory_accounting = u->manager->default_memory_accounting;
+        }
+
+        ec = unit_get_exec_context(u);
+        if (ec)
+                exec_context_init(ec);
+
+        kc = unit_get_kill_context(u);
+        if (kc)
+                kill_context_init(kc);
+
+        if (UNIT_VTABLE(u)->init)
+                UNIT_VTABLE(u)->init(u);
+}
+
 int unit_add_name(Unit *u, const char *text) {
+        _cleanup_free_ char *s = NULL, *i = NULL;
         UnitType t;
-        char *s, *i = NULL;
         int r;
 
         assert(u);
         assert(text);
 
         if (unit_name_is_template(text)) {
+
                 if (!u->instance)
                         return -EINVAL;
 
                 s = unit_name_replace_instance(text, u->instance);
         } else
                 s = strdup(text);
-
         if (!s)
                 return -ENOMEM;
 
-        if (!unit_name_is_valid(s, TEMPLATE_INVALID)) {
-                r = -EINVAL;
-                goto fail;
-        }
+        if (!unit_name_is_valid(s, TEMPLATE_INVALID))
+                return -EINVAL;
 
         assert_se((t = unit_name_to_type(s)) >= 0);
 
-        if (u->type != _UNIT_TYPE_INVALID && t != u->type) {
-                r = -EINVAL;
-                goto fail;
-        }
+        if (u->type != _UNIT_TYPE_INVALID && t != u->type)
+                return -EINVAL;
 
         r = unit_name_to_instance(s, &i);
         if (r < 0)
-                goto fail;
+                return r;
 
-        if (i && unit_vtable[t]->no_instances) {
-                r = -EINVAL;
-                goto fail;
-        }
+        if (i && unit_vtable[t]->no_instances)
+                return -EINVAL;
 
         /* Ensure that this unit is either instanced or not instanced,
          * but not both. */
-        if (u->type != _UNIT_TYPE_INVALID && !u->instance != !i) {
-                r = -EINVAL;
-                goto fail;
-        }
+        if (u->type != _UNIT_TYPE_INVALID && !u->instance != !i)
+                return -EINVAL;
 
         if (unit_vtable[t]->no_alias &&
             !set_isempty(u->names) &&
-            !set_get(u->names, s)) {
-                r = -EEXIST;
-                goto fail;
-        }
+            !set_get(u->names, s))
+                return -EEXIST;
 
-        if (hashmap_size(u->manager->units) >= MANAGER_MAX_NAMES) {
-                r = -E2BIG;
-                goto fail;
-        }
+        if (hashmap_size(u->manager->units) >= MANAGER_MAX_NAMES)
+                return -E2BIG;
 
         r = set_put(u->names, s);
         if (r < 0) {
                 if (r == -EEXIST)
-                        r = 0;
-                goto fail;
+                        return 0;
+
+                return r;
         }
 
         r = hashmap_put(u->manager->units, s, u);
         if (r < 0) {
                 set_remove(u->names, s);
-                goto fail;
+                return r;
         }
 
         if (u->type == _UNIT_TYPE_INVALID) {
-
                 u->type = t;
                 u->id = s;
                 u->instance = i;
 
                 LIST_PREPEND(units_by_type, u->manager->units_by_type[t], u);
 
-                if (UNIT_VTABLE(u)->init)
-                        UNIT_VTABLE(u)->init(u);
-        } else
-                free(i);
+                unit_init(u);
+
+                i = NULL;
+        }
+
+        s = NULL;
 
         unit_add_to_dbus_queue(u);
         return 0;
-
-fail:
-        free(s);
-        free(i);
-
-        return r;
 }
 
 int unit_choose_id(Unit *u, const char *name) {
-        char *s, *i;
         _cleanup_free_ char *t = NULL;
+        char *s, *i;
         int r;
 
         assert(u);
@@ -218,7 +239,6 @@ int unit_choose_id(Unit *u, const char *name) {
 
         /* Selects one of the names of this unit as the id */
         s = set_get(u->names, (char*) name);
-
         if (!s)
                 return -ENOENT;
 
@@ -328,7 +348,8 @@ void unit_add_to_dbus_queue(Unit *u) {
                 return;
 
         /* Shortcut things if nobody cares */
-        if (set_isempty(u->manager->subscribed)) {
+        if (sd_bus_track_count(u->manager->subscribed) <= 0 &&
+            set_isempty(u->manager->private_buses)) {
                 u->sent_dbus_new_signal = true;
                 return;
         }
@@ -409,6 +430,27 @@ static void unit_free_requires_mounts_for(Unit *u) {
         u->requires_mounts_for = NULL;
 }
 
+static void unit_done(Unit *u) {
+        ExecContext *ec;
+        CGroupContext *cc;
+
+        assert(u);
+
+        if (u->type < 0)
+                return;
+
+        if (UNIT_VTABLE(u)->done)
+                UNIT_VTABLE(u)->done(u);
+
+        ec = unit_get_exec_context(u);
+        if (ec)
+                exec_context_done(ec);
+
+        cc = unit_get_cgroup_context(u);
+        if (cc)
+                cgroup_context_done(cc);
+}
+
 void unit_free(Unit *u) {
         UnitDependency d;
         Iterator i;
@@ -421,9 +463,7 @@ void unit_free(Unit *u) {
 
         bus_unit_send_removed_signal(u);
 
-        if (u->load_state != UNIT_STUB)
-                if (UNIT_VTABLE(u)->done)
-                        UNIT_VTABLE(u)->done(u);
+        unit_done(u);
 
         unit_free_requires_mounts_for(u);
 
@@ -469,6 +509,9 @@ void unit_free(Unit *u) {
                 hashmap_remove(u->manager->cgroup_unit, u->cgroup_path);
                 free(u->cgroup_path);
         }
+
+        set_remove(u->manager->failed_units, u);
+        set_remove(u->manager->startup_units, u);
 
         free(u->description);
         strv_free(u->documentation);
@@ -542,7 +585,7 @@ static void merge_names(Unit *u, Unit *other) {
                 assert_se(hashmap_replace(u->manager->units, t, u) == 0);
 }
 
-static void merge_dependencies(Unit *u, Unit *other, UnitDependency d) {
+static void merge_dependencies(Unit *u, Unit *other, const char *other_id, UnitDependency d) {
         Iterator i;
         Unit *back;
         int r;
@@ -556,13 +599,24 @@ static void merge_dependencies(Unit *u, Unit *other, UnitDependency d) {
                 UnitDependency k;
 
                 for (k = 0; k < _UNIT_DEPENDENCY_MAX; k++) {
-                        r = set_remove_and_put(back->dependencies[k], other, u);
-                        if (r == -EEXIST)
-                                set_remove(back->dependencies[k], other);
-                        else
-                                assert(r >= 0 || r == -ENOENT);
+                        /* Do not add dependencies between u and itself */
+                        if (back == u) {
+                                if (set_remove(back->dependencies[k], other))
+                                        maybe_warn_about_dependency(u->id, other_id, k);
+                        } else {
+                                r = set_remove_and_put(back->dependencies[k], other, u);
+                                if (r == -EEXIST)
+                                        set_remove(back->dependencies[k], other);
+                                else
+                                        assert(r >= 0 || r == -ENOENT);
+                        }
                 }
         }
+
+        /* Also do not move dependencies on u to itself */
+        back = set_remove(other->dependencies[d], u);
+        if (back)
+                maybe_warn_about_dependency(u->id, other_id, d);
 
         complete_move(&u->dependencies[d], &other->dependencies[d]);
 
@@ -572,6 +626,7 @@ static void merge_dependencies(Unit *u, Unit *other, UnitDependency d) {
 
 int unit_merge(Unit *u, Unit *other) {
         UnitDependency d;
+        const char *other_id = NULL;
 
         assert(u);
         assert(other);
@@ -602,6 +657,9 @@ int unit_merge(Unit *u, Unit *other) {
         if (!UNIT_IS_INACTIVE_OR_FAILED(unit_active_state(other)))
                 return -EEXIST;
 
+        if (other->id)
+                other_id = strdupa(other->id);
+
         /* Merge names */
         merge_names(u, other);
 
@@ -611,7 +669,7 @@ int unit_merge(Unit *u, Unit *other) {
 
         /* Merge dependencies */
         for (d = 0; d < _UNIT_DEPENDENCY_MAX; d++)
-                merge_dependencies(u, other, d);
+                merge_dependencies(u, other, other_id, d);
 
         other->load_state = UNIT_MERGED;
         other->merged_into = u;
@@ -683,6 +741,19 @@ int unit_add_exec_dependencies(Unit *u, ExecContext *c) {
                         return r;
         }
 
+        if (u->manager->running_as != SYSTEMD_SYSTEM)
+                return 0;
+
+        if (c->private_tmp) {
+                r = unit_require_mounts_for(u, "/tmp");
+                if (r < 0)
+                        return r;
+
+                r = unit_require_mounts_for(u, "/var/tmp");
+                if (r < 0)
+                        return r;
+        }
+
         if (c->std_output != EXEC_OUTPUT_KMSG &&
             c->std_output != EXEC_OUTPUT_SYSLOG &&
             c->std_output != EXEC_OUTPUT_JOURNAL &&
@@ -700,11 +771,9 @@ int unit_add_exec_dependencies(Unit *u, ExecContext *c) {
         /* If syslog or kernel logging is requested, make sure our own
          * logging daemon is run first. */
 
-        if (u->manager->running_as == SYSTEMD_SYSTEM) {
-                r = unit_add_dependency_by_name(u, UNIT_AFTER, SPECIAL_JOURNALD_SOCKET, NULL, true);
-                if (r < 0)
-                        return r;
-        }
+        r = unit_add_dependency_by_name(u, UNIT_AFTER, SPECIAL_JOURNALD_SOCKET, NULL, true);
+        if (r < 0)
+                return r;
 
         return 0;
 }
@@ -979,6 +1048,9 @@ static int unit_add_slice_dependencies(Unit *u) {
         if (UNIT_ISSET(u->slice))
                 return unit_add_two_dependencies(u, UNIT_AFTER, UNIT_WANTS, UNIT_DEREF(u->slice), true);
 
+        if (streq(u->id, SPECIAL_ROOT_SLICE))
+                return 0;
+
         return unit_add_two_dependencies_by_name(u, UNIT_AFTER, UNIT_WANTS, SPECIAL_ROOT_SLICE, NULL, true);
 }
 
@@ -1020,6 +1092,25 @@ static int unit_add_mount_dependencies(Unit *u) {
         return 0;
 }
 
+static int unit_add_startup_units(Unit *u) {
+        CGroupContext *c;
+        int r = 0;
+
+        c = unit_get_cgroup_context(u);
+        if (!c)
+                return 0;
+
+        if (c->startup_cpu_shares == (unsigned long) -1 &&
+            c->startup_blockio_weight == (unsigned long) -1)
+                return 0;
+
+        r = set_put(u->manager->startup_units, u);
+        if (r == -EEXIST)
+                return 0;
+
+        return r;
+}
+
 int unit_load(Unit *u) {
         int r;
 
@@ -1058,6 +1149,10 @@ int unit_load(Unit *u) {
                         goto fail;
 
                 r = unit_add_mount_dependencies(u);
+                if (r < 0)
+                        goto fail;
+
+                r = unit_add_startup_units(u);
                 if (r < 0)
                         goto fail;
 
@@ -1376,9 +1471,41 @@ static void unit_check_unneeded(Unit *u) {
                 if (unit_active_or_pending(other))
                         return;
 
-        log_info_unit(u->id, "Service %s is not needed anymore. Stopping.", u->id);
+        log_info_unit(u->id, "Unit %s is not needed anymore. Stopping.", u->id);
 
         /* Ok, nobody needs us anymore. Sniff. Then let's commit suicide */
+        manager_add_job(u->manager, JOB_STOP, u, JOB_FAIL, true, NULL, NULL);
+}
+
+static void unit_check_binds_to(Unit *u) {
+        bool stop = false;
+        Unit *other;
+        Iterator i;
+
+        assert(u);
+
+        if (u->job)
+                return;
+
+        if (unit_active_state(u) != UNIT_ACTIVE)
+                return;
+
+        SET_FOREACH(other, u->dependencies[UNIT_BINDS_TO], i) {
+                if (other->job)
+                        continue;
+
+                if (!UNIT_IS_INACTIVE_OR_FAILED(unit_active_state(other)))
+                        continue;
+
+                stop = true;
+        }
+
+        if (!stop)
+                return;
+
+        log_info_unit(u->id, "Unit %s is bound to inactive service. Stopping, too.", u->id);
+
+        /* A unit we need to run is gone. Sniff. Let's stop this. */
         manager_add_job(u->manager, JOB_STOP, u, JOB_FAIL, true, NULL, NULL);
 }
 
@@ -1500,12 +1627,13 @@ void unit_notify(Unit *u, UnitActiveState os, UnitActiveState ns, bool reload_su
 
         /* Note that this is called for all low-level state changes,
          * even if they might map to the same high-level
-         * UnitActiveState! That means that ns == os is OK an expected
+         * UnitActiveState! That means that ns == os is an expected
          * behavior here. For example: if a mount point is remounted
          * this function will be called too! */
 
         m = u->manager;
 
+        /* Update timestamps for state changes */
         if (m->n_reloading <= 0) {
                 dual_timestamp ts;
 
@@ -1522,11 +1650,18 @@ void unit_notify(Unit *u, UnitActiveState os, UnitActiveState ns, bool reload_su
                         u->active_exit_timestamp = ts;
         }
 
+        /* Keep track of failed units */
+        if (ns == UNIT_FAILED)
+                set_put(u->manager->failed_units, u);
+        else
+                set_remove(u->manager->failed_units, u);
+
+        /* Make sure the cgroup is always removed when we become inactive */
         if (UNIT_IS_INACTIVE_OR_FAILED(ns))
                 unit_destroy_cgroup(u);
 
         /* Note that this doesn't apply to RemainAfterExit services exiting
-         * sucessfully, since there's no change of state in that case. Which is
+         * successfully, since there's no change of state in that case. Which is
          * why it is handled in service_set_state() */
         if (UNIT_IS_INACTIVE_OR_FAILED(os) != UNIT_IS_INACTIVE_OR_FAILED(ns)) {
                 ExecContext *ec;
@@ -1640,7 +1775,7 @@ void unit_notify(Unit *u, UnitActiveState os, UnitActiveState ns, bool reload_su
         if (UNIT_IS_ACTIVE_OR_RELOADING(ns)) {
 
                 if (unit_has_name(u, SPECIAL_DBUS_SERVICE))
-                        /* The bus just might have become available,
+                        /* The bus might have just become available,
                          * hence try to connect to it, if we aren't
                          * yet connected. */
                         bus_init(m, true);
@@ -1685,10 +1820,18 @@ void unit_notify(Unit *u, UnitActiveState os, UnitActiveState ns, bool reload_su
         manager_recheck_journal(m);
         unit_trigger_notify(u);
 
-        /* Maybe we finished startup and are now ready for being
-         * stopped because unneeded? */
-        if (u->manager->n_reloading <= 0)
+        if (u->manager->n_reloading <= 0) {
+                /* Maybe we finished startup and are now ready for
+                 * being stopped because unneeded? */
                 unit_check_unneeded(u);
+
+                /* Maybe we finished startup, but something we needed
+                 * has vanished? Let's die then. (This happens when
+                 * something BindsTo= to a Type=oneshot unit, as these
+                 * units go directly from starting to inactive,
+                 * without ever entering started.) */
+                unit_check_binds_to(u);
+        }
 
         unit_add_to_dbus_queue(u);
         unit_add_to_gc_queue(u);
@@ -1703,11 +1846,11 @@ int unit_watch_pid(Unit *u, pid_t pid) {
         /* Watch a specific PID. We only support one or two units
          * watching each PID for now, not more. */
 
-        r = hashmap_ensure_allocated(&u->manager->watch_pids1, trivial_hash_func, trivial_compare_func);
+        r = set_ensure_allocated(&u->pids, trivial_hash_func, trivial_compare_func);
         if (r < 0)
                 return r;
 
-        r = set_ensure_allocated(&u->pids, trivial_hash_func, trivial_compare_func);
+        r = hashmap_ensure_allocated(&u->manager->watch_pids1, trivial_hash_func, trivial_compare_func);
         if (r < 0)
                 return r;
 
@@ -1736,7 +1879,17 @@ void unit_unwatch_pid(Unit *u, pid_t pid) {
         set_remove(u->pids, LONG_TO_PTR(pid));
 }
 
-static int watch_pids_in_path(Unit *u, const char *path) {
+void unit_unwatch_all_pids(Unit *u) {
+        assert(u);
+
+        while (!set_isempty(u->pids))
+                unit_unwatch_pid(u, PTR_TO_LONG(set_first(u->pids)));
+
+        set_free(u->pids);
+        u->pids = NULL;
+}
+
+static int unit_watch_pids_in_path(Unit *u, const char *path) {
         _cleanup_closedir_ DIR *d = NULL;
         _cleanup_fclose_ FILE *f = NULL;
         int ret = 0, r;
@@ -1774,7 +1927,7 @@ static int watch_pids_in_path(Unit *u, const char *path) {
                         if (!p)
                                 return -ENOMEM;
 
-                        r = watch_pids_in_path(u, p);
+                        r = unit_watch_pids_in_path(u, p);
                         if (r < 0 && ret >= 0)
                                 ret = r;
                 }
@@ -1787,31 +1940,15 @@ static int watch_pids_in_path(Unit *u, const char *path) {
         return ret;
 }
 
-
 int unit_watch_all_pids(Unit *u) {
         assert(u);
+
+        /* Adds all PIDs from our cgroup to the set of PIDs we watch */
 
         if (!u->cgroup_path)
                 return -ENOENT;
 
-        /* Adds all PIDs from our cgroup to the set of PIDs we watch */
-
-        return watch_pids_in_path(u, u->cgroup_path);
-}
-
-void unit_unwatch_all_pids(Unit *u) {
-        Iterator i;
-        void *e;
-
-        assert(u);
-
-        SET_FOREACH(e, u->pids, i) {
-                hashmap_remove_value(u->manager->watch_pids1, e, u);
-                hashmap_remove_value(u->manager->watch_pids2, e, u);
-        }
-
-        set_free(u->pids);
-        u->pids = NULL;
+        return unit_watch_pids_in_path(u, u->cgroup_path);
 }
 
 void unit_tidy_watch_pids(Unit *u, pid_t except1, pid_t except2) {
@@ -1829,7 +1966,7 @@ void unit_tidy_watch_pids(Unit *u, pid_t except1, pid_t except2) {
                         continue;
 
                 if (!pid_is_unwaited(pid))
-                        set_remove(u->pids, e);
+                        unit_unwatch_pid(u, pid);
         }
 }
 
@@ -1858,6 +1995,53 @@ bool unit_job_is_applicable(Unit *u, JobType j) {
         default:
                 assert_not_reached("Invalid job type");
         }
+}
+
+static int maybe_warn_about_dependency(const char *id, const char *other, UnitDependency dependency) {
+        assert(id);
+
+        switch (dependency) {
+        case UNIT_REQUIRES:
+        case UNIT_REQUIRES_OVERRIDABLE:
+        case UNIT_WANTS:
+        case UNIT_REQUISITE:
+        case UNIT_REQUISITE_OVERRIDABLE:
+        case UNIT_BINDS_TO:
+        case UNIT_PART_OF:
+        case UNIT_REQUIRED_BY:
+        case UNIT_REQUIRED_BY_OVERRIDABLE:
+        case UNIT_WANTED_BY:
+        case UNIT_BOUND_BY:
+        case UNIT_CONSISTS_OF:
+        case UNIT_REFERENCES:
+        case UNIT_REFERENCED_BY:
+        case UNIT_PROPAGATES_RELOAD_TO:
+        case UNIT_RELOAD_PROPAGATED_FROM:
+        case UNIT_JOINS_NAMESPACE_OF:
+                return 0;
+
+        case UNIT_CONFLICTS:
+        case UNIT_CONFLICTED_BY:
+        case UNIT_BEFORE:
+        case UNIT_AFTER:
+        case UNIT_ON_FAILURE:
+        case UNIT_TRIGGERS:
+        case UNIT_TRIGGERED_BY:
+                if (streq_ptr(id, other))
+                        log_warning_unit(id, "Dependency %s=%s dropped from unit %s",
+                                         unit_dependency_to_string(dependency), id, other);
+                else
+                        log_warning_unit(id, "Dependency %s=%s dropped from unit %s merged into %s",
+                                         unit_dependency_to_string(dependency), id,
+                                         strna(other), id);
+                return -EINVAL;
+
+        case _UNIT_DEPENDENCY_MAX:
+        case _UNIT_DEPENDENCY_INVALID:
+                break;
+        }
+
+        assert_not_reached("Invalid dependency type");
 }
 
 int unit_add_dependency(Unit *u, UnitDependency d, Unit *other, bool add_reference) {
@@ -1889,6 +2073,7 @@ int unit_add_dependency(Unit *u, UnitDependency d, Unit *other, bool add_referen
                 [UNIT_JOINS_NAMESPACE_OF] = UNIT_JOINS_NAMESPACE_OF,
         };
         int r, q = 0, v = 0, w = 0;
+        Unit *orig_u = u, *orig_other = other;
 
         assert(u);
         assert(d >= 0 && d < _UNIT_DEPENDENCY_MAX);
@@ -1899,8 +2084,10 @@ int unit_add_dependency(Unit *u, UnitDependency d, Unit *other, bool add_referen
 
         /* We won't allow dependencies on ourselves. We will not
          * consider them an error however. */
-        if (u == other)
+        if (u == other) {
+                maybe_warn_about_dependency(orig_u->id, orig_other->id, d);
                 return 0;
+        }
 
         r = set_ensure_allocated(&u->dependencies[d], trivial_hash_func, trivial_compare_func);
         if (r < 0)
@@ -1967,10 +2154,12 @@ int unit_add_two_dependencies(Unit *u, UnitDependency d, UnitDependency e, Unit 
 
         assert(u);
 
-        if ((r = unit_add_dependency(u, d, other, add_reference)) < 0)
+        r = unit_add_dependency(u, d, other, add_reference);
+        if (r < 0)
                 return r;
 
-        if ((r = unit_add_dependency(u, e, other, add_reference)) < 0)
+        r = unit_add_dependency(u, e, other, add_reference);
+        if (r < 0)
                 return r;
 
         return 0;
@@ -2030,22 +2219,22 @@ int unit_add_dependency_by_name(Unit *u, UnitDependency d, const char *name, con
 }
 
 int unit_add_two_dependencies_by_name(Unit *u, UnitDependency d, UnitDependency e, const char *name, const char *path, bool add_reference) {
+        _cleanup_free_ char *s = NULL;
         Unit *other;
         int r;
-        _cleanup_free_ char *s = NULL;
 
         assert(u);
         assert(name || path);
 
-        if (!(name = resolve_template(u, name, path, &s)))
+        name = resolve_template(u, name, path, &s);
+        if (!name)
                 return -ENOMEM;
 
-        if ((r = manager_load_unit(u->manager, name, path, NULL, &other)) < 0)
+        r = manager_load_unit(u->manager, name, path, NULL, &other);
+        if (r < 0)
                 return r;
 
-        r = unit_add_two_dependencies(u, d, e, other, add_reference);
-
-        return r;
+        return unit_add_two_dependencies(u, d, e, other, add_reference);
 }
 
 int unit_add_dependency_by_name_inverse(Unit *u, UnitDependency d, const char *name, const char *path, bool add_reference) {
@@ -2056,15 +2245,15 @@ int unit_add_dependency_by_name_inverse(Unit *u, UnitDependency d, const char *n
         assert(u);
         assert(name || path);
 
-        if (!(name = resolve_template(u, name, path, &s)))
+        name = resolve_template(u, name, path, &s);
+        if (!name)
                 return -ENOMEM;
 
-        if ((r = manager_load_unit(u->manager, name, path, NULL, &other)) < 0)
+        r = manager_load_unit(u->manager, name, path, NULL, &other);
+        if (r < 0)
                 return r;
 
-        r = unit_add_dependency(other, d, u, add_reference);
-
-        return r;
+        return unit_add_dependency(other, d, u, add_reference);
 }
 
 int unit_add_two_dependencies_by_name_inverse(Unit *u, UnitDependency d, UnitDependency e, const char *name, const char *path, bool add_reference) {
@@ -2075,24 +2264,24 @@ int unit_add_two_dependencies_by_name_inverse(Unit *u, UnitDependency d, UnitDep
         assert(u);
         assert(name || path);
 
-        if (!(name = resolve_template(u, name, path, &s)))
+        name = resolve_template(u, name, path, &s);
+        if (!name)
                 return -ENOMEM;
 
-        if ((r = manager_load_unit(u->manager, name, path, NULL, &other)) < 0)
+        r = manager_load_unit(u->manager, name, path, NULL, &other);
+        if (r < 0)
                 return r;
 
-        if ((r = unit_add_two_dependencies(other, d, e, u, add_reference)) < 0)
+        r = unit_add_two_dependencies(other, d, e, u, add_reference);
+        if (r < 0)
                 return r;
 
         return r;
 }
 
 int set_unit_path(const char *p) {
-        _cleanup_free_ char *c = NULL;
-
         /* This is mostly for debug purposes */
-        c = path_make_absolute_cwd(p);
-        if (setenv("SYSTEMD_UNIT_PATH", c, 0) < 0)
+        if (setenv("SYSTEMD_UNIT_PATH", p, 0) < 0)
                 return -errno;
 
         return 0;
@@ -2132,18 +2321,16 @@ char *unit_default_cgroup_path(Unit *u) {
                 return strjoin(u->manager->cgroup_root, "/", escaped, NULL);
 }
 
-int unit_add_default_slice(Unit *u) {
+int unit_add_default_slice(Unit *u, CGroupContext *c) {
         _cleanup_free_ char *b = NULL;
         const char *slice_name;
         Unit *slice;
         int r;
 
         assert(u);
+        assert(c);
 
         if (UNIT_ISSET(u->slice))
-                return 0;
-
-        if (!unit_get_cgroup_context(u))
                 return 0;
 
         if (u->instance) {
@@ -2237,25 +2424,25 @@ bool unit_can_serialize(Unit *u) {
 }
 
 int unit_serialize(Unit *u, FILE *f, FDSet *fds, bool serialize_jobs) {
-        ExecRuntime *rt;
         int r;
 
         assert(u);
         assert(f);
         assert(fds);
 
-        if (!unit_can_serialize(u))
-                return 0;
+        if (unit_can_serialize(u)) {
+                ExecRuntime *rt;
 
-        r = UNIT_VTABLE(u)->serialize(u, f, fds);
-        if (r < 0)
-                return r;
-
-        rt = unit_get_exec_runtime(u);
-        if (rt) {
-                r = exec_runtime_serialize(rt, u, f, fds);
+                r = UNIT_VTABLE(u)->serialize(u, f, fds);
                 if (r < 0)
                         return r;
+
+                rt = unit_get_exec_runtime(u);
+                if (rt) {
+                        r = exec_runtime_serialize(rt, u, f, fds);
+                        if (r < 0)
+                                return r;
+                }
         }
 
         dual_timestamp_serialize(f, "inactive-exit-timestamp", &u->inactive_exit_timestamp);
@@ -2317,16 +2504,13 @@ void unit_serialize_item(Unit *u, FILE *f, const char *key, const char *value) {
 }
 
 int unit_deserialize(Unit *u, FILE *f, FDSet *fds) {
-        size_t offset;
         ExecRuntime **rt = NULL;
+        size_t offset;
         int r;
 
         assert(u);
         assert(f);
         assert(fds);
-
-        if (!unit_can_serialize(u))
-                return 0;
 
         offset = UNIT_VTABLE(u)->exec_runtime_offset;
         if (offset > 0)
@@ -2437,24 +2621,34 @@ int unit_deserialize(Unit *u, FILE *f, FDSet *fds) {
                         if (!s)
                                 return -ENOMEM;
 
-                        free(u->cgroup_path);
-                        u->cgroup_path = s;
+                        if (u->cgroup_path) {
+                                void *p;
 
+                                p = hashmap_remove(u->manager->cgroup_unit, u->cgroup_path);
+                                log_info("Removing cgroup_path %s from hashmap (%p)",
+                                         u->cgroup_path, p);
+                                free(u->cgroup_path);
+                        }
+
+                        u->cgroup_path = s;
                         assert(hashmap_put(u->manager->cgroup_unit, s, u) == 1);
+
                         continue;
                 }
 
-                if (rt) {
-                        r = exec_runtime_deserialize_item(rt, u, l, v, fds);
+                if (unit_can_serialize(u)) {
+                        if (rt) {
+                                r = exec_runtime_deserialize_item(rt, u, l, v, fds);
+                                if (r < 0)
+                                        return r;
+                                if (r > 0)
+                                        continue;
+                        }
+
+                        r = UNIT_VTABLE(u)->deserialize_item(u, l, v, fds);
                         if (r < 0)
                                 return r;
-                        if (r > 0)
-                                continue;
                 }
-
-                r = UNIT_VTABLE(u)->deserialize_item(u, l, v, fds);
-                if (r < 0)
-                        return r;
         }
 }
 
@@ -2777,27 +2971,55 @@ void unit_ref_unset(UnitRef *ref) {
         ref->unit = NULL;
 }
 
-int unit_exec_context_defaults(Unit *u, ExecContext *c) {
+int unit_patch_contexts(Unit *u) {
+        CGroupContext *cc;
+        ExecContext *ec;
         unsigned i;
         int r;
 
         assert(u);
-        assert(c);
 
-        /* This only copies in the ones that need memory */
-        for (i = 0; i < RLIMIT_NLIMITS; i++)
-                if (u->manager->rlimit[i] && !c->rlimit[i]) {
-                        c->rlimit[i] = newdup(struct rlimit, u->manager->rlimit[i], 1);
-                        if (!c->rlimit[i])
-                                return -ENOMEM;
+        /* Patch in the manager defaults into the exec and cgroup
+         * contexts, _after_ the rest of the settings have been
+         * initialized */
+
+        ec = unit_get_exec_context(u);
+        if (ec) {
+                /* This only copies in the ones that need memory */
+                for (i = 0; i < _RLIMIT_MAX; i++)
+                        if (u->manager->rlimit[i] && !ec->rlimit[i]) {
+                                ec->rlimit[i] = newdup(struct rlimit, u->manager->rlimit[i], 1);
+                                if (!ec->rlimit[i])
+                                        return -ENOMEM;
+                        }
+
+                if (u->manager->running_as == SYSTEMD_USER &&
+                    !ec->working_directory) {
+
+                        r = get_home_dir(&ec->working_directory);
+                        if (r < 0)
+                                return r;
                 }
 
-        if (u->manager->running_as == SYSTEMD_USER &&
-            !c->working_directory) {
+                if (u->manager->running_as == SYSTEMD_USER &&
+                    (ec->syscall_whitelist ||
+                     !set_isempty(ec->syscall_filter) ||
+                     !set_isempty(ec->syscall_archs) ||
+                     ec->address_families_whitelist ||
+                     !set_isempty(ec->address_families)))
+                        ec->no_new_privileges = true;
 
-                r = get_home_dir(&c->working_directory);
-                if (r < 0)
-                        return r;
+                if (ec->private_devices)
+                        ec->capability_bounding_set_drop |= (uint64_t) 1ULL << (uint64_t) CAP_MKNOD;
+        }
+
+        cc = unit_get_cgroup_context(u);
+        if (cc) {
+
+                if (ec &&
+                    ec->private_devices &&
+                    cc->device_policy == CGROUP_AUTO)
+                        cc->device_policy = CGROUP_CLOSED;
         }
 
         return 0;
@@ -2806,6 +3028,9 @@ int unit_exec_context_defaults(Unit *u, ExecContext *c) {
 ExecContext *unit_get_exec_context(Unit *u) {
         size_t offset;
         assert(u);
+
+        if (u->type < 0)
+                return NULL;
 
         offset = UNIT_VTABLE(u)->exec_context_offset;
         if (offset <= 0)
@@ -2818,6 +3043,9 @@ KillContext *unit_get_kill_context(Unit *u) {
         size_t offset;
         assert(u);
 
+        if (u->type < 0)
+                return NULL;
+
         offset = UNIT_VTABLE(u)->kill_context_offset;
         if (offset <= 0)
                 return NULL;
@@ -2827,6 +3055,9 @@ KillContext *unit_get_kill_context(Unit *u) {
 
 CGroupContext *unit_get_cgroup_context(Unit *u) {
         size_t offset;
+
+        if (u->type < 0)
+                return NULL;
 
         offset = UNIT_VTABLE(u)->cgroup_context_offset;
         if (offset <= 0)
@@ -2838,6 +3069,9 @@ CGroupContext *unit_get_cgroup_context(Unit *u) {
 ExecRuntime *unit_get_exec_runtime(Unit *u) {
         size_t offset;
 
+        if (u->type < 0)
+                return NULL;
+
         offset = UNIT_VTABLE(u)->exec_runtime_offset;
         if (offset <= 0)
                 return NULL;
@@ -2845,68 +3079,55 @@ ExecRuntime *unit_get_exec_runtime(Unit *u) {
         return *(ExecRuntime**) ((uint8_t*) u + offset);
 }
 
-static int drop_in_file(Unit *u, UnitSetPropertiesMode mode, const char *name, char **_p, char **_q) {
-        _cleanup_free_ char *b = NULL;
-        char *p, *q;
-        int r;
-
-        assert(u);
-        assert(name);
-        assert(_p);
-        assert(_q);
-
-        b = xescape(name, "/.");
-        if (!b)
-                return -ENOMEM;
-
-        if (!filename_is_safe(b))
-                return -EINVAL;
-
+static int unit_drop_in_dir(Unit *u, UnitSetPropertiesMode mode, bool transient, char **dir) {
         if (u->manager->running_as == SYSTEMD_USER) {
-                _cleanup_free_ char *c = NULL;
+                int r;
 
-                r = user_config_home(&c);
-                if (r < 0)
-                        return r;
+                r = user_config_home(dir);
                 if (r == 0)
                         return -ENOENT;
-
-                p = strjoin(c, "/", u->id, ".d", NULL);
-        } else if (mode == UNIT_PERSISTENT && !u->transient)
-                p = strjoin("/etc/systemd/system/", u->id, ".d", NULL);
-        else
-                p = strjoin("/run/systemd/system/", u->id, ".d", NULL);
-        if (!p)
-                return -ENOMEM;
-
-        q = strjoin(p, "/90-", b, ".conf", NULL);
-        if (!q) {
-                free(p);
-                return -ENOMEM;
+                return r;
         }
 
-        *_p = p;
-        *_q = q;
+        if (mode == UNIT_PERSISTENT && !transient)
+                *dir = strdup("/etc/systemd/system");
+        else
+                *dir = strdup("/run/systemd/system");
+        if (!*dir)
+                return -ENOMEM;
+
         return 0;
 }
 
-int unit_write_drop_in(Unit *u, UnitSetPropertiesMode mode, const char *name, const char *data) {
-        _cleanup_free_ char *p = NULL, *q = NULL;
+static int unit_drop_in_file(Unit *u,
+                             UnitSetPropertiesMode mode, const char *name, char **p, char **q) {
+        _cleanup_free_ char *dir = NULL;
         int r;
 
         assert(u);
-        assert(name);
-        assert(data);
+
+        r = unit_drop_in_dir(u, mode, u->transient, &dir);
+        if (r < 0)
+                return r;
+
+        return drop_in_file(dir, u->id, 50, name, p, q);
+}
+
+int unit_write_drop_in(Unit *u, UnitSetPropertiesMode mode, const char *name, const char *data) {
+
+        _cleanup_free_ char *dir = NULL;
+        int r;
+
+        assert(u);
 
         if (!IN_SET(mode, UNIT_PERSISTENT, UNIT_RUNTIME))
                 return 0;
 
-        r = drop_in_file(u, mode, name, &p, &q);
+        r = unit_drop_in_dir(u, mode, u->transient, &dir);
         if (r < 0)
                 return r;
 
-        mkdir_p(p, 0755);
-        return write_string_file_atomic_label(q, data);
+        return write_drop_in(dir, u->id, 50, name, data);
 }
 
 int unit_write_drop_in_format(Unit *u, UnitSetPropertiesMode mode, const char *name, const char *format, ...) {
@@ -2982,7 +3203,7 @@ int unit_remove_drop_in(Unit *u, UnitSetPropertiesMode mode, const char *name) {
         if (!IN_SET(mode, UNIT_PERSISTENT, UNIT_RUNTIME))
                 return 0;
 
-        r = drop_in_file(u, mode, name, &p, &q);
+        r = unit_drop_in_file(u, mode, name, &p, &q);
         if (r < 0)
                 return r;
 
@@ -3155,11 +3376,9 @@ int unit_require_mounts_for(Unit *u, const char *path) {
                 return 0;
         }
 
-        r = strv_push(&u->requires_mounts_for, p);
-        if (r < 0) {
-                free(p);
+        r = strv_consume(&u->requires_mounts_for, p);
+        if (r < 0)
                 return r;
-        }
 
         PATH_FOREACH_PREFIX_MORE(prefix, p) {
                 Set *x;
@@ -3260,9 +3479,9 @@ static const char* const unit_dependency_table[_UNIT_DEPENDENCY_MAX] = {
         [UNIT_TRIGGERED_BY] = "TriggeredBy",
         [UNIT_PROPAGATES_RELOAD_TO] = "PropagatesReloadTo",
         [UNIT_RELOAD_PROPAGATED_FROM] = "ReloadPropagatedFrom",
+        [UNIT_JOINS_NAMESPACE_OF] = "JoinsNamespaceOf",
         [UNIT_REFERENCES] = "References",
         [UNIT_REFERENCED_BY] = "ReferencedBy",
-        [UNIT_JOINS_NAMESPACE_OF] = "JoinsNamespaceOf",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(unit_dependency, UnitDependency);

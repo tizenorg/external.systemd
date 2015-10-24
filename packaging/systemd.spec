@@ -5,21 +5,37 @@
 # directory.
 %global __requires_exclude pkg-config
 
+%bcond_with unified_directory
+%bcond_with kdbus
+
+%define enable() %{expand:%%{?with_%{1}:--enable-%{1}}%%{!?with_%{1}:--disable-%{1}}}
+# In order to reduce the root privilege daemon,
+# '/run' directory has a group access permission for run_tmp group (gid:1902).
+%define RUN_TMP_GID 1902
+%define WITH_RUN_GID %{RUN_TMP_GID}
+
 %define WITH_BASH_COMPLETION 0
+%define WITH_ZSH_COMPLETION 0
 %define WITH_BLACKLIGHT 0
 %define WITH_COREDUMP 0
-%define WITH_PAM 0
 %define WITH_RANDOMSEED 0
 
-%define WITH_LOGIND 0
+%define WITH_LOGIND 1
+%define WITH_PAM 1
+%define WITH_FIRSTBOOT 0
 %define WITH_TIMEDATED 0
+
+%define WITH_NETWORKD 0
+%define WITH_RESOLVED 0
+%define WITH_TIMESYNCD 0
+%define WITH_RFKILL 0
 
 %define WITH_COMPAT_LIBS 1
 
 Name:           systemd
 Url:            http://www.freedesktop.org/wiki/Software/systemd
-Version:        210
-Release:        1
+Version:        216
+Release:        1%{?release_flags}
 License:        LGPL-2.1+ and MIT and GPL-2.0+
 Summary:        A System and Service Manager
 Source0:        http://www.freedesktop.org/software/systemd/%{name}-%{version}.tar.xz
@@ -36,6 +52,7 @@ Source1001:     systemd.manifest
 BuildRequires:  glib2-devel
 BuildRequires:  kmod-devel >= 15
 BuildRequires:  hwdata
+BuildRequires:  kernel-headers
 
 BuildRequires:  libacl-devel
 BuildRequires:  pkgconfig
@@ -62,6 +79,9 @@ BuildRequires:  libtool
 BuildRequires:  smack-devel
 Requires:       dbus
 Requires:       %{name}-libs = %{version}-%{release}
+%if %{WITH_PAM}
+Requires:       pam
+%endif
 
 Provides:       /bin/systemctl
 Provides:       /sbin/shutdown
@@ -89,7 +109,7 @@ work as a drop-in replacement for sysvinit.
 
 %package libs
 Summary:        systemd libraries
-License:        GPL-2.0+
+License:        LGPLv2+ and MIT
 Provides:       libudev
 Obsoletes:      systemd < 185-4
 Conflicts:      systemd < 185-4
@@ -99,7 +119,7 @@ Libraries for systemd and udev, as well as the systemd PAM module.
 
 %package devel
 Summary:        Development headers for systemd
-License:        GPL-2.0+
+License:        LGPLv2+ and MIT
 Requires:       %{name} = %{version}-%{release}
 Provides:       pkgconfig(libudev)
 Provides:       libudev-devel = %{version}
@@ -110,7 +130,7 @@ Development headers and auxiliary files for developing applications for systemd.
 
 %package -n libgudev1
 Summary:        Libraries for adding libudev support to applications that use glib
-License:        GPL-2.0+
+License:        LGPLv2+
 Requires:       %{name} = %{version}-%{release}
 
 %description -n libgudev1
@@ -120,7 +140,7 @@ functionality from applications that use glib.
 %package -n libgudev1-devel
 Summary:        Header files for adding libudev support to applications that use glib
 Requires:       libgudev1 = %{version}-%{release}
-License:        GPL-2.0+
+License:        LGPLv2+
 
 %description -n libgudev1-devel
 This package contains the header and pkg-config files for developing
@@ -129,7 +149,7 @@ glib-based applications using libudev functionality.
 %package journal-gateway
 Summary:        Gateway for serving journal events over the network using HTTP
 Requires:       %{name} = %{version}-%{release}
-License:        LGPL-2.1+
+License:        LGPLv2+
 Requires(pre):    /usr/bin/getent
 Requires(post):   systemd
 Requires(preun):  systemd
@@ -144,36 +164,21 @@ systemd-journal-gatewayd serves journal events over the network using HTTP.
 %build
 cp %{SOURCE1001} .
 
-export CFLAGS+=" -g -O0 -DCONFIG_TIZEN -DCONFIG_TIZEN_WIP"
+export CFLAGS=" -g -O0 -fPIE -ftrapv"
+export LDFLAGS=" -pie"
 autoreconf -fiv
 %configure \
-    --disable-static \
-    --with-sysvinit-path= \
-    --with-sysvrcnd-path= \
-    --disable-gtk-doc-html \
-    --disable-selinux \
-    --disable-ima \
-    --disable-tcpwrap \
-    --enable-split-usr \
-    --disable-nls \
-    --disable-manpages \
-    --disable-efi \
-%if %{WITH_PAM}
-    --with-pamlibdir="/%{_libdir}/security" \
-%else
+    %{enable kdbus} \
+%if ! %{WITH_PAM}
     --disable-pam \
 %endif
     --with-firmware-path="/%{_libdir}/firmware" \
+%if ! %{WITH_BASH_COMPLETION}
+    --with-bashcompletiondir="" \
+%endif
+%if ! %{WITH_ZSH_COMPLETION}
     --with-zshcompletiondir="" \
-    --disable-hostnamed \
-    --disable-machined \
-    --disable-binfmt \
-    --disable-vconsole \
-    --disable-quotacheck \
-    --disable-localed \
-    --disable-polkit \
-    --disable-myhostname \
-    --without-python \
+%endif
 %if "%{?tizen_profile_name}" == "wearable"
     --disable-xz \
 %endif
@@ -195,6 +200,50 @@ autoreconf -fiv
 %if %{WITH_COMPAT_LIBS}
     --enable-compat-libs \
 %endif
+%if ! %{WITH_NETWORKD}
+    --disable-networkd \
+%endif
+%if ! %{WITH_RESOLVED}
+    --disable-resolved \
+%endif
+%if ! %{WITH_TIMESYNCD}
+    --disable-timesyncd \
+%endif
+%if ! %{WITH_RFKILL}
+    --disable-rfkill \
+%endif
+%if %{WITH_RUN_GID}
+    --with-run-gid=%{WITH_RUN_GID} \
+%endif
+%if ! %{WITH_FIRSTBOOT}
+    --disable-firstboot \
+%endif
+%if "%{?tizen_profile_name}" == "mobile" || "%{?tizen_profile_name}" == "wearable"
+    --with-smack-run-label="systemd" \
+    --with-smack-default-process-label="systemd::no-label" \
+    --with-process-label \
+%endif
+    --enable-tizen \
+    --enable-tizen-wip \
+    --disable-static \
+    --with-sysvinit-path= \
+    --with-sysvrcnd-path= \
+    --disable-gtk-doc-html \
+    --disable-selinux \
+    --disable-ima \
+    --enable-split-usr \
+    --disable-nls \
+    --disable-manpages \
+    --disable-efi \
+    --disable-hostnamed \
+    --disable-machined \
+    --disable-binfmt \
+    --disable-vconsole \
+    --disable-quotacheck \
+    --disable-localed \
+    --disable-polkit \
+    --disable-myhostname \
+    --without-python
 
 make %{?_smp_mflags}
 
@@ -210,21 +259,34 @@ find %{buildroot} \( -name '*.a' -o -name '*.la' \) -delete
 mkdir -p %{buildroot}/%{_sbindir}
 mkdir -p %{buildroot}/sbin
 ln -sf ../bin/udevadm %{buildroot}%{_sbindir}/udevadm
+# TODO: Below code should be removed after we go unified directory structure.
+%if !%{with unified_directory}
+mkdir -p %{buildroot}%{_prefix}/lib/firmware/updates
+%endif
 
 # Create SysV compatibility symlinks. systemctl/systemd are smart
 # enough to detect in which way they are called.
 ln -s ../lib/systemd/systemd %{buildroot}%{_sbindir}/init
+# TODO: Below code should be removed after we go unified directory structure.
+%if %{with unified_directory}
 ln -s /usr/lib/systemd/systemd %{buildroot}/sbin/init
+%endif
 ln -s ../lib/systemd/systemd %{buildroot}%{_bindir}/systemd
 ln -s ../bin/systemctl %{buildroot}%{_sbindir}/reboot
+# TODO: Below code should be removed after we go unified directory structure.
+%if %{with unified_directory}
 ln -s /usr/bin/systemctl %{buildroot}/sbin/reboot
+%endif
 ln -s ../bin/systemctl %{buildroot}%{_sbindir}/halt
 ln -s ../bin/systemctl %{buildroot}%{_sbindir}/poweroff
 ln -s ../bin/systemctl %{buildroot}%{_sbindir}/shutdown
 ln -s ../bin/systemctl %{buildroot}%{_sbindir}/telinit
 ln -s ../bin/systemctl %{buildroot}%{_sbindir}/runlevel
 ln -s /usr/lib/systemd/systemd-udevd %{buildroot}/%{_sbindir}/udevd
+# TODO: Below code should be removed after we go unified directory structure.
+%if %{with unified_directory}
 ln -s /lib/firmware %{buildroot}%{_libdir}/firmware
+%endif
 
 # We create all wants links manually at installation time to make sure
 # they are not owned and hence overriden by rpm after the user deleted
@@ -243,7 +305,6 @@ mkdir -p %{buildroot}%{_prefix}/lib/systemd/user-generators
 # Create new-style configuration files so that we can ghost-own them
 touch %{buildroot}%{_sysconfdir}/hostname
 touch %{buildroot}%{_sysconfdir}/locale.conf
-touch %{buildroot}%{_sysconfdir}/machine-id
 touch %{buildroot}%{_sysconfdir}/machine-info
 touch %{buildroot}%{_sysconfdir}/localtime
 mkdir -p %{buildroot}%{_sysconfdir}/X11/xorg.conf.d
@@ -285,27 +346,6 @@ rm -f %{buildroot}%{_libdir}/udev/rules.d/80-net-name-slot.rules
 rm -f %{buildroot}%{_libdir}/udev/rules.d/95-keyboard-force-release.rules
 rm -f %{buildroot}%{_libdir}/udev/rules.d/95-keymap.rules
 
-%if ! %{WITH_BASH_COMPLETION}
-# Hmm, bash completion also removed :(
-rm -f %{buildroot}%{_datadir}/bash-completion/completions/busctl
-rm -f %{buildroot}%{_datadir}/bash-completion/completions/journalctl
-rm -f %{buildroot}%{_datadir}/bash-completion/completions/kernel-install
-%if %{WITH_LOGIND}
-rm -f %{buildroot}%{_datadir}/bash-completion/completions/loginctl
-%endif
-%if %{WITH_TIMEDATED}
-rm -f %{buildroot}%{_datadir}/bash-completion/completions/timedatectl
-%endif
-rm -f %{buildroot}%{_datadir}/bash-completion/completions/systemctl
-%if %{WITH_COREDUMP}
-rm -f %{buildroot}%{_datadir}/bash-completion/completions/systemd-coredumpctl
-%endif
-rm -f %{buildroot}%{_datadir}/bash-completion/completions/systemd-delta
-rm -f %{buildroot}%{_datadir}/bash-completion/completions/systemd-run
-rm -f %{buildroot}%{_datadir}/bash-completion/completions/udevadm
-rm -f %{buildroot}%{_datadir}/bash-completion/completions/systemd-analyze
-%endif
-
 # This will be done by tizen specific init script.
 rm -f %{buildroot}%{_libdir}/systemd/system/local-fs.target.wants/systemd-fsck-root.service
 
@@ -330,6 +370,15 @@ chmod +x %{SOURCE1}
 %{SOURCE1} %{SOURCE13} %{buildroot}%{_sysconfdir}/systemd/journald.conf
 %{SOURCE1} %{SOURCE14} %{buildroot}%{_sysconfdir}/systemd/bootchart.conf
 
+# We do not need some of systemd native unit files. Even if those are
+# not used, it can make slower unit loading time.
+for unit in \
+	tmp.mount \
+	local-fs.target.wants/tmp.mount;
+do
+	rm -f %{buildroot}%{_libdir}/systemd/system/$unit
+done
+
 # All of licenses should be manifested in /usr/share/license.
 mkdir -p %{buildroot}%{_datadir}/license
 cat LICENSE.LGPL2.1 > %{buildroot}%{_datadir}/license/systemd
@@ -348,7 +397,6 @@ getent group systemd-journal >/dev/null 2>&1 || groupadd -r -g 190 systemd-journ
 systemctl stop systemd-udevd-control.socket systemd-udevd-kernel.socket systemd-udevd.service >/dev/null 2>&1 || :
 
 %post
-systemd-machine-id-setup >/dev/null 2>&1 || :
 %if %{WITH_RANDOMSEED}
 /usr/lib/systemd/systemd-random-seed save >/dev/null 2>&1 || :
 %endif
@@ -369,6 +417,7 @@ ln -s /dev/null /etc/systemd/system/systemd-remount-fs.service
 ln -s /dev/null /etc/systemd/system/systemd-journal-flush.service
 ln -s /dev/null /etc/systemd/system/systemd-update-utmp.service
 ln -s /dev/null /etc/systemd/system/kmod-static-nodes.service
+ln -s /dev/null /etc/systemd/system/systemd-fsck-root.service
 
 # Tizen is not supporting /usr/lib/macros.d yet.
 # To avoid this, the macro will be copied to origin macro dir.
@@ -391,6 +440,10 @@ fi
 %post -n libgudev1 -p /sbin/ldconfig
 %postun -n libgudev1 -p /sbin/ldconfig
 
+%posttrans
+# Make sure /etc/mtab is pointing /proc/self/mounts
+ln -sf ../proc/self/mounts /etc/mtab
+
 %files
 %defattr(-,root,root,-)
 %{_datadir}/license/systemd
@@ -412,7 +465,13 @@ fi
 %dir %{_prefix}/lib/tmpfiles.d
 %dir %{_prefix}/lib/sysctl.d
 %dir %{_prefix}/lib/modules-load.d
+# TODO: Below code should be removed after we go unified directory structure.
+%if %{with unified_directory}
 %{_prefix}/lib/firmware
+%dir %{_datadir}/systemd
+%else
+%dir %{_prefix}/lib/firmware
+%endif
 %dir %{_datadir}/systemd
 %dir %{_datadir}/pkgconfig
 %dir %{_localstatedir}/log/journal
@@ -445,7 +504,6 @@ fi
 %ghost %config(noreplace) %{_sysconfdir}/hostname
 %ghost %config(noreplace) %{_sysconfdir}/localtime
 %ghost %config(noreplace) %{_sysconfdir}/locale.conf
-%ghost %config(noreplace) %{_sysconfdir}/machine-id
 %ghost %config(noreplace) %{_sysconfdir}/machine-info
 %ghost %config(noreplace) %{_sysconfdir}/X11/xorg.conf.d/00-keyboard.conf
 %ghost %{_localstatedir}/lib/systemd/catalog/database
@@ -478,31 +536,54 @@ fi
 %if %{WITH_COREDUMP}
 %{_bindir}/systemd-coredumpctl
 %endif
+%{_bindir}/systemd-escape
+%if %{WITH_FIRSTBOOT}
+%{_bindir}/systemd-firstboot
+%endif
+%{_bindir}/systemd-path
+%{_bindir}/systemd-sysusers
 %{_bindir}/udevadm
 %{_prefix}/lib/systemd/systemd
 %{_prefix}/lib/systemd/system
 %{_prefix}/lib/systemd/user
 %{_prefix}/lib/systemd/systemd-*
 %{_prefix}/lib/udev
-%{_prefix}/lib/systemd/system-generators/systemd-getty-generator
+%{_prefix}/lib/systemd/system-generators/systemd-debug-generator
 %{_prefix}/lib/systemd/system-generators/systemd-fstab-generator
+%{_prefix}/lib/systemd/system-generators/systemd-getty-generator
+%if %{with kdbus}
+%exclude %{_prefix}/lib/systemd/system-generators/systemd-dbus1-generator
+%exclude %{_prefix}/lib/systemd/user-generators/systemd-dbus1-generator
+%endif
 %exclude %{_prefix}/lib/systemd/system-generators/systemd-system-update-generator
 %exclude %{_prefix}/lib/systemd/system-generators/systemd-gpt-auto-generator
 %{_prefix}/lib/tmpfiles.d/systemd.conf
 %{_prefix}/lib/tmpfiles.d/systemd-nologin.conf
-%{_prefix}/lib/tmpfiles.d/x11.conf
+%{_prefix}/lib/tmpfiles.d/systemd-remote.conf
+%{_prefix}/lib/tmpfiles.d/etc.conf
 %{_prefix}/lib/tmpfiles.d/tmp.conf
+%{_prefix}/lib/tmpfiles.d/var.conf
+%{_prefix}/lib/tmpfiles.d/x11.conf
 %{_prefix}/lib/sysctl.d/50-default.conf
 %{_prefix}/lib/systemd/catalog/systemd.catalog
 %{_prefix}/lib/systemd/catalog/systemd.fr.catalog
 %{_prefix}/lib/systemd/catalog/systemd.it.catalog
 %{_prefix}/lib/systemd/catalog/systemd.ru.catalog
 %{_prefix}/lib/systemd/network/80-container-host0.network
+%{_prefix}/lib/systemd/network/80-container-ve.network
 %{_prefix}/lib/systemd/network/99-default.link
+%{_prefix}/lib/systemd/system-preset/90-systemd.preset
+%{_prefix}/lib/sysusers.d/basic.conf
+%{_prefix}/lib/sysusers.d/systemd-remote.conf
+%{_prefix}/lib/sysusers.d/systemd.conf
+%exclude %{_prefix}/lib/systemd/system/systemd-bootchart.service
 %{_sbindir}/init
-/sbin/init
 %{_sbindir}/reboot
+# TODO: Below code should be removed after we go unified directory structure.
+%if %{with unified_directory}
+/sbin/init
 /sbin/reboot
+%endif
 %{_sbindir}/halt
 %{_sbindir}/poweroff
 %{_sbindir}/shutdown
@@ -524,24 +605,32 @@ fi
 %{_datadir}/pkgconfig/systemd.pc
 %{_datadir}/pkgconfig/udev.pc
 %if %{WITH_BASH_COMPLETION}
-%{_datadir}/bash-completion/completions/buxctl
+%{_datadir}/bash-completion/completions/busctl
 %{_datadir}/bash-completion/completions/journalctl
 %{_datadir}/bash-completion/completions/kernel-install
 %if %{WITH_LOGIND}
 %{_datadir}/bash-completion/completions/loginctl
 %endif
-%if %{WITH_TIMEDATED}
-%{_datadir}/bash-completion/completions/timedatectl
-%endif
 %{_datadir}/bash-completion/completions/systemctl
+%{_datadir}/bash-completion/completions/systemd-analyze
+%{_datadir}/bash-completion/completions/systemd-cat
+%{_datadir}/bash-completion/completions/systemd-cgls
+%{_datadir}/bash-completion/completions/systemd-cgtop
 %if %{WITH_COREDUMP}
 %{_datadir}/bash-completion/completions/systemd-coredumpctl
 %endif
 %{_datadir}/bash-completion/completions/systemd-delta
+%{_datadir}/bash-completion/completions/systemd-detect-virt
+%{_datadir}/bash-completion/completions/systemd-nspawn
 %{_datadir}/bash-completion/completions/systemd-run
-%{_datadir}/bash-completion/completions/udevadm
-%{_datadir}/bash-completion/completions/systemd-analyze
+%if %{WITH_TIMEDATED}
+%{_datadir}/bash-completion/completions/timedatectl
 %endif
+%{_datadir}/bash-completion/completions/udevadm
+%endif
+%exclude %{_datadir}/factory/etc/nsswitch.conf
+%{_datadir}/factory/etc/pam.d/other
+%{_datadir}/factory/etc/pam.d/system-auth
 %manifest systemd.manifest
 
 %files libs
@@ -573,13 +662,22 @@ fi
 %{_libdir}/libudev.so
 %{_includedir}/systemd/_sd-common.h
 %{_includedir}/systemd/sd-daemon.h
-##%if %{WITH_LOGIND}
 %{_includedir}/systemd/sd-login.h
-##%endif
 %{_includedir}/systemd/sd-journal.h
 %{_includedir}/systemd/sd-id128.h
 %{_includedir}/systemd/sd-messages.h
 %{_includedir}/libudev.h
+%if %{with kdbus}
+%{_includedir}/systemd/sd-bus-protocol.h
+%{_includedir}/systemd/sd-bus-vtable.h
+%{_includedir}/systemd/sd-bus.h
+%{_includedir}/systemd/sd-event.h
+%{_includedir}/systemd/sd-memfd.h
+%{_includedir}/systemd/sd-path.h
+%{_includedir}/systemd/sd-resolve.h
+%{_includedir}/systemd/sd-rtnl.h
+%{_includedir}/systemd/sd-utf8.h
+%endif
 %{_libdir}/pkgconfig/libsystemd.pc
 %if %{WITH_COMPAT_LIBS}
 %{_libdir}/pkgconfig/libsystemd-daemon.pc

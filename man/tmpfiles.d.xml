@@ -61,6 +61,23 @@
                 temporary files and directories which usually reside
                 in directories such as <filename>/run</filename>
                 or <filename>/tmp</filename>.</para>
+
+                <para>Volatile and temporary files and directories are
+                those located in <filename>/run</filename> (and its
+                alias <filename>/var/run</filename>),
+                <filename>/tmp</filename>,
+                <filename>/var/tmp</filename>, the API file systems
+                such as <filename>/sys</filename> or
+                <filename>/proc</filename>, as well as some other
+                directories below <filename>/var</filename>.</para>
+
+                <para>System daemons frequently require private
+                runtime directories below <filename>/run</filename> to
+                place communication sockets and similar in. For these,
+                consider declaring them in their unit files using
+                <varname>RuntimeDirectory=</varname>
+                (see <citerefentry><refentrytitle>systemd.exec</refentrytitle><manvolnum>5</manvolnum></citerefentry> for details),
+                if this is feasible.</para>
         </refsect1>
 
         <refsect1>
@@ -92,7 +109,11 @@
                 of the directories they reside in. If multiple files
                 specify the same path, the entry in the file with the
                 lexicographically earliest name will be applied, all
-                all other conflicting entries logged as errors.</para>
+                all other conflicting entries will be logged as
+                errors. When two lines are prefix and suffix of each
+                other, then the prefix is always processed first, the
+                suffix later. Otherwise, the files/directories are
+                processed in the order they are listed.</para>
 
                 <para>If the administrator wants to disable a
                 configuration file supplied by the vendor, the
@@ -148,33 +169,80 @@ L    /tmp/foobar -    -    -    -   /dev/null</programlisting>
 
                                 <varlistentry>
                                         <term><varname>p</varname></term>
-                                        <listitem><para>Create a named pipe (FIFO) if it does not exist yet.</para></listitem>
+                                        <term><varname>p+</varname></term>
+                                        <listitem><para>Create a named
+                                        pipe (FIFO) if it does not
+                                        exist yet. If suffixed with
+                                        <varname>+</varname> and a
+                                        file already exists where the
+                                        pipe is to be created, it will
+                                        be removed and be replaced by
+                                        the pipe.</para></listitem>
                                 </varlistentry>
 
                                 <varlistentry>
                                         <term><varname>L</varname></term>
-                                        <listitem><para>Create a symlink if it does not exist yet.</para></listitem>
+                                        <term><varname>L+</varname></term>
+                                        <listitem><para>Create a
+                                        symlink if it does not exist
+                                        yet. If suffixed with
+                                        <varname>+</varname> and a
+                                        file already exists where the
+                                        symlink is to be created, it
+                                        will be removed and be
+                                        replaced by the
+                                        symlink. If the argument is omitted,
+                                        symlinks to files with the same name
+                                        residing in the directory
+                                        <filename>/usr/share/factory/</filename>
+                                        are created.</para></listitem>
                                 </varlistentry>
 
                                 <varlistentry>
                                         <term><varname>c</varname></term>
-                                        <listitem><para>Create a character device node if it does not exist yet.</para></listitem>
+                                        <term><varname>c+</varname></term>
+                                        <listitem><para>Create a
+                                        character device node if it
+                                        does not exist yet. If
+                                        suffixed with
+                                        <varname>+</varname> and a
+                                        file already exists where the
+                                        device node is to be created,
+                                        it will be removed and be
+                                        replaced by the device
+                                        node.</para></listitem>
                                 </varlistentry>
 
                                 <varlistentry>
                                         <term><varname>b</varname></term>
-                                        <listitem><para>Create a block device node if it does not exist yet.</para></listitem>
+                                        <term><varname>b+</varname></term>
+                                        <listitem><para>Create a block
+                                        device node if it does not
+                                        exist yet. If suffixed with
+                                        <varname>+</varname> and a
+                                        file already exists where the
+                                        device node is to be created,
+                                        it will be removed and be
+                                        replaced by the device
+                                        node.</para></listitem>
                                 </varlistentry>
 
                                 <varlistentry>
-                                        <term><varname>m</varname></term>
-                                        <listitem><para>If the
-                                        specified file path exists,
-                                        adjust its access mode, group
-                                        and user to the specified
-                                        values and reset the SELinux
-                                        security context. If it does not exist, do
-                                        nothing.</para></listitem>
+                                        <term><varname>C</varname></term>
+                                        <listitem><para>Recursively
+                                        copy a file or directory, if
+                                        the destination files or
+                                        directories do not exist
+                                        yet. Note that this command
+                                        will not descend into
+                                        subdirectories if the
+                                        destination directory already
+                                        exists. Instead, the entire
+                                        copy operation is
+                                        skipped. If the argument is omitted,
+                                        files from the source directory
+                                        <filename>/usr/share/factory/</filename>
+                                        with the same name are copied.</para></listitem>
                                 </varlistentry>
 
                                 <varlistentry>
@@ -240,28 +308,49 @@ L    /tmp/foobar -    -    -    -   /dev/null</programlisting>
 
                                 <varlistentry>
                                         <term><varname>z</varname></term>
-                                        <listitem><para>Restore
-                                        SELinux security context
-                                        and set ownership and access
-                                        mode of a file or directory if
-                                        it exists.  Lines of this type
-                                        accept shell-style globs in
-                                        place of normal path names.
+                                        <listitem><para>Adjust the
+                                        access mode, group and user,
+                                        and restore the SELinux security
+                                        context of a file or directory,
+                                        if it exists. Lines of this
+                                        type accept shell-style globs
+                                        in place of normal path names.
                                         </para></listitem>
                                 </varlistentry>
 
                                 <varlistentry>
                                         <term><varname>Z</varname></term>
                                         <listitem><para>Recursively
-                                        restore SELinux security
-                                        context and set
-                                        ownership and access mode of a
-                                        path and all its
-                                        subdirectories (if it is a
-                                        directory). Lines of this type
-                                        accept shell-style globs in
-                                        place of normal path
+                                        set the access mode, group and
+                                        user, and restore the SELinux
+                                        security context of a file or
+                                        directory if it exists, as
+                                        well as of its subdirectories
+                                        and the files contained
+                                        therein (if applicable). Lines
+                                        of this type accept
+                                        shell-style globs in place of
+                                        normal path
                                         names.</para></listitem>
+                                </varlistentry>
+
+                                <varlistentry>
+                                        <term><varname>t</varname></term>
+                                        <listitem><para>Set extended
+                                        attributes on item. It may be
+                                        used in conjunction with other
+                                        types (only <varname>d</varname>,
+                                        <varname>D</varname>, <varname>f</varname>,
+                                        <varname>F</varname>, <varname>L</varname>,
+                                        <varname>p</varname>, <varname>c</varname>,
+                                        <varname>b</varname>, makes sense).
+                                        If used as a standalone line, then
+                                        <command>systemd-tmpfiles</command>
+                                        will try to set extended
+                                        attributes on specified path.
+                                        This can be especially used to set
+                                        SMACK labels.
+                                        </para></listitem>
                                 </varlistentry>
                         </variablelist>
 
@@ -350,7 +439,23 @@ r! /tmp/.X[0-9]*-lock</programlisting>
                         will not be modified. This parameter is
                         ignored for <varname>x</varname>,
                         <varname>r</varname>, <varname>R</varname>,
-                        <varname>L</varname> lines.</para>
+                        <varname>L</varname>, <varname>t</varname> lines.</para>
+
+                        <para>Optionally, if prefixed with
+                        <literal>~</literal>, the access mode is masked
+                        based on the already set access bits for
+                        existing file or directories: if the existing
+                        file has all executable bits unset, all
+                        executable bits are removed from the new
+                        access mode, too. Similarly, if all read bits
+                        are removed from the old access mode, they will
+                        be removed from the new access mode too, and
+                        if all write bits are removed, they will be
+                        removed from the new access mode too. In
+                        addition, the sticky/SUID/SGID bit is removed unless
+                        applied to a directory. This
+                        functionality is particularly useful in
+                        conjunction with <varname>Z</varname>.</para>
                 </refsect2>
 
                 <refsect2>
@@ -366,8 +471,8 @@ r! /tmp/.X[0-9]*-lock</programlisting>
                         ownership will not be modified. These
                         parameters are ignored for
                         <varname>x</varname>, <varname>r</varname>,
-                        <varname>R</varname>, <varname>L</varname>
-                        lines.</para>
+                        <varname>R</varname>, <varname>L</varname>,
+                        <varname>t</varname> lines.</para>
                 </refsect2>
 
                 <refsect2>
@@ -429,8 +534,10 @@ r! /tmp/.X[0-9]*-lock</programlisting>
                         <varname>f</varname>, <varname>F</varname>,
                         and <varname>w</varname> may be used to
                         specify a short string that is written to the
-                        file, suffixed by a newline. Ignored for all
-                        other lines.</para>
+                        file, suffixed by a newline. For
+                        <varname>C</varname>, specifies the source file
+                        or directory. For <varname>t</varname> determines
+                        extended attributes to be set. Ignored for all other lines.</para>
                 </refsect2>
 
         </refsect1>
@@ -441,8 +548,9 @@ r! /tmp/.X[0-9]*-lock</programlisting>
                         <title>/etc/tmpfiles.d/screen.conf example</title>
                         <para><command>screen</command> needs two directories created at boot with specific modes and ownership.</para>
 
-                        <programlisting>d /var/run/screens  1777 root root 10d
-d /var/run/uscreens 0755 root root 10d12h</programlisting>
+                        <programlisting>d /run/screens  1777 root root 10d
+d /run/uscreens 0755 root root 10d12h
+t /run/screen - - - - user.name="John Smith" security.SMACK64=screen</programlisting>
                 </example>
                 <example>
                         <title>/etc/tmpfiles.d/abrt.conf example</title>
@@ -458,7 +566,8 @@ x /var/tmp/abrt/*</programlisting>
                 <para>
                         <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
                         <citerefentry><refentrytitle>systemd-tmpfiles</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
-                        <citerefentry><refentrytitle>systemd-delta</refentrytitle><manvolnum>1</manvolnum></citerefentry>
+                        <citerefentry><refentrytitle>systemd-delta</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
+                        <citerefentry><refentrytitle>systemd.exec</refentrytitle><manvolnum>5</manvolnum></citerefentry>
                 </para>
         </refsect1>
 

@@ -19,6 +19,7 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
+#include <sys/mount.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
@@ -28,10 +29,13 @@
 #include "hashmap.h"
 #include "strv.h"
 #include "fileio.h"
+#include "path-util.h"
 #include "special.h"
 #include "unit-name.h"
 #include "bus-util.h"
 #include "bus-error.h"
+#include "conf-parser.h"
+#include "clean-ipc.h"
 #include "logind-user.h"
 
 User* user_new(Manager *m, uid_t uid, gid_t gid, const char *name) {
@@ -48,7 +52,7 @@ User* user_new(Manager *m, uid_t uid, gid_t gid, const char *name) {
         if (!u->name)
                 goto fail;
 
-        if (asprintf(&u->state_file, "/run/systemd/users/%lu", (unsigned long) uid) < 0)
+        if (asprintf(&u->state_file, "/run/systemd/users/"UID_FMT, uid) < 0)
                 goto fail;
 
         if (hashmap_put(m->users, ULONG_TO_PTR((unsigned long) uid), u) < 0)
@@ -311,21 +315,35 @@ static int user_mkdir_runtime_path(User *u) {
         }
 
         if (!u->runtime_path) {
-                if (asprintf(&p, "/run/user/%lu", (unsigned long) u->uid) < 0)
+                if (asprintf(&p, "/run/user/" UID_FMT, u->uid) < 0)
                         return log_oom();
         } else
                 p = u->runtime_path;
 
-        r = mkdir_safe_label(p, 0700, u->uid, u->gid);
-        if (r < 0) {
-                log_error("Failed to create runtime directory %s: %s", p, strerror(-r));
-                free(p);
-                u->runtime_path = NULL;
-                return r;
+        if (path_is_mount_point(p, false) <= 0) {
+                _cleanup_free_ char *t = NULL;
+
+                mkdir(p, 0700);
+
+                if (asprintf(&t, "mode=0700,uid=" UID_FMT ",gid=" GID_FMT ",size=%zu", u->uid, u->gid, u->manager->runtime_dir_size) < 0) {
+                        r = log_oom();
+                        goto fail;
+                }
+
+                r = mount("tmpfs", p, "tmpfs", MS_NODEV|MS_NOSUID, t);
+                if (r < 0) {
+                        log_error("Failed to mount per-user tmpfs directory %s: %s", p, strerror(-r));
+                        goto fail;
+                }
         }
 
         u->runtime_path = p;
         return 0;
+
+fail:
+        free(p);
+        u->runtime_path = NULL;
+        return r;
 }
 
 static int user_start_slice(User *u) {
@@ -336,8 +354,8 @@ static int user_start_slice(User *u) {
 
         if (!u->slice) {
                 _cleanup_bus_error_free_ sd_bus_error error = SD_BUS_ERROR_NULL;
-                char lu[DECIMAL_STR_MAX(unsigned long) + 1], *slice;
-                sprintf(lu, "%lu", (unsigned long) u->uid);
+                char lu[DECIMAL_STR_MAX(uid_t) + 1], *slice;
+                sprintf(lu, UID_FMT, u->uid);
 
                 r = build_subslice(SPECIAL_USER_SLICE, lu, &slice);
                 if (r < 0)
@@ -369,8 +387,8 @@ static int user_start_service(User *u) {
         assert(u);
 
         if (!u->service) {
-                char lu[DECIMAL_STR_MAX(unsigned long) + 1], *service;
-                sprintf(lu, "%lu", (unsigned long) u->uid);
+                char lu[DECIMAL_STR_MAX(uid_t) + 1], *service;
+                sprintf(lu, UID_FMT, u->uid);
 
                 service = unit_name_build("user", lu, ".service");
                 if (!service)
@@ -484,6 +502,13 @@ static int user_remove_runtime_path(User *u) {
         if (!u->runtime_path)
                 return 0;
 
+        r = rm_rf(u->runtime_path, false, false, false);
+        if (r < 0)
+                log_error("Failed to remove runtime directory %s: %s", u->runtime_path, strerror(-r));
+
+        if (umount2(u->runtime_path, MNT_DETACH) < 0)
+                log_error("Failed to unmount user runtime directory %s: %m", u->runtime_path);
+
         r = rm_rf(u->runtime_path, false, true, false);
         if (r < 0)
                 log_error("Failed to remove runtime directory %s: %s", u->runtime_path, strerror(-r));
@@ -547,6 +572,13 @@ int user_finalize(User *u) {
         k = user_remove_runtime_path(u);
         if (k < 0)
                 r = k;
+
+        /* Clean SysV + POSIX IPC objects */
+        if (u->manager->remove_ipc) {
+                k = clean_ipc(u->uid);
+                if (k < 0)
+                        r = k;
+        }
 
         unlink(u->state_file);
         user_add_to_gc_queue(u);
@@ -681,6 +713,56 @@ int user_kill(User *u, int signo) {
         return manager_kill_unit(u->manager, u->slice, KILL_ALL, signo, NULL);
 }
 
+void user_elect_display(User *u) {
+        Session *graphical = NULL, *text = NULL, *other = NULL, *s;
+
+        assert(u);
+
+        /* This elects a primary session for each user, which we call
+         * the "display". We try to keep the assignment stable, but we
+         * "upgrade" to better choices. */
+
+        LIST_FOREACH(sessions_by_user, s, u->sessions) {
+
+                if (s->class != SESSION_USER)
+                        continue;
+
+                if (s->stopping)
+                        continue;
+
+                if (SESSION_TYPE_IS_GRAPHICAL(s->type))
+                        graphical = s;
+                else if (s->type == SESSION_TTY)
+                        text = s;
+                else
+                        other = s;
+        }
+
+        if (graphical &&
+            (!u->display ||
+             u->display->class != SESSION_USER ||
+             u->display->stopping ||
+             !SESSION_TYPE_IS_GRAPHICAL(u->display->type))) {
+                u->display = graphical;
+                return;
+        }
+
+        if (text &&
+            (!u->display ||
+             u->display->class != SESSION_USER ||
+             u->display->stopping ||
+             u->display->type != SESSION_TTY)) {
+                u->display = text;
+                return;
+        }
+
+        if (other &&
+            (!u->display ||
+             u->display->class != SESSION_USER ||
+             u->display->stopping))
+                u->display = other;
+}
+
 static const char* const user_state_table[_USER_STATE_MAX] = {
         [USER_OFFLINE] = "offline",
         [USER_OPENING] = "opening",
@@ -691,3 +773,57 @@ static const char* const user_state_table[_USER_STATE_MAX] = {
 };
 
 DEFINE_STRING_TABLE_LOOKUP(user_state, UserState);
+
+int config_parse_tmpfs_size(
+                const char* unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        size_t *sz = data;
+        const char *e;
+        int r;
+
+        assert(filename);
+        assert(lvalue);
+        assert(rvalue);
+        assert(data);
+
+        e = endswith(rvalue, "%");
+        if (e) {
+                unsigned long ul;
+                char *f;
+
+                errno = 0;
+                ul = strtoul(rvalue, &f, 10);
+                if (errno != 0 || f != e) {
+                        log_syntax(unit, LOG_ERR, filename, line, errno ? errno : EINVAL, "Failed to parse percentage value, ignoring: %s", rvalue);
+                        return 0;
+                }
+
+                if (ul <= 0 || ul >= 100) {
+                        log_syntax(unit, LOG_ERR, filename, line, errno ? errno : EINVAL, "Percentage value out of range, ignoring: %s", rvalue);
+                        return 0;
+                }
+
+                *sz = PAGE_ALIGN((size_t) ((physical_memory() * (uint64_t) ul) / (uint64_t) 100));
+        } else {
+                off_t o;
+
+                r = parse_size(rvalue, 1024, &o);
+                if (r < 0 || (off_t) (size_t) o != o) {
+                        log_syntax(unit, LOG_ERR, filename, line, r < 0 ? -r : ERANGE, "Failed to parse size value, ignoring: %s", rvalue);
+                        return 0;
+                }
+
+                *sz = PAGE_ALIGN((size_t) o);
+        }
+
+        return 0;
+}

@@ -27,9 +27,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#ifdef HAVE_XATTR
 #include <sys/xattr.h>
-#endif
 #ifdef HAVE_SELINUX
 #include <selinux/selinux.h>
 #include <selinux/label.h>
@@ -77,9 +75,9 @@ static int smack_relabel_in_dev(const char *path) {
         else
                 return 0;
 
-        r = setxattr(path, "security.SMACK64", label, strlen(label), 0);
+        r = lsetxattr(path, "security.SMACK64", label, strlen(label), 0);
         if (r < 0) {
-                log_error("Smack relabeling \"%s\" %s", path, strerror(errno));
+                log_error("Smack relabeling \"%s\" %m", path);
                 return -errno;
         }
 #endif
@@ -295,6 +293,8 @@ int label_socket_set(const char *label) {
 void label_context_clear(void) {
 
 #ifdef HAVE_SELINUX
+        PROTECT_ERRNO;
+
         if (!use_selinux())
                 return;
 
@@ -305,6 +305,8 @@ void label_context_clear(void) {
 void label_socket_clear(void) {
 
 #ifdef HAVE_SELINUX
+        PROTECT_ERRNO;
+
         if (!use_selinux())
                 return;
 

@@ -20,7 +20,6 @@
   <refmeta>
     <refentrytitle>udevadm</refentrytitle>
     <manvolnum>8</manvolnum>
-    <refmiscinfo class="version"></refmiscinfo>
   </refmeta>
 
   <refnamediv>
@@ -339,32 +338,10 @@
           </listitem>
         </varlistentry>
         <varlistentry>
-          <term><option>-s</option></term>
-          <term><option>--seq-start=<replaceable>SEQNUM</replaceable></option></term>
-          <listitem>
-            <para>Wait only for events after the given sequence
-            number.</para>
-          </listitem>
-        </varlistentry>
-        <varlistentry>
-          <term><option>-e</option></term>
-          <term><option>--seq-end=<replaceable>SEQNUM</replaceable></option></term>
-          <listitem>
-            <para>Wait only for events before the given sequence number.</para>
-          </listitem>
-        </varlistentry>
-        <varlistentry>
           <term><option>-E</option></term>
           <term><option>--exit-if-exists=<replaceable>FILE</replaceable></option></term>
           <listitem>
             <para>Stop waiting if file exists.</para>
-          </listitem>
-        </varlistentry>
-        <varlistentry>
-          <term><option>-q</option></term>
-          <term><option>--quiet</option></term>
-          <listitem>
-            <para>Do not print any output, like the remaining queue entries when reaching the timeout.</para>
           </listitem>
         </varlistentry>
         <varlistentry>
@@ -594,7 +571,7 @@
     <title>See Also</title>
     <para><citerefentry>
         <refentrytitle>udev</refentrytitle><manvolnum>7</manvolnum>
-    </citerefentry>
+    </citerefentry>,
     <citerefentry>
         <refentrytitle>systemd-udevd.service</refentrytitle><manvolnum>8</manvolnum>
     </citerefentry></para>

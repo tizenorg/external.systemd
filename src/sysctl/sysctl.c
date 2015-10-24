@@ -48,12 +48,26 @@ static const char conf_file_dirs[] =
 #endif
         ;
 
-static char *normalize_sysctl(char *s) {
+static char* normalize_sysctl(char *s) {
         char *n;
 
-        for (n = s; *n; n++)
+        n = strpbrk(s, "/.");
+        /* If the first separator is a slash, the path is
+         * assumed to be normalized and slashes remain slashes
+         * and dots remains dots. */
+        if (!n || *n == '/')
+                return s;
+
+        /* Otherwise, dots become slashes and slashes become
+         * dots. Fun. */
+        while (n) {
                 if (*n == '.')
                         *n = '/';
+                else
+                        *n = '.';
+
+                n = strpbrk(n + 1, "/.");
+        }
 
         return s;
 }
@@ -65,7 +79,7 @@ static int apply_sysctl(const char *property, const char *value) {
 
         log_debug("Setting '%s' to '%s'", property, value);
 
-        p = new(char, sizeof("/proc/sys/") + strlen(property));
+        p = new(char, strlen("/proc/sys/") + strlen(property) + 1);
         if (!p)
                 return log_oom();
 
@@ -123,7 +137,7 @@ static int parse_file(Hashmap *sysctl_options, const char *path, bool ignore_eno
 
         assert(path);
 
-        r = search_and_fopen_nulstr(path, "re", conf_file_dirs, &f);
+        r = search_and_fopen_nulstr(path, "re", NULL, conf_file_dirs, &f);
         if (r < 0) {
                 if (ignore_enoent && r == -ENOENT)
                         return 0;
@@ -200,16 +214,13 @@ static int parse_file(Hashmap *sysctl_options, const char *path, bool ignore_eno
         return r;
 }
 
-static int help(void) {
-
+static void help(void) {
         printf("%s [OPTIONS...] [CONFIGURATION FILE...]\n\n"
                "Applies kernel sysctl settings.\n\n"
                "  -h --help             Show this help\n"
                "     --version          Show package version\n"
-               "     --prefix=PATH      Only apply rules that apply to paths with the specified prefix\n",
-               program_invocation_short_name);
-
-        return 0;
+               "     --prefix=PATH      Only apply rules that apply to paths with the specified prefix\n"
+               , program_invocation_short_name);
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -231,12 +242,13 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "h", options, NULL)) >= 0) {
+        while ((c = getopt_long(argc, argv, "h", options, NULL)) >= 0)
 
                 switch (c) {
 
                 case 'h':
-                        return help();
+                        help();
+                        return 0;
 
                 case ARG_VERSION:
                         puts(PACKAGE_STRING);
@@ -262,7 +274,6 @@ static int parse_argv(int argc, char *argv[]) {
                 default:
                         assert_not_reached("Unhandled option");
                 }
-        }
 
         return 1;
 }

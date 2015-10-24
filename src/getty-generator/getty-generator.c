@@ -35,19 +35,14 @@
 static const char *arg_dest = "/tmp";
 
 static int add_symlink(const char *fservice, const char *tservice) {
-        _cleanup_free_ char *from = NULL, *to = NULL;
+        char *from, *to;
         int r;
 
         assert(fservice);
         assert(tservice);
 
-        from = strappend(SYSTEM_DATA_UNIT_PATH "/", fservice);
-        if (!from)
-                return log_oom();
-
-        to = strjoin(arg_dest,"/getty.target.wants/", tservice, NULL);
-        if (!to)
-                return log_oom();
+        from = strappenda(SYSTEM_DATA_UNIT_PATH "/", fservice);
+        to = strappenda(arg_dest, "/getty.target.wants/", tservice);
 
         mkdir_parents_label(to, 0755);
 
@@ -72,7 +67,7 @@ static int add_serial_getty(const char *tty) {
 
         log_debug("Automatically adding serial getty for /dev/%s.", tty);
 
-        n = unit_name_replace_instance("serial-getty@.service", tty);
+        n = unit_name_from_path_instance("serial-getty", tty, ".service");
         if (!n)
                 return log_oom();
 
@@ -86,7 +81,7 @@ static int add_container_getty(const char *tty) {
 
         log_debug("Automatically adding container getty for /dev/pts/%s.", tty);
 
-        n = unit_name_replace_instance("container-getty@.service", tty);
+        n = unit_name_from_path_instance("container-getty", tty, ".service");
         if (!n)
                 return log_oom();
 
@@ -124,7 +119,8 @@ int main(int argc, char *argv[]) {
                 "xvc0\0"
                 "hvsi0\0"
                 "sclp_line0\0"
-                "ttysclp0\0";
+                "ttysclp0\0"
+                "3270!tty1\0";
 
         _cleanup_free_ char *active = NULL;
         const char *j;
@@ -158,14 +154,14 @@ int main(int argc, char *argv[]) {
 
                 r = getenv_for_pid(1, "container_ttys", &container_ttys);
                 if (r > 0) {
-                        char *w, *state;
+                        const char *word, *state;
                         size_t l;
 
-                        FOREACH_WORD(w, l, container_ttys, state) {
+                        FOREACH_WORD(word, l, container_ttys, state) {
                                 const char *t;
                                 char tty[l + 1];
 
-                                memcpy(tty, w, l);
+                                memcpy(tty, word, l);
                                 tty[l] = 0;
 
                                 /* First strip off /dev/ if it is specified */
@@ -188,15 +184,15 @@ int main(int argc, char *argv[]) {
         }
 
         if (read_one_line_file("/sys/class/tty/console/active", &active) >= 0) {
-                char *w, *state;
+                const char *word, *state;
                 size_t l;
 
                 /* Automatically add in a serial getty on all active
                  * kernel consoles */
-                FOREACH_WORD(w, l, active, state) {
+                FOREACH_WORD(word, l, active, state) {
                         _cleanup_free_ char *tty = NULL;
 
-                        tty = strndup(w, l);
+                        tty = strndup(word, l);
                         if (!tty) {
                                 log_oom();
                                 return EXIT_FAILURE;
@@ -220,14 +216,9 @@ int main(int argc, char *argv[]) {
         /* Automatically add in a serial getty on the first
          * virtualizer console */
         NULSTR_FOREACH(j, virtualization_consoles) {
-                _cleanup_free_ char *p = NULL;
+                char *p;
 
-                p = strappend("/sys/class/tty/", j);
-                if (!p) {
-                        log_oom();
-                        return EXIT_FAILURE;
-                }
-
+                p = strappenda("/sys/class/tty/", j);
                 if (access(p, F_OK) < 0)
                         continue;
 

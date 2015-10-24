@@ -42,6 +42,7 @@
 #define BUS_ERROR_NO_SUCH_MACHINE "org.freedesktop.machine1.NoSuchMachine"
 #define BUS_ERROR_NO_MACHINE_FOR_PID "org.freedesktop.machine1.NoMachineForPID"
 #define BUS_ERROR_MACHINE_EXISTS "org.freedesktop.machine1.MachineExists"
+#define BUS_ERROR_NO_PRIVATE_NETWORKING "org.freedesktop.machine1.NoPrivateNetworking"
 
 #define BUS_ERROR_NO_SUCH_SESSION "org.freedesktop.login1.NoSuchSession"
 #define BUS_ERROR_NO_SESSION_FOR_PID "org.freedesktop.login1.NoSessionForPID"
@@ -55,4 +56,14 @@
 #define BUS_ERROR_OPERATION_IN_PROGRESS "org.freedesktop.login1.OperationInProgress"
 #define BUS_ERROR_SLEEP_VERB_NOT_SUPPORTED "org.freedesktop.login1.SleepVerbNotSupported"
 
+#define BUS_ERROR_AUTOMATIC_TIME_SYNC_ENABLED "org.freedesktop.timedate1.AutomaticTimeSyncEnabled"
+
 #define BUS_ERROR_NO_SUCH_PROCESS "org.freedesktop.systemd1.NoSuchProcess"
+
+#define BUS_ERROR_NO_NAME_SERVERS "org.freedesktop.resolve1.NoNameServers"
+#define BUS_ERROR_INVALID_REPLY "org.freedesktop.resolve1.InvalidReply"
+#define BUS_ERROR_NO_SUCH_RR "org.freedesktop.resolve1.NoSuchRR"
+#define BUS_ERROR_NO_RESOURCES "org.freedesktop.resolve1.NoResources"
+#define BUS_ERROR_CNAME_LOOP "org.freedesktop.resolve1.CNameLoop"
+#define BUS_ERROR_ABORTED "org.freedesktop.resolve1.Aborted"
+#define _BUS_ERROR_DNS "org.freedesktop.resolve1.DnsError."

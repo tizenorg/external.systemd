@@ -52,7 +52,7 @@ typedef struct ConfigTableItem {
 } ConfigTableItem;
 
 /* Wraps information for parsing a specific configuration variable, to
- * ve srored in a gperf perfect hashtable */
+ * be stored in a gperf perfect hashtable */
 typedef struct ConfigPerfItem {
         const char *section_and_lvalue; /* Section + "." + name of the variable */
         ConfigParserCallback parse;     /* Function that is called to parse the variable's value */
@@ -65,7 +65,7 @@ typedef const ConfigPerfItem* (*ConfigPerfItemLookup)(const char *section_and_lv
 
 /* Prototype for a generic high-level lookup function */
 typedef int (*ConfigItemLookup)(
-                void *table,
+                const void *table,
                 const char *section,
                 const char *lvalue,
                 ConfigParserCallback *func,
@@ -75,20 +75,21 @@ typedef int (*ConfigItemLookup)(
 
 /* Linear table search implementation of ConfigItemLookup, based on
  * ConfigTableItem arrays */
-int config_item_table_lookup(void *table, const char *section, const char *lvalue, ConfigParserCallback *func, int *ltype, void **data, void *userdata);
+int config_item_table_lookup(const void *table, const char *section, const char *lvalue, ConfigParserCallback *func, int *ltype, void **data, void *userdata);
 
 /* gperf implementation of ConfigItemLookup, based on gperf
  * ConfigPerfItem tables */
-int config_item_perf_lookup(void *table, const char *section, const char *lvalue, ConfigParserCallback *func, int *ltype, void **data, void *userdata);
+int config_item_perf_lookup(const void *table, const char *section, const char *lvalue, ConfigParserCallback *func, int *ltype, void **data, void *userdata);
 
 int config_parse(const char *unit,
                  const char *filename,
                  FILE *f,
                  const char *sections,  /* nulstr */
                  ConfigItemLookup lookup,
-                 void *table,
+                 const void *table,
                  bool relaxed,
                  bool allow_include,
+                 bool warn,
                  void *userdata);
 
 /* Generic parsers */
@@ -101,17 +102,14 @@ int config_parse_iec_size(const char *unit, const char *filename, unsigned line,
 int config_parse_si_size(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_iec_off(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_bool(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_show_status(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_string(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_path(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_strv(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_path_strv(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_sec(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_nsec(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 int config_parse_mode(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_facility(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_level(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
-int config_parse_set_status(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+int config_parse_log_facility(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
+int config_parse_log_level(const char *unit, const char *filename, unsigned line, const char *section, unsigned section_line, const char *lvalue, int ltype, const char *rvalue, void *data, void *userdata);
 
 int log_syntax_internal(const char *unit, int level,
                         const char *file, unsigned line, const char *func,
@@ -123,6 +121,12 @@ int log_syntax_internal(const char *unit, int level,
                             __FILE__, __LINE__, __func__,               \
                             config_file, config_line,                   \
                             error, __VA_ARGS__)
+
+#define log_invalid_utf8(unit, level, config_file, config_line, error, rvalue) { \
+        _cleanup_free_ char *__p = utf8_escape_invalid(rvalue);                  \
+        log_syntax(unit, level, config_file, config_line, error,                 \
+                   "String is not UTF-8 clean, ignoring assignment: %s", __p);   \
+        }
 
 #define DEFINE_CONFIG_PARSE_ENUM(function,name,type,msg)                \
         int function(const char *unit,                                  \
@@ -166,7 +170,7 @@ int log_syntax_internal(const char *unit, int level,
                      void *userdata) {                                         \
                                                                                \
                 type **enums = data, *xs, x, *ys;                              \
-                char *w, *state;                                               \
+                const char *word, *state;                                      \
                 size_t l, i = 0;                                               \
                                                                                \
                 assert(filename);                                              \
@@ -177,10 +181,10 @@ int log_syntax_internal(const char *unit, int level,
                 xs = new0(type, 1);                                            \
                 *xs = invalid;                                                 \
                                                                                \
-                FOREACH_WORD(w, l, rvalue, state) {                            \
+                FOREACH_WORD(word, l, rvalue, state) {                         \
                         _cleanup_free_ char *en = NULL;                        \
                                                                                \
-                        en = strndup(w, l);                                    \
+                        en = strndup(word, l);                                 \
                         if (!en)                                               \
                                 return -ENOMEM;                                \
                                                                                \

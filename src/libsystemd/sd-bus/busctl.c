@@ -240,7 +240,7 @@ static int monitor(sd_bus *bus, char *argv[]) {
                 if (!m)
                         return log_oom();
 
-                r = sd_bus_add_match(bus, m, NULL, NULL);
+                r = sd_bus_add_match(bus, NULL, m, NULL, NULL);
                 if (r < 0) {
                         log_error("Failed to add match: %s", strerror(-r));
                         return r;
@@ -250,7 +250,7 @@ static int monitor(sd_bus *bus, char *argv[]) {
         }
 
         STRV_FOREACH(i, arg_matches) {
-                r = sd_bus_add_match(bus, *i, NULL, NULL);
+                r = sd_bus_add_match(bus, NULL, *i, NULL, NULL);
                 if (r < 0) {
                         log_error("Failed to add match: %s", strerror(-r));
                         return r;
@@ -260,7 +260,7 @@ static int monitor(sd_bus *bus, char *argv[]) {
         }
 
         if (!added_something) {
-                r = sd_bus_add_match(bus, "", NULL, NULL);
+                r = sd_bus_add_match(bus, NULL, "", NULL, NULL);
                 if (r < 0) {
                         log_error("Failed to add match: %s", strerror(-r));
                         return r;
@@ -320,7 +320,6 @@ static int status(sd_bus *bus, char *argv[]) {
 }
 
 static int help(void) {
-
         printf("%s [OPTIONS...] {COMMAND} ...\n\n"
                "Introspect the bus.\n\n"
                "  -h --help               Show this help\n"
@@ -341,8 +340,8 @@ static int help(void) {
                "  list                    List bus names\n"
                "  monitor [SERVICE...]    Show bus traffic\n"
                "  status NAME             Show name status\n"
-               "  help                    Show this help\n",
-               program_invocation_short_name);
+               "  help                    Show this help\n"
+               , program_invocation_short_name);
 
         return 0;
 }
@@ -386,7 +385,7 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "hH:M:", options, NULL)) >= 0) {
+        while ((c = getopt_long(argc, argv, "hH:M:", options, NULL)) >= 0)
 
                 switch (c) {
 
@@ -455,7 +454,6 @@ static int parse_argv(int argc, char *argv[]) {
                 default:
                         assert_not_reached("Unhandled option");
                 }
-        }
 
         if (!arg_unique && !arg_acquired && !arg_activatable)
                 arg_unique = arg_acquired = arg_activatable = true;
@@ -484,7 +482,7 @@ static int busctl_main(sd_bus *bus, int argc, char *argv[]) {
 }
 
 int main(int argc, char *argv[]) {
-        _cleanup_bus_unref_ sd_bus *bus = NULL;
+        _cleanup_bus_close_unref_ sd_bus *bus = NULL;
         int r;
 
         log_parse_environment();
@@ -494,29 +492,75 @@ int main(int argc, char *argv[]) {
         if (r <= 0)
                 goto finish;
 
-        if (arg_address) {
-                r = sd_bus_new(&bus);
+        r = sd_bus_new(&bus);
+        if (r < 0) {
+                log_error("Failed to allocate bus: %s", strerror(-r));
+                goto finish;
+        }
+
+        if (streq_ptr(argv[optind], "monitor")) {
+
+                r = sd_bus_set_monitor(bus, true);
                 if (r < 0) {
-                        log_error("Failed to allocate bus: %s", strerror(-r));
+                        log_error("Failed to set monitor mode: %s", strerror(-r));
                         goto finish;
                 }
 
+                r = sd_bus_negotiate_creds(bus, _SD_BUS_CREDS_ALL);
+                if (r < 0) {
+                        log_error("Failed to enable credentials: %s", strerror(-r));
+                        goto finish;
+                }
+
+                r = sd_bus_negotiate_timestamp(bus, true);
+                if (r < 0) {
+                        log_error("Failed to enable timestamps: %s", strerror(-r));
+                        goto finish;
+                }
+
+                r = sd_bus_negotiate_fds(bus, true);
+                if (r < 0) {
+                        log_error("Failed to enable fds: %s", strerror(-r));
+                        goto finish;
+                }
+        }
+
+        if (arg_address)
                 r = sd_bus_set_address(bus, arg_address);
-                if (r < 0) {
-                        log_error("Failed to set address: %s", strerror(-r));
-                        goto finish;
+        else {
+                switch (arg_transport) {
+
+                case BUS_TRANSPORT_LOCAL:
+                        if (arg_user)
+                                r = bus_set_address_user(bus);
+                        else
+                                r = bus_set_address_system(bus);
+                        break;
+
+                case BUS_TRANSPORT_REMOTE:
+                        r = bus_set_address_system_remote(bus, arg_host);
+                        break;
+
+                case BUS_TRANSPORT_CONTAINER:
+                        r = bus_set_address_system_container(bus, arg_host);
+                        break;
+
+                default:
+                        assert_not_reached("Hmm, unknown transport type.");
                 }
+        }
+        if (r < 0) {
+                log_error("Failed to set address: %s", strerror(-r));
+                goto finish;
+        }
 
-                r = sd_bus_set_bus_client(bus, true);
-                if (r < 0) {
-                        log_error("Failed to set bus client: %s", strerror(-r));
-                        goto finish;
-                }
+        r = sd_bus_set_bus_client(bus, true);
+        if (r < 0) {
+                log_error("Failed to set bus client: %s", strerror(-r));
+                goto finish;
+        }
 
-                r = sd_bus_start(bus);
-        } else
-                r = bus_open_transport(arg_transport, arg_host, arg_user, &bus);
-
+        r = sd_bus_start(bus);
         if (r < 0) {
                 log_error("Failed to connect to bus: %s", strerror(-r));
                 goto finish;

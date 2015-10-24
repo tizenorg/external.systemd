@@ -80,6 +80,8 @@ static void svg_header(void) {
         double h;
         struct list_sample_data *sampledata_last;
 
+        assert(head);
+
         sampledata = head;
         LIST_FIND_TAIL(link, sampledata, head);
         sampledata_last = head;
@@ -123,6 +125,7 @@ static void svg_header(void) {
         svg("<defs>\n  <style type=\"text/css\">\n    <![CDATA[\n");
 
         svg("      rect       { stroke-width: 1; }\n");
+        svg("      rect.bg    { fill: rgb(255,255,255); }\n");
         svg("      rect.cpu   { fill: rgb(64,64,240); stroke-width: 0; fill-opacity: 0.7; }\n");
         svg("      rect.wait  { fill: rgb(240,240,0); stroke-width: 0; fill-opacity: 0.7; }\n");
         svg("      rect.bi    { fill: rgb(240,128,128); stroke-width: 0; fill-opacity: 0.7; }\n");
@@ -878,21 +881,21 @@ static struct ps_struct *get_next_ps(struct ps_struct *ps) {
         return NULL;
 }
 
-static int ps_filter(struct ps_struct *ps) {
+static bool ps_filter(struct ps_struct *ps) {
         if (!arg_filter)
-                return 0;
+                return false;
 
         /* can't draw data when there is only 1 sample (need start + stop) */
         if (ps->first == ps->last)
-                return -1;
+                return true;
 
         /* don't filter kthreadd */
         if (ps->pid == 2)
-                return 0;
+                return false;
 
         /* drop stuff that doesn't use any real CPU time */
         if (ps->total <= 0.001)
-                return -1;
+                return true;
 
         return 0;
 }
@@ -1270,6 +1273,7 @@ void svg_do(const char *build) {
 
         /* after this, we can draw the header with proper sizing */
         svg_header();
+        svg("<rect class=\"bg\" width=\"100%%\" height=\"100%%\" />\n\n");
 
         svg("<g transform=\"translate(10,400)\">\n");
         svg_io_bi_bar();

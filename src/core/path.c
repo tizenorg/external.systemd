@@ -99,7 +99,8 @@ int path_spec_watch(PathSpec *s, sd_event_io_handler_t handler) {
                                 break;
                         }
 
-                        log_warning("Failed to add watch on %s: %m", s->path);
+                        log_warning("Failed to add watch on %s: %s", s->path,
+                                    errno == ENOSPC ? "too many watches" : strerror(-r));
                         r = -errno;
                         if (cut)
                                 *cut = tmp;
@@ -152,11 +153,7 @@ void path_spec_unwatch(PathSpec *s) {
         assert(s);
 
         s->event_source = sd_event_source_unref(s->event_source);
-
-        if (s->inotify_fd >= 0) {
-                close_nointr_nofail(s->inotify_fd);
-                s->inotify_fd = -1;
-        }
+        s->inotify_fd = safe_close(s->inotify_fd);
 }
 
 int path_spec_fd_event(PathSpec *s, uint32_t revents) {
@@ -761,16 +758,16 @@ DEFINE_STRING_TABLE_LOOKUP(path_state, PathState);
 static const char* const path_type_table[_PATH_TYPE_MAX] = {
         [PATH_EXISTS] = "PathExists",
         [PATH_EXISTS_GLOB] = "PathExistsGlob",
+        [PATH_DIRECTORY_NOT_EMPTY] = "DirectoryNotEmpty",
         [PATH_CHANGED] = "PathChanged",
         [PATH_MODIFIED] = "PathModified",
-        [PATH_DIRECTORY_NOT_EMPTY] = "DirectoryNotEmpty"
 };
 
 DEFINE_STRING_TABLE_LOOKUP(path_type, PathType);
 
 static const char* const path_result_table[_PATH_RESULT_MAX] = {
         [PATH_SUCCESS] = "success",
-        [PATH_FAILURE_RESOURCES] = "resources"
+        [PATH_FAILURE_RESOURCES] = "resources",
 };
 
 DEFINE_STRING_TABLE_LOOKUP(path_result, PathResult);

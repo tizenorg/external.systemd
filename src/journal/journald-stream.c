@@ -35,6 +35,7 @@
 #include "journald-syslog.h"
 #include "journald-kmsg.h"
 #include "journald-console.h"
+#include "journald-wall.h"
 
 #define STDOUT_STREAMS_MAX 4096
 
@@ -105,6 +106,9 @@ static int stdout_stream_log(StdoutStream *s, const char *p) {
 
         if (s->forward_to_console || s->server->forward_to_console)
                 server_forward_console(s->server, priority, s->identifier, p, &s->ucred);
+
+        if (s->server->forward_to_wall)
+                server_forward_wall(s->server, priority, s->identifier, p, &s->ucred);
 
         IOVEC_SET_STRING(iovec[n++], "_TRANSPORT=stdout");
 
@@ -337,8 +341,7 @@ void stdout_stream_free(StdoutStream *s) {
                 s->event_source = sd_event_source_unref(s->event_source);
         }
 
-        if (s->fd >= 0)
-                close_nointr_nofail(s->fd);
+        safe_close(s->fd);
 
 #ifdef HAVE_SELINUX
         if (s->security_context)
@@ -373,13 +376,13 @@ static int stdout_stream_new(sd_event_source *es, int listen_fd, uint32_t revent
 
         if (s->n_stdout_streams >= STDOUT_STREAMS_MAX) {
                 log_warning("Too many stdout streams, refusing connection.");
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return 0;
         }
 
         stream = new0(StdoutStream, 1);
         if (!stream) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return log_oom();
         }
 
@@ -447,14 +450,14 @@ int server_open_stdout_socket(Server *s) {
 
                 r = bind(s->stdout_fd, &sa.sa, offsetof(union sockaddr_union, un.sun_path) + strlen(sa.un.sun_path));
                 if (r < 0) {
-                        log_error("bind() failed: %m");
+                        log_error("bind(%s) failed: %m", sa.un.sun_path);
                         return -errno;
                 }
 
                 chmod(sa.un.sun_path, 0666);
 
                 if (listen(s->stdout_fd, SOMAXCONN) < 0) {
-                        log_error("listen() failed: %m");
+                        log_error("listen(%s) failed: %m", sa.un.sun_path);
                         return -errno;
                 }
         } else

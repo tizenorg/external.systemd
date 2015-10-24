@@ -196,7 +196,7 @@ int main(int argc, char *argv[]) {
 
         assert_se(sd_event_add_io(e, &x, a[0], EPOLLIN, io_handler, INT_TO_PTR('a')) >= 0);
         assert_se(sd_event_add_io(e, &y, b[0], EPOLLIN, io_handler, INT_TO_PTR('b')) >= 0);
-        assert_se(sd_event_add_monotonic(e, &z, 0, 0, time_handler, INT_TO_PTR('c')) >= 0);
+        assert_se(sd_event_add_time(e, &z, CLOCK_MONOTONIC, 0, 0, time_handler, INT_TO_PTR('c')) >= 0);
         assert_se(sd_event_add_exit(e, &q, exit_handler, INT_TO_PTR('g')) >= 0);
 
         assert_se(sd_event_source_set_priority(x, 99) >= 0);
@@ -205,6 +205,10 @@ int main(int argc, char *argv[]) {
         assert_se(sd_event_source_set_priority(z, 50) >= 0);
         assert_se(sd_event_source_set_enabled(z, SD_EVENT_ONESHOT) >= 0);
         assert_se(sd_event_source_set_prepare(z, prepare_handler) >= 0);
+
+        /* Test for floating event sources */
+        assert_se(sigprocmask_many(SIG_BLOCK, SIGRTMIN+1, -1) == 0);
+        assert_se(sd_event_add_signal(e, NULL, SIGRTMIN+1, NULL, NULL) >= 0);
 
         assert_se(write(a[1], &ch, 1) >= 0);
         assert_se(write(b[1], &ch, 1) >= 0);
@@ -239,10 +243,10 @@ int main(int argc, char *argv[]) {
 
         sd_event_unref(e);
 
-        close_pipe(a);
-        close_pipe(b);
-        close_pipe(d);
-        close_pipe(k);
+        safe_close_pair(a);
+        safe_close_pair(b);
+        safe_close_pair(d);
+        safe_close_pair(k);
 
         return 0;
 }

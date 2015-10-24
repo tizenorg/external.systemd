@@ -26,6 +26,7 @@
 #include "strv.h"
 #include "macro.h"
 #include "def.h"
+#include "path-util.h"
 #include "missing.h"
 
 #include "sd-event.h"
@@ -42,7 +43,9 @@ static int name_owner_change_callback(sd_bus *bus, sd_bus_message *m, void *user
         assert(m);
         assert(e);
 
+        sd_bus_close(bus);
         sd_event_exit(e, 0);
+
         return 1;
 }
 
@@ -76,7 +79,7 @@ int bus_async_unregister_and_exit(sd_event *e, sd_bus *bus, const char *name) {
         if (r < 0)
                 return -ENOMEM;
 
-        r = sd_bus_add_match(bus, match, name_owner_change_callback, e);
+        r = sd_bus_add_match(bus, NULL, match, name_owner_change_callback, e);
         if (r < 0)
                 return r;
 
@@ -120,11 +123,30 @@ int bus_event_loop_with_idle(
                         return r;
 
                 if (r == 0 && !exiting) {
-                        r = bus_async_unregister_and_exit(e, bus, name);
+
+                        r = sd_bus_try_close(bus);
+                        if (r == -EBUSY)
+                                continue;
+
+                        if (r == -ENOTSUP) {
+                                /* Fallback for dbus1 connections: we
+                                 * unregister the name and wait for
+                                 * the response to come through for
+                                 * it */
+
+                                r = bus_async_unregister_and_exit(e, bus, name);
+                                if (r < 0)
+                                        return r;
+
+                                exiting = true;
+                                continue;
+                        }
+
                         if (r < 0)
                                 return r;
 
-                        exiting = true;
+                        sd_event_exit(e, 0);
+                        break;
                 }
         }
 
@@ -162,44 +184,35 @@ int bus_name_has_owner(sd_bus *c, const char *name, sd_bus_error *error) {
 }
 
 int bus_verify_polkit(
-                sd_bus *bus,
-                sd_bus_message *m,
+                sd_bus_message *call,
+                int capability,
                 const char *action,
                 bool interactive,
                 bool *_challenge,
                 sd_bus_error *e) {
 
-        _cleanup_bus_creds_unref_ sd_bus_creds *creds = NULL;
-        uid_t uid;
         int r;
 
-        assert(bus);
-        assert(m);
+        assert(call);
         assert(action);
 
-        r = sd_bus_query_sender_creds(m, SD_BUS_CREDS_UID, &creds);
+        r = sd_bus_query_sender_privilege(call, capability);
         if (r < 0)
                 return r;
-
-        r = sd_bus_creds_get_uid(creds, &uid);
-        if (r < 0)
-                return r;
-
-        if (uid == 0)
+        else if (r > 0)
                 return 1;
-
 #ifdef ENABLE_POLKIT
         else {
                 _cleanup_bus_message_unref_ sd_bus_message *reply = NULL;
                 int authorized = false, challenge = false;
                 const char *sender;
 
-                sender = sd_bus_message_get_sender(m);
+                sender = sd_bus_message_get_sender(call);
                 if (!sender)
                         return -EBADMSG;
 
                 r = sd_bus_call_method(
-                                bus,
+                                call->bus,
                                 "org.freedesktop.PolicyKit1",
                                 "/org/freedesktop/PolicyKit1/Authority",
                                 "org.freedesktop.PolicyKit1.Authority",
@@ -250,17 +263,16 @@ typedef struct AsyncPolkitQuery {
         sd_bus_message *request, *reply;
         sd_bus_message_handler_t callback;
         void *userdata;
-        uint64_t serial;
+        sd_bus_slot *slot;
         Hashmap *registry;
 } AsyncPolkitQuery;
 
-static void async_polkit_query_free(sd_bus *b, AsyncPolkitQuery *q) {
+static void async_polkit_query_free(AsyncPolkitQuery *q) {
 
         if (!q)
                 return;
 
-        if (q->serial > 0 && b)
-                sd_bus_call_async_cancel(b, q->serial);
+        sd_bus_slot_unref(q->slot);
 
         if (q->registry && q->request)
                 hashmap_remove(q->registry, q->request);
@@ -280,8 +292,8 @@ static int async_polkit_callback(sd_bus *bus, sd_bus_message *reply, void *userd
         assert(reply);
         assert(q);
 
+        q->slot = sd_bus_slot_unref(q->slot);
         q->reply = sd_bus_message_ref(reply);
-        q->serial = 0;
 
         r = sd_bus_message_rewind(q->request, true);
         if (r < 0) {
@@ -293,38 +305,36 @@ static int async_polkit_callback(sd_bus *bus, sd_bus_message *reply, void *userd
         r = bus_maybe_reply_error(q->request, r, &error_buffer);
 
 finish:
-        async_polkit_query_free(bus, q);
+        async_polkit_query_free(q);
+
         return r;
 }
 
 #endif
 
 int bus_verify_polkit_async(
-                sd_bus *bus,
-                Hashmap **registry,
-                sd_bus_message *m,
+                sd_bus_message *call,
+                int capability,
                 const char *action,
                 bool interactive,
-                sd_bus_error *error,
-                sd_bus_message_handler_t callback,
-                void *userdata) {
+                Hashmap **registry,
+                sd_bus_error *error) {
 
 #ifdef ENABLE_POLKIT
         _cleanup_bus_message_unref_ sd_bus_message *pk = NULL;
         AsyncPolkitQuery *q;
         const char *sender;
+        sd_bus_message_handler_t callback;
+        void *userdata;
 #endif
-        _cleanup_bus_creds_unref_ sd_bus_creds *creds = NULL;
-        uid_t uid;
         int r;
 
-        assert(bus);
-        assert(registry);
-        assert(m);
+        assert(call);
         assert(action);
+        assert(registry);
 
 #ifdef ENABLE_POLKIT
-        q = hashmap_get(*registry, m);
+        q = hashmap_get(*registry, call);
         if (q) {
                 int authorized, challenge;
 
@@ -361,19 +371,23 @@ int bus_verify_polkit_async(
         }
 #endif
 
-        r = sd_bus_query_sender_creds(m, SD_BUS_CREDS_UID, &creds);
+        r = sd_bus_query_sender_privilege(call, capability);
         if (r < 0)
                 return r;
-
-        r = sd_bus_creds_get_uid(creds, &uid);
-        if (r < 0)
-                return r;
-
-        if (uid == 0)
+        else if (r > 0)
                 return 1;
 
 #ifdef ENABLE_POLKIT
-        sender = sd_bus_message_get_sender(m);
+        if (sd_bus_get_current_message(call->bus) != call)
+                return -EINVAL;
+
+        callback = sd_bus_get_current_handler(call->bus);
+        if (!callback)
+                return -EINVAL;
+
+        userdata = sd_bus_get_current_userdata(call->bus);
+
+        sender = sd_bus_message_get_sender(call);
         if (!sender)
                 return -EBADMSG;
 
@@ -382,7 +396,7 @@ int bus_verify_polkit_async(
                 return r;
 
         r = sd_bus_message_new_method_call(
-                        bus,
+                        call->bus,
                         &pk,
                         "org.freedesktop.PolicyKit1",
                         "/org/freedesktop/PolicyKit1/Authority",
@@ -406,21 +420,21 @@ int bus_verify_polkit_async(
         if (!q)
                 return -ENOMEM;
 
-        q->request = sd_bus_message_ref(m);
+        q->request = sd_bus_message_ref(call);
         q->callback = callback;
         q->userdata = userdata;
 
-        r = hashmap_put(*registry, m, q);
+        r = hashmap_put(*registry, call, q);
         if (r < 0) {
-                async_polkit_query_free(bus, q);
+                async_polkit_query_free(q);
                 return r;
         }
 
         q->registry = *registry;
 
-        r = sd_bus_call_async(bus, pk, async_polkit_callback, q, 0, &q->serial);
+        r = sd_bus_call_async(call->bus, &q->slot, pk, async_polkit_callback, q, 0);
         if (r < 0) {
-                async_polkit_query_free(bus, q);
+                async_polkit_query_free(q);
                 return r;
         }
 
@@ -430,12 +444,12 @@ int bus_verify_polkit_async(
         return -EACCES;
 }
 
-void bus_verify_polkit_async_registry_free(sd_bus *bus, Hashmap *registry) {
+void bus_verify_polkit_async_registry_free(Hashmap *registry) {
 #ifdef ENABLE_POLKIT
         AsyncPolkitQuery *q;
 
         while ((q = hashmap_steal_first(registry)))
-                async_polkit_query_free(bus, q);
+                async_polkit_query_free(q);
 
         hashmap_free(registry);
 #endif
@@ -536,7 +550,7 @@ int bus_open_user_systemd(sd_bus **_bus) {
         if (r < 0)
                 return r;
 
-        if (asprintf(&bus->address, KERNEL_USER_BUS_FMT, (unsigned long) getuid()) < 0)
+        if (asprintf(&bus->address, KERNEL_USER_BUS_FMT, getuid()) < 0)
                 return -ENOMEM;
 
         bus->bus_client = true;
@@ -1103,20 +1117,6 @@ int bus_open_transport_systemd(BusTransport transport, const char *host, bool us
         return r;
 }
 
-int bus_property_get_tristate(
-                sd_bus *bus,
-                const char *path,
-                const char *interface,
-                const char *property,
-                sd_bus_message *reply,
-                void *userdata,
-                sd_bus_error *error) {
-
-        int *tristate = userdata;
-
-        return sd_bus_message_append(reply, "b", *tristate > 0);
-}
-
 int bus_property_get_bool(
                 sd_bus *bus,
                 const char *path,
@@ -1178,18 +1178,20 @@ int bus_property_get_ulong(
 #endif
 
 int bus_log_parse_error(int r) {
-        log_error("Failed to parse message: %s", strerror(-r));
+        log_error("Failed to parse bus message: %s", strerror(-r));
         return r;
 }
 
 int bus_log_create_error(int r) {
-        log_error("Failed to create message: %s", strerror(-r));
+        log_error("Failed to create bus message: %s", strerror(-r));
         return r;
 }
 
 int bus_parse_unit_info(sd_bus_message *message, UnitInfo *u) {
         assert(message);
         assert(u);
+
+        u->machine = NULL;
 
         return sd_bus_message_read(
                         message,
@@ -1229,4 +1231,232 @@ int bus_maybe_reply_error(sd_bus_message *m, int r, sd_bus_error *error) {
                   bus_error_message(error, r));
 
         return 1;
+}
+
+int bus_append_unit_property_assignment(sd_bus_message *m, const char *assignment) {
+        const char *eq, *field;
+        int r;
+
+        assert(m);
+        assert(assignment);
+
+        eq = strchr(assignment, '=');
+        if (!eq) {
+                log_error("Not an assignment: %s", assignment);
+                return -EINVAL;
+        }
+
+        field = strndupa(assignment, eq - assignment);
+        eq ++;
+
+        if (streq(field, "CPUQuota")) {
+
+                if (isempty(eq)) {
+
+                        r = sd_bus_message_append_basic(m, SD_BUS_TYPE_STRING, "CPUQuotaPerSecUSec");
+                        if (r < 0)
+                                return bus_log_create_error(r);
+
+                        r = sd_bus_message_append(m, "v", "t", USEC_INFINITY);
+
+                } else if (endswith(eq, "%")) {
+                        double percent;
+
+                        if (sscanf(eq, "%lf%%", &percent) != 1 || percent <= 0) {
+                                log_error("CPU quota '%s' invalid.", eq);
+                                return -EINVAL;
+                        }
+
+                        r = sd_bus_message_append_basic(m, SD_BUS_TYPE_STRING, "CPUQuotaPerSecUSec");
+                        if (r < 0)
+                                return bus_log_create_error(r);
+
+                        r = sd_bus_message_append(m, "v", "t", (usec_t) percent * USEC_PER_SEC / 100);
+                } else {
+                        log_error("CPU quota needs to be in percent.");
+                        return -EINVAL;
+                }
+
+                if (r < 0)
+                        return bus_log_create_error(r);
+
+                return 0;
+        }
+
+        r = sd_bus_message_append_basic(m, SD_BUS_TYPE_STRING, field);
+        if (r < 0)
+                return bus_log_create_error(r);
+
+        if (STR_IN_SET(field,
+                       "CPUAccounting", "MemoryAccounting", "BlockIOAccounting",
+                       "SendSIGHUP", "SendSIGKILL")) {
+
+                r = parse_boolean(eq);
+                if (r < 0) {
+                        log_error("Failed to parse boolean assignment %s.", assignment);
+                        return -EINVAL;
+                }
+
+                r = sd_bus_message_append(m, "v", "b", r);
+
+        } else if (streq(field, "MemoryLimit")) {
+                off_t bytes;
+
+                r = parse_size(eq, 1024, &bytes);
+                if (r < 0) {
+                        log_error("Failed to parse bytes specification %s", assignment);
+                        return -EINVAL;
+                }
+
+                r = sd_bus_message_append(m, "v", "t", (uint64_t) bytes);
+
+        } else if (STR_IN_SET(field, "CPUShares", "BlockIOWeight")) {
+                uint64_t u;
+
+                r = safe_atou64(eq, &u);
+                if (r < 0) {
+                        log_error("Failed to parse %s value %s.", field, eq);
+                        return -EINVAL;
+                }
+
+                r = sd_bus_message_append(m, "v", "t", u);
+
+        } else if (STR_IN_SET(field, "User", "Group", "DevicePolicy", "KillMode"))
+                r = sd_bus_message_append(m, "v", "s", eq);
+
+        else if (streq(field, "DeviceAllow")) {
+
+                if (isempty(eq))
+                        r = sd_bus_message_append(m, "v", "a(ss)", 0);
+                else {
+                        const char *path, *rwm, *e;
+
+                        e = strchr(eq, ' ');
+                        if (e) {
+                                path = strndupa(eq, e - eq);
+                                rwm = e+1;
+                        } else {
+                                path = eq;
+                                rwm = "";
+                        }
+
+                        if (!path_startswith(path, "/dev")) {
+                                log_error("%s is not a device file in /dev.", path);
+                                return -EINVAL;
+                        }
+
+                        r = sd_bus_message_append(m, "v", "a(ss)", 1, path, rwm);
+                }
+
+        } else if (STR_IN_SET(field, "BlockIOReadBandwidth", "BlockIOWriteBandwidth")) {
+
+                if (isempty(eq))
+                        r = sd_bus_message_append(m, "v", "a(st)", 0);
+                else {
+                        const char *path, *bandwidth, *e;
+                        off_t bytes;
+
+                        e = strchr(eq, ' ');
+                        if (e) {
+                                path = strndupa(eq, e - eq);
+                                bandwidth = e+1;
+                        } else {
+                                log_error("Failed to parse %s value %s.", field, eq);
+                                return -EINVAL;
+                        }
+
+                        if (!path_startswith(path, "/dev")) {
+                                log_error("%s is not a device file in /dev.", path);
+                                return -EINVAL;
+                        }
+
+                        r = parse_size(bandwidth, 1000, &bytes);
+                        if (r < 0) {
+                                log_error("Failed to parse byte value %s.", bandwidth);
+                                return -EINVAL;
+                        }
+
+                        r = sd_bus_message_append(m, "v", "a(st)", 1, path, (uint64_t) bytes);
+                }
+
+        } else if (streq(field, "BlockIODeviceWeight")) {
+
+                if (isempty(eq))
+                        r = sd_bus_message_append(m, "v", "a(st)", 0);
+                else {
+                        const char *path, *weight, *e;
+                        uint64_t u;
+
+                        e = strchr(eq, ' ');
+                        if (e) {
+                                path = strndupa(eq, e - eq);
+                                weight = e+1;
+                        } else {
+                                log_error("Failed to parse %s value %s.", field, eq);
+                                return -EINVAL;
+                        }
+
+                        if (!path_startswith(path, "/dev")) {
+                                log_error("%s is not a device file in /dev.", path);
+                                return -EINVAL;
+                        }
+
+                        r = safe_atou64(weight, &u);
+                        if (r < 0) {
+                                log_error("Failed to parse %s value %s.", field, weight);
+                                return -EINVAL;
+                        }
+                        r = sd_bus_message_append(m, "v", "a(st)", path, u);
+                }
+
+        } else if (rlimit_from_string(field) >= 0) {
+                uint64_t rl;
+
+                if (streq(eq, "infinity"))
+                        rl = (uint64_t) -1;
+                else {
+                        r = safe_atou64(eq, &rl);
+                        if (r < 0) {
+                                log_error("Invalid resource limit: %s", eq);
+                                return -EINVAL;
+                        }
+                }
+
+                r = sd_bus_message_append(m, "v", "t", rl);
+
+        } else if (streq(field, "Nice")) {
+                int32_t i;
+
+                r = safe_atoi32(eq, &i);
+                if (r < 0) {
+                        log_error("Failed to parse %s value %s.", field, eq);
+                        return -EINVAL;
+                }
+
+                r = sd_bus_message_append(m, "v", "i", i);
+
+        } else if (streq(field, "Environment")) {
+
+                r = sd_bus_message_append(m, "v", "as", 1, eq);
+
+        } else if (streq(field, "KillSignal")) {
+                int sig;
+
+                sig = signal_from_string_try_harder(eq);
+                if (sig < 0) {
+                        log_error("Failed to parse %s value %s.", field, eq);
+                        return -EINVAL;
+                }
+
+                r = sd_bus_message_append(m, "v", "i", sig);
+
+        } else {
+                log_error("Unknown assignment %s.", assignment);
+                return -EINVAL;
+        }
+
+        if (r < 0)
+                return bus_log_create_error(r);
+
+        return 0;
 }

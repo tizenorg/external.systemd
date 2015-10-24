@@ -32,6 +32,7 @@ typedef struct Socket Socket;
 typedef enum SocketState {
         SOCKET_DEAD,
         SOCKET_START_PRE,
+        SOCKET_START_CHOWN,
         SOCKET_START_POST,
         SOCKET_LISTENING,
         SOCKET_RUNNING,
@@ -48,6 +49,7 @@ typedef enum SocketState {
 
 typedef enum SocketExecCommand {
         SOCKET_EXEC_START_PRE,
+        SOCKET_EXEC_START_CHOWN,
         SOCKET_EXEC_START_POST,
         SOCKET_EXEC_STOP_PRE,
         SOCKET_EXEC_STOP_POST,
@@ -99,7 +101,11 @@ struct Socket {
         unsigned max_connections;
 
         unsigned backlog;
+        unsigned keep_alive_cnt;
         usec_t timeout_usec;
+        usec_t keep_alive_time;
+        usec_t keep_alive_interval;
+        usec_t defer_accept;
 
         ExecCommand* exec_command[_SOCKET_EXEC_COMMAND_MAX];
         ExecContext exec_context;
@@ -125,10 +131,14 @@ struct Socket {
 
         SocketResult result;
 
+        char **symlinks;
+
         bool accept;
+        bool remove_on_stop;
 
         /* Socket options */
         bool keep_alive;
+        bool no_delay;
         bool free_bind;
         bool transparent;
         bool broadcast;
@@ -154,6 +164,8 @@ struct Socket {
         char *smack;
         char *smack_ip_in;
         char *smack_ip_out;
+
+        char *user, *group;
 };
 
 /* Called from the service code when collecting fds */
@@ -176,3 +188,5 @@ const char* socket_result_to_string(SocketResult i) _const_;
 SocketResult socket_result_from_string(const char *s) _pure_;
 
 const char* socket_port_type_to_string(SocketPort *p) _pure_;
+
+int socket_instantiate_service(Socket *s);

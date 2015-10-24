@@ -7,5 +7,39 @@
     <filesystem path="/sbin/*" label="_" exec_label="none" />
     <filesystem path="/usr/bin/*" label="_" exec_label="none" />
     <filesystem path="/usr/sbin/*" label="_" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-journald" exec_label="^" />
+    <filesystem path="/usr/lib/systemd/systemd" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-ac-power" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-activate" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-bootchart" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-bus-proxyd" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-fsck" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-initctl" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-logind" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-modules-load" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-multi-seat-x" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-readahead" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-remount-fs" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-reply-password" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-shutdown" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-shutdownd" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-sleep" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-socket-proxyd" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-sysctl" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-udevd" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-update-done" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-update-utmp" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-user-sessions" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/system-generators/systemd-debug-generator" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/system-generators/systemd-fstab-generator" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/system-generators/systemd-getty-generator" exec_label="none" />
+    <filesystem path="/usr/lib/systemd/systemd-cgroups-agent" label="_" exec_label="systemd" />
+    <filesystem path="/usr/lib/udev/accelerometer" exec_label="none" />
+    <filesystem path="/usr/lib/udev/ata_id" exec_label="none" />
+    <filesystem path="/usr/lib/udev/cdrom_id" exec_label="none" />
+    <filesystem path="/usr/lib/udev/collect" exec_label="none" />
+    <filesystem path="/usr/lib/udev/mtd_probe" exec_label="none" />
+    <filesystem path="/usr/lib/udev/scsi_id" exec_label="none" />
+    <filesystem path="/usr/lib/udev/v4l_id" exec_label="none" />
   </assign>
 </manifest>

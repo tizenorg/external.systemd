@@ -26,17 +26,17 @@
 #include <net/ethernet.h>
 
 #include "sd-event.h"
+#include "sd-dhcp-lease.h"
 
 enum {
         DHCP_EVENT_STOP                         = 0,
-        DHCP_EVENT_NO_LEASE                     = 1,
-        DHCP_EVENT_IP_ACQUIRE                   = 2,
-        DHCP_EVENT_IP_CHANGE                    = 3,
-        DHCP_EVENT_EXPIRED                      = 4,
+        DHCP_EVENT_IP_ACQUIRE                   = 1,
+        DHCP_EVENT_IP_CHANGE                    = 2,
+        DHCP_EVENT_EXPIRED                      = 3,
+        DHCP_EVENT_RENEW                        = 4,
 };
 
 typedef struct sd_dhcp_client sd_dhcp_client;
-typedef struct sd_dhcp_lease sd_dhcp_lease;
 
 typedef void (*sd_dhcp_client_cb_t)(sd_dhcp_client *client, int event,
                                     void *userdata);
@@ -47,24 +47,21 @@ int sd_dhcp_client_set_callback(sd_dhcp_client *client, sd_dhcp_client_cb_t cb,
 int sd_dhcp_client_set_request_option(sd_dhcp_client *client, uint8_t option);
 int sd_dhcp_client_set_request_address(sd_dhcp_client *client,
                                        const struct in_addr *last_address);
+int sd_dhcp_client_set_request_broadcast(sd_dhcp_client *client, int broadcast);
 int sd_dhcp_client_set_index(sd_dhcp_client *client, int interface_index);
 int sd_dhcp_client_set_mac(sd_dhcp_client *client,
                            const struct ether_addr *addr);
+int sd_dhcp_client_set_mtu(sd_dhcp_client *client, uint32_t mtu);
+int sd_dhcp_client_set_hostname(sd_dhcp_client *client, const char *hostname);
+int sd_dhcp_client_set_vendor_class_identifier(sd_dhcp_client *client, const char *vci);
 int sd_dhcp_client_get_lease(sd_dhcp_client *client, sd_dhcp_lease **ret);
-
-sd_dhcp_lease *sd_dhcp_lease_ref(sd_dhcp_lease *lease);
-sd_dhcp_lease *sd_dhcp_lease_unref(sd_dhcp_lease *lease);
-int sd_dhcp_lease_get_address(sd_dhcp_lease *lease, struct in_addr *addr);
-int sd_dhcp_lease_get_netmask(sd_dhcp_lease *lease, struct in_addr *addr);
-int sd_dhcp_lease_get_router(sd_dhcp_lease *lease, struct in_addr *addr);
-int sd_dhcp_lease_get_dns(sd_dhcp_lease *lease, struct in_addr **addr, size_t *addr_size);
-int sd_dhcp_lease_get_mtu(sd_dhcp_lease *lease, uint16_t *mtu);
-int sd_dhcp_lease_get_domainname(sd_dhcp_lease *lease, const char **domainname);
-int sd_dhcp_lease_get_hostname(sd_dhcp_lease *lease, const char **hostname);
 
 int sd_dhcp_client_stop(sd_dhcp_client *client);
 int sd_dhcp_client_start(sd_dhcp_client *client);
-void sd_dhcp_client_free(sd_dhcp_client *client);
+
+sd_dhcp_client *sd_dhcp_client_ref(sd_dhcp_client *client);
+sd_dhcp_client *sd_dhcp_client_unref(sd_dhcp_client *client);
+
 int sd_dhcp_client_new(sd_dhcp_client **ret);
 
 int sd_dhcp_client_attach_event(sd_dhcp_client *client, sd_event *event, int priority);

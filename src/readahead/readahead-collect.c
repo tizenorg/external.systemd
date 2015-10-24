@@ -52,7 +52,7 @@
 #include <sys/fanotify.h>
 #endif
 
-#include <systemd/sd-daemon.h>
+#include "systemd/sd-daemon.h"
 
 #include "missing.h"
 #include "util.h"
@@ -176,8 +176,7 @@ finish:
         if (start != MAP_FAILED)
                 munmap(start, l);
 
-        if (fd >= 0)
-                close_nointr_nofail(fd);
+        safe_close(fd);
 
         return r;
 }
@@ -254,10 +253,10 @@ static int collect(const char *root) {
 
         assert(root);
 
-#ifndef CONFIG_TIZEN
-        if (asprintf(&pack_fn, "%s/.readahead", root) < 0) {
-#else
+#ifdef CONFIG_TIZEN
         if (asprintf(&pack_fn, "%s/.readahead", arg_savedir ? arg_savedir : root) < 0) {
+#else
+        if (asprintf(&pack_fn, "%s/.readahead", root) < 0) {
 #endif
                 r = log_oom();
                 goto finish;
@@ -497,16 +496,12 @@ static int collect(const char *root) {
                                 log_warning("readlink(%s) failed: %s", fn, strerror(-k));
 
                 next_iteration:
-                        if (m->fd >= 0)
-                                close_nointr_nofail(m->fd);
+                        safe_close(m->fd);
                 }
         }
 
 done:
-        if (fanotify_fd >= 0) {
-                close_nointr_nofail(fanotify_fd);
-                fanotify_fd = -1;
-        }
+        fanotify_fd = safe_close(fanotify_fd);
 
         log_debug("Writing Pack File...");
 
@@ -517,9 +512,9 @@ done:
         log_debug("On btrfs: %s", yes_no(on_btrfs));
 
 #ifndef CONFIG_TIZEN
-        if (asprintf(&pack_fn_new, "%s/.readahead.new", root) < 0) {
-#else
         if (asprintf(&pack_fn_new, "%s/.readahead.new", arg_savedir ? arg_savedir : root) < 0) {
+#else
+        if (asprintf(&pack_fn_new, "%s/.readahead.new", root) < 0) {
 #endif
                 r = log_oom();
                 goto finish;
@@ -600,14 +595,9 @@ done:
         log_debug("Done.");
 
 finish:
-        if (fanotify_fd >= 0)
-                close_nointr_nofail(fanotify_fd);
-
-        if (signal_fd >= 0)
-                close_nointr_nofail(signal_fd);
-
-        if (inotify_fd >= 0)
-                close_nointr_nofail(inotify_fd);
+        safe_close(fanotify_fd);
+        safe_close(signal_fd);
+        safe_close(inotify_fd);
 
         if (pack) {
                 fclose(pack);

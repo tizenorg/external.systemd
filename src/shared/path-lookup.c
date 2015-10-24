@@ -32,13 +32,6 @@
 #include "path-util.h"
 #include "path-lookup.h"
 
-static const char* const systemd_running_as_table[_SYSTEMD_RUNNING_AS_MAX] = {
-        [SYSTEMD_SYSTEM] = "system",
-        [SYSTEMD_USER] = "user"
-};
-
-DEFINE_STRING_TABLE_LOOKUP(systemd_running_as, SystemdRunningAs);
-
 int user_config_home(char **config_home) {
         const char *e;
         char *r;
@@ -127,16 +120,6 @@ static char** user_dirs(
         } else if (home) {
                 if (asprintf(&data_home, "%s/.local/share/systemd/user", home) < 0)
                         goto fail;
-
-                /* There is really no need for two unit dirs in $HOME,
-                 * except to be fully compliant with the XDG spec. We
-                 * now try to link the two dirs, so that we can
-                 * minimize disk seeks a little. Further down we'll
-                 * then filter out this link, if it is actually is
-                 * one. */
-
-                mkdir_parents_label(data_home, 0777);
-                (void) symlink("../../../.config/systemd/user", data_home);
         }
 
         e = getenv("XDG_DATA_DIRS");
@@ -198,11 +181,13 @@ int lookup_paths_init(
                 LookupPaths *p,
                 SystemdRunningAs running_as,
                 bool personal,
+                const char *root_dir,
                 const char *generator,
                 const char *generator_early,
                 const char *generator_late) {
 
         const char *e;
+        bool append = false; /* Add items from SYSTEMD_UNIT_PATH before normal directories */
 
         assert(p);
 
@@ -210,75 +195,80 @@ int lookup_paths_init(
          * vars */
         e = getenv("SYSTEMD_UNIT_PATH");
         if (e) {
+                if (endswith(e, ":")) {
+                        e = strndupa(e, strlen(e) - 1);
+                        append = true;
+                }
+
+                /* FIXME: empty components in other places should be
+                 * rejected. */
+
                 p->unit_path = path_split_and_make_absolute(e);
                 if (!p->unit_path)
                         return -ENOMEM;
         } else
                 p->unit_path = NULL;
 
-        if (strv_isempty(p->unit_path)) {
-                /* Nothing is set, so let's figure something out. */
-                strv_free(p->unit_path);
+        if (!p->unit_path || append) {
+                /* Let's figure something out. */
+
+                _cleanup_strv_free_ char **unit_path;
+                int r;
 
                 /* For the user units we include share/ in the search
-                 * path in order to comply with the XDG basedir
-                 * spec. For the system stuff we avoid such
-                 * nonsense. OTOH we include /lib in the search path
-                 * for the system stuff but avoid it for user
-                 * stuff. */
+                 * path in order to comply with the XDG basedir spec.
+                 * For the system stuff we avoid such nonsense. OTOH
+                 * we include /lib in the search path for the system
+                 * stuff but avoid it for user stuff. */
 
                 if (running_as == SYSTEMD_USER) {
-
                         if (personal)
-                                p->unit_path = user_dirs(generator, generator_early, generator_late);
+                                unit_path = user_dirs(generator, generator_early, generator_late);
                         else
-                                p->unit_path = strv_new(
-                                                /* If you modify this you also want to modify
-                                                 * systemduserunitpath= in systemd.pc.in, and
-                                                 * the arrays in user_dirs() above! */
-                                                STRV_IFNOTNULL(generator_early),
-                                                USER_CONFIG_UNIT_PATH,
-                                                "/etc/systemd/user",
-                                                "/run/systemd/user",
-                                                STRV_IFNOTNULL(generator),
-                                                "/usr/local/lib/systemd/user",
-                                                "/usr/local/share/systemd/user",
-                                                USER_DATA_UNIT_PATH,
-                                                "/usr/lib/systemd/user",
-                                                "/usr/share/systemd/user",
-                                                STRV_IFNOTNULL(generator_late),
-                                                NULL);
-
-                        if (!p->unit_path)
-                                return -ENOMEM;
-
-                } else {
-                        p->unit_path = strv_new(
+                                unit_path = strv_new(
                                         /* If you modify this you also want to modify
-                                         * systemdsystemunitpath= in systemd.pc.in! */
+                                         * systemduserunitpath= in systemd.pc.in, and
+                                         * the arrays in user_dirs() above! */
                                         STRV_IFNOTNULL(generator_early),
-                                        SYSTEM_CONFIG_UNIT_PATH,
-                                        "/etc/systemd/system",
-                                        "/run/systemd/system",
+                                        USER_CONFIG_UNIT_PATH,
+                                        "/etc/systemd/user",
+                                        "/run/systemd/user",
                                         STRV_IFNOTNULL(generator),
-                                        "/usr/local/lib/systemd/system",
-                                        SYSTEM_DATA_UNIT_PATH,
-                                        "/usr/lib/systemd/system",
-#ifdef HAVE_SPLIT_USR
-                                        "/lib/systemd/system",
-#endif
+                                        "/usr/local/lib/systemd/user",
+                                        "/usr/local/share/systemd/user",
+                                        USER_DATA_UNIT_PATH,
+                                        "/usr/lib/systemd/user",
+                                        "/usr/share/systemd/user",
                                         STRV_IFNOTNULL(generator_late),
                                         NULL);
+                } else
+                        unit_path = strv_new(
+                                /* If you modify this you also want to modify
+                                 * systemdsystemunitpath= in systemd.pc.in! */
+                                STRV_IFNOTNULL(generator_early),
+                                SYSTEM_CONFIG_UNIT_PATH,
+                                "/etc/systemd/system",
+                                "/run/systemd/system",
+                                STRV_IFNOTNULL(generator),
+                                "/usr/local/lib/systemd/system",
+                                SYSTEM_DATA_UNIT_PATH,
+                                "/usr/lib/systemd/system",
+#ifdef HAVE_SPLIT_USR
+                                "/lib/systemd/system",
+#endif
+                                STRV_IFNOTNULL(generator_late),
+                                NULL);
 
-                        if (!p->unit_path)
-                                return -ENOMEM;
-                }
+                if (!unit_path)
+                        return -ENOMEM;
+
+                r = strv_extend_strv(&p->unit_path, unit_path);
+                if (r < 0)
+                        return r;
         }
 
-        if (!path_strv_canonicalize_absolute(p->unit_path, NULL))
+        if (!path_strv_resolve_uniq(p->unit_path, root_dir))
                 return -ENOMEM;
-
-        strv_uniq(p->unit_path);
 
         if (!strv_isempty(p->unit_path)) {
                 _cleanup_free_ char *t = strv_join(p->unit_path, "\n\t");
@@ -331,14 +321,11 @@ int lookup_paths_init(
                                 return -ENOMEM;
                 }
 
-                if (!path_strv_canonicalize_absolute(p->sysvinit_path, NULL))
+                if (!path_strv_resolve_uniq(p->sysvinit_path, root_dir))
                         return -ENOMEM;
 
-                if (!path_strv_canonicalize_absolute(p->sysvrcnd_path, NULL))
+                if (!path_strv_resolve_uniq(p->sysvrcnd_path, root_dir))
                         return -ENOMEM;
-
-                strv_uniq(p->sysvinit_path);
-                strv_uniq(p->sysvrcnd_path);
 
                 if (!strv_isempty(p->sysvinit_path)) {
                         _cleanup_free_ char *t = strv_join(p->sysvinit_path, "\n\t");

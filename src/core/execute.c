@@ -69,7 +69,6 @@
 #include "ioprio.h"
 #include "securebits.h"
 #include "namespace.h"
-#include "tcpwrap.h"
 #include "exit-status.h"
 #include "missing.h"
 #include "utmp-wtmp.h"
@@ -81,7 +80,10 @@
 #include "async.h"
 #include "selinux-util.h"
 #include "errno-list.h"
+#include "af-list.h"
+#include "mkdir.h"
 #include "apparmor-util.h"
+#include "smack-util.h"
 
 #ifdef HAVE_SECCOMP
 #include "seccomp-util.h"
@@ -121,7 +123,7 @@ static int shift_fds(int fds[], unsigned n_fds) {
                         if ((nfd = fcntl(fds[i], F_DUPFD, i+3)) < 0)
                                 return -errno;
 
-                        close_nointr_nofail(fds[i]);
+                        safe_close(fds[i]);
                         fds[i] = nfd;
 
                         /* Hmm, the fd we wanted isn't free? Then
@@ -207,7 +209,7 @@ static int open_null_as(int flags, int nfd) {
 
         if (fd != nfd) {
                 r = dup2(fd, nfd) < 0 ? -errno : nfd;
-                close_nointr_nofail(fd);
+                safe_close(fd);
         } else
                 r = nfd;
 
@@ -232,12 +234,12 @@ static int connect_logger_as(const ExecContext *context, ExecOutput output, cons
 
         r = connect(fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(sa.un.sun_path));
         if (r < 0) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return -errno;
         }
 
         if (shutdown(fd, SHUT_RD) < 0) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return -errno;
         }
 
@@ -261,7 +263,7 @@ static int connect_logger_as(const ExecContext *context, ExecOutput output, cons
 
         if (fd != nfd) {
                 r = dup2(fd, nfd) < 0 ? -errno : nfd;
-                close_nointr_nofail(fd);
+                safe_close(fd);
         } else
                 r = nfd;
 
@@ -278,7 +280,7 @@ static int open_terminal_as(const char *path, mode_t mode, int nfd) {
 
         if (fd != nfd) {
                 r = dup2(fd, nfd) < 0 ? -errno : nfd;
-                close_nointr_nofail(fd);
+                safe_close(fd);
         } else
                 r = nfd;
 
@@ -332,13 +334,13 @@ static int setup_input(const ExecContext *context, int socket_fd, bool apply_tty
                                       i == EXEC_INPUT_TTY_FAIL,
                                       i == EXEC_INPUT_TTY_FORCE,
                                       false,
-                                      (usec_t) -1);
+                                      USEC_INFINITY);
                 if (fd < 0)
                         return fd;
 
                 if (fd != STDIN_FILENO) {
                         r = dup2(fd, STDIN_FILENO) < 0 ? -errno : STDIN_FILENO;
-                        close_nointr_nofail(fd);
+                        safe_close(fd);
                 } else
                         r = STDIN_FILENO;
 
@@ -502,7 +504,7 @@ static int setup_confirm_stdio(int *_saved_stdin,
         }
 
         if (fd >= 2)
-                close_nointr_nofail(fd);
+                safe_close(fd);
 
         *_saved_stdin = saved_stdin;
         *_saved_stdout = saved_stdout;
@@ -510,20 +512,15 @@ static int setup_confirm_stdio(int *_saved_stdin,
         return 0;
 
 fail:
-        if (saved_stdout >= 0)
-                close_nointr_nofail(saved_stdout);
-
-        if (saved_stdin >= 0)
-                close_nointr_nofail(saved_stdin);
-
-        if (fd >= 0)
-                close_nointr_nofail(fd);
+        safe_close(saved_stdout);
+        safe_close(saved_stdin);
+        safe_close(fd);
 
         return r;
 }
 
 _printf_(1, 2) static int write_confirm_message(const char *format, ...) {
-        int fd;
+        _cleanup_close_ int fd = -1;
         va_list ap;
 
         assert(format);
@@ -535,8 +532,6 @@ _printf_(1, 2) static int write_confirm_message(const char *format, ...) {
         va_start(ap, format);
         vdprintf(fd, format, ap);
         va_end(ap);
-
-        close_nointr_nofail(fd);
 
         return 0;
 }
@@ -559,18 +554,15 @@ static int restore_confirm_stdio(int *saved_stdin,
                 if (dup2(*saved_stdout, STDOUT_FILENO) < 0)
                         r = -errno;
 
-        if (*saved_stdin >= 0)
-                close_nointr_nofail(*saved_stdin);
-
-        if (*saved_stdout >= 0)
-                close_nointr_nofail(*saved_stdout);
+        safe_close(*saved_stdin);
+        safe_close(*saved_stdout);
 
         return r;
 }
 
 static int ask_for_confirmation(char *response, char **argv) {
         int saved_stdout = -1, saved_stdin = -1, r;
-        char *line;
+        _cleanup_free_ char *line = NULL;
 
         r = setup_confirm_stdio(&saved_stdin, &saved_stdout);
         if (r < 0)
@@ -580,8 +572,7 @@ static int ask_for_confirmation(char *response, char **argv) {
         if (!line)
                 return -ENOMEM;
 
-        r = ask(response, "yns", "Execute %s? [Yes, No, Skip] ", line);
-        free(line);
+        r = ask_char(response, "yns", "Execute %s? [Yes, No, Skip] ", line);
 
         restore_confirm_stdio(&saved_stdin, &saved_stdout);
 
@@ -969,43 +960,163 @@ static int apply_seccomp(ExecContext *c) {
                         r = seccomp_arch_add(seccomp, PTR_TO_UINT32(id) - 1);
                         if (r == -EEXIST)
                                 continue;
-                        if (r < 0) {
-                                seccomp_release(seccomp);
-                                return r;
-                        }
+                        if (r < 0)
+                                goto finish;
                 }
-        } else {
 
+        } else {
                 r = seccomp_add_secondary_archs(seccomp);
-                if (r < 0) {
-                        seccomp_release(seccomp);
-                        return r;
-                }
+                if (r < 0)
+                        goto finish;
         }
 
         action = c->syscall_whitelist ? SCMP_ACT_ALLOW : negative_action;
         SET_FOREACH(id, c->syscall_filter, i) {
                 r = seccomp_rule_add(seccomp, action, PTR_TO_INT(id) - 1, 0);
-                if (r < 0) {
-                        seccomp_release(seccomp);
-                        return r;
+                if (r < 0)
+                        goto finish;
+        }
+
+        r = seccomp_attr_set(seccomp, SCMP_FLTATR_CTL_NNP, 0);
+        if (r < 0)
+                goto finish;
+
+        r = seccomp_load(seccomp);
+
+finish:
+        seccomp_release(seccomp);
+        return r;
+}
+
+static int apply_address_families(ExecContext *c) {
+        scmp_filter_ctx *seccomp;
+        Iterator i;
+        int r;
+
+        assert(c);
+
+        seccomp = seccomp_init(SCMP_ACT_ALLOW);
+        if (!seccomp)
+                return -ENOMEM;
+
+        r = seccomp_add_secondary_archs(seccomp);
+        if (r < 0)
+                goto finish;
+
+        if (c->address_families_whitelist) {
+                int af, first = 0, last = 0;
+                void *afp;
+
+                /* If this is a whitelist, we first block the address
+                 * families that are out of range and then everything
+                 * that is not in the set. First, we find the lowest
+                 * and highest address family in the set. */
+
+                SET_FOREACH(afp, c->address_families, i) {
+                        af = PTR_TO_INT(afp);
+
+                        if (af <= 0 || af >= af_max())
+                                continue;
+
+                        if (first == 0 || af < first)
+                                first = af;
+
+                        if (last == 0 || af > last)
+                                last = af;
+                }
+
+                assert((first == 0) == (last == 0));
+
+                if (first == 0) {
+
+                        /* No entries in the valid range, block everything */
+                        r = seccomp_rule_add(
+                                        seccomp,
+                                        SCMP_ACT_ERRNO(EPROTONOSUPPORT),
+                                        SCMP_SYS(socket),
+                                        0);
+                        if (r < 0)
+                                goto finish;
+
+                } else {
+
+                        /* Block everything below the first entry */
+                        r = seccomp_rule_add(
+                                        seccomp,
+                                        SCMP_ACT_ERRNO(EPROTONOSUPPORT),
+                                        SCMP_SYS(socket),
+                                        1,
+                                        SCMP_A0(SCMP_CMP_LT, first));
+                        if (r < 0)
+                                goto finish;
+
+                        /* Block everything above the last entry */
+                        r = seccomp_rule_add(
+                                        seccomp,
+                                        SCMP_ACT_ERRNO(EPROTONOSUPPORT),
+                                        SCMP_SYS(socket),
+                                        1,
+                                        SCMP_A0(SCMP_CMP_GT, last));
+                        if (r < 0)
+                                goto finish;
+
+                        /* Block everything between the first and last
+                         * entry */
+                        for (af = 1; af < af_max(); af++) {
+
+                                if (set_contains(c->address_families, INT_TO_PTR(af)))
+                                        continue;
+
+                                r = seccomp_rule_add(
+                                                seccomp,
+                                                SCMP_ACT_ERRNO(EPROTONOSUPPORT),
+                                                SCMP_SYS(socket),
+                                                1,
+                                                SCMP_A0(SCMP_CMP_EQ, af));
+                                if (r < 0)
+                                        goto finish;
+                        }
+                }
+
+        } else {
+                void *af;
+
+                /* If this is a blacklist, then generate one rule for
+                 * each address family that are then combined in OR
+                 * checks. */
+
+                SET_FOREACH(af, c->address_families, i) {
+
+                        r = seccomp_rule_add(
+                                        seccomp,
+                                        SCMP_ACT_ERRNO(EPROTONOSUPPORT),
+                                        SCMP_SYS(socket),
+                                        1,
+                                        SCMP_A0(SCMP_CMP_EQ, PTR_TO_INT(af)));
+                        if (r < 0)
+                                goto finish;
                 }
         }
 
-        r = seccomp_load(seccomp);
-        seccomp_release(seccomp);
+        r = seccomp_attr_set(seccomp, SCMP_FLTATR_CTL_NNP, 0);
+        if (r < 0)
+                goto finish;
 
+        r = seccomp_load(seccomp);
+
+finish:
+        seccomp_release(seccomp);
         return r;
 }
+
 #endif
 
 static void do_idle_pipe_dance(int idle_pipe[4]) {
         assert(idle_pipe);
 
-        if (idle_pipe[1] >= 0)
-                close_nointr_nofail(idle_pipe[1]);
-        if (idle_pipe[2] >= 0)
-                close_nointr_nofail(idle_pipe[2]);
+
+        safe_close(idle_pipe[1]);
+        safe_close(idle_pipe[2]);
 
         if (idle_pipe[0] >= 0) {
                 int r;
@@ -1020,12 +1131,11 @@ static void do_idle_pipe_dance(int idle_pipe[4]) {
                         fd_wait_for_event(idle_pipe[0], POLLHUP, IDLE_TIMEOUT2_USEC);
                 }
 
-                close_nointr_nofail(idle_pipe[0]);
+                safe_close(idle_pipe[0]);
 
         }
 
-        if (idle_pipe[3] >= 0)
-                close_nointr_nofail(idle_pipe[3]);
+        safe_close(idle_pipe[3]);
 }
 
 static int build_environment(
@@ -1063,7 +1173,7 @@ static int build_environment(
                         return -ENOMEM;
                 our_env[n_env++] = x;
 
-                if (asprintf(&x, "WATCHDOG_USEC=%llu", (unsigned long long) watchdog_usec) < 0)
+                if (asprintf(&x, "WATCHDOG_USEC="USEC_FMT, watchdog_usec) < 0)
                         return -ENOMEM;
                 our_env[n_env++] = x;
         }
@@ -1125,6 +1235,7 @@ int exec_spawn(ExecCommand *command,
                bool confirm_spawn,
                CGroupControllerMask cgroup_supported,
                const char *cgroup_path,
+               const char *runtime_prefix,
                const char *unit_id,
                usec_t watchdog_usec,
                int idle_pipe[4],
@@ -1250,23 +1361,6 @@ int exec_spawn(ExecCommand *command,
                                 goto fail_child;
                         }
 
-                if (context->tcpwrap_name) {
-                        if (socket_fd >= 0)
-                                if (!socket_tcpwrap(socket_fd, context->tcpwrap_name)) {
-                                        err = -EACCES;
-                                        r = EXIT_TCPWRAP;
-                                        goto fail_child;
-                                }
-
-                        for (i = 0; i < (int) n_fds; i++) {
-                                if (!socket_tcpwrap(fds[i], context->tcpwrap_name)) {
-                                        err = -EACCES;
-                                        r = EXIT_TCPWRAP;
-                                        goto fail_child;
-                                }
-                        }
-                }
-
                 exec_context_tty_reset(context);
 
                 if (confirm_spawn) {
@@ -1371,7 +1465,7 @@ int exec_spawn(ExecCommand *command,
                                 goto fail_child;
                         }
 
-                if (context->timer_slack_nsec != (nsec_t) -1)
+                if (context->timer_slack_nsec != NSEC_INFINITY)
                         if (prctl(PR_SET_TIMERSLACK, context->timer_slack_nsec) < 0) {
                                 err = -errno;
                                 r = EXIT_TIMERSLACK;
@@ -1422,6 +1516,27 @@ int exec_spawn(ExecCommand *command,
                 }
 #endif
 
+                if (!strv_isempty(context->runtime_directory) && runtime_prefix) {
+                        char **rt;
+
+                        STRV_FOREACH(rt, context->runtime_directory) {
+                                _cleanup_free_ char *p;
+
+                                p = strjoin(runtime_prefix, "/", *rt, NULL);
+                                if (!p) {
+                                        r = EXIT_RUNTIME_DIRECTORY;
+                                        err = -ENOMEM;
+                                        goto fail_child;
+                                }
+
+                                err = mkdir_safe(p, context->runtime_directory_mode, uid, gid);
+                                if (err < 0) {
+                                        r = EXIT_RUNTIME_DIRECTORY;
+                                        goto fail_child;
+                                }
+                        }
+                }
+
                 if (apply_permissions) {
                         err = enforce_groups(context, username, gid);
                         if (err < 0) {
@@ -1454,7 +1569,9 @@ int exec_spawn(ExecCommand *command,
                     !strv_isempty(context->inaccessible_dirs) ||
                     context->mount_flags != 0 ||
                     (context->private_tmp && runtime && (runtime->tmp_dir || runtime->var_tmp_dir)) ||
-                    context->private_devices) {
+                    context->private_devices ||
+                    context->protect_system != PROTECT_SYSTEM_NO ||
+                    context->protect_home != PROTECT_HOME_NO) {
 
                         char *tmp = NULL, *var = NULL;
 
@@ -1478,8 +1595,9 @@ int exec_spawn(ExecCommand *command,
                                         tmp,
                                         var,
                                         context->private_devices,
+                                        context->protect_home,
+                                        context->protect_system,
                                         context->mount_flags);
-
                         if (err < 0) {
                                 r = EXIT_NAMESPACE;
                                 goto fail_child;
@@ -1531,7 +1649,7 @@ int exec_spawn(ExecCommand *command,
 
                 if (apply_permissions) {
 
-                        for (i = 0; i < RLIMIT_NLIMITS; i++) {
+                        for (i = 0; i < _RLIMIT_MAX; i++) {
                                 if (!context->rlimit[i])
                                         continue;
 
@@ -1549,6 +1667,25 @@ int exec_spawn(ExecCommand *command,
                                         goto fail_child;
                                 }
                         }
+
+#ifdef HAVE_SMACK
+                        if (context->smack_process_label) {
+                                err = smack_label_apply_pid(0, context->smack_process_label);
+                                if (err < 0) {
+                                        r = EXIT_SMACK_PROCESS_LABEL;
+                                        goto fail_child;
+                                }
+                        }
+#ifdef SMACK_DEFAULT_PROCESS_LABEL
+                        else {
+                                err = smack_label_apply_pid(0, SMACK_DEFAULT_PROCESS_LABEL);
+                                if (err < 0) {
+                                        r = EXIT_SMACK_PROCESS_LABEL;
+                                        goto fail_child;
+                                }
+                        }
+#endif
+#endif
 
                         if (context->user) {
                                 err = enforce_user(context, uid);
@@ -1584,7 +1721,18 @@ int exec_spawn(ExecCommand *command,
                                 }
 
 #ifdef HAVE_SECCOMP
-                        if (context->syscall_filter || context->syscall_archs) {
+                        if (context->address_families_whitelist ||
+                            !set_isempty(context->address_families)) {
+                                err = apply_address_families(context);
+                                if (err < 0) {
+                                        r = EXIT_ADDRESS_FAMILIES;
+                                        goto fail_child;
+                                }
+                        }
+
+                        if (context->syscall_whitelist ||
+                            !set_isempty(context->syscall_filter) ||
+                            !set_isempty(context->syscall_archs)) {
                                 err = apply_seccomp(context);
                                 if (err < 0) {
                                         r = EXIT_SECCOMP;
@@ -1705,8 +1853,9 @@ void exec_context_init(ExecContext *c) {
         c->syslog_priority = LOG_DAEMON|LOG_INFO;
         c->syslog_level_prefix = true;
         c->ignore_sigpipe = true;
-        c->timer_slack_nsec = (nsec_t) -1;
+        c->timer_slack_nsec = NSEC_INFINITY;
         c->personality = 0xffffffffUL;
+        c->runtime_directory_mode = 0755;
 }
 
 void exec_context_done(ExecContext *c) {
@@ -1732,9 +1881,6 @@ void exec_context_done(ExecContext *c) {
 
         free(c->tty_path);
         c->tty_path = NULL;
-
-        free(c->tcpwrap_name);
-        c->tcpwrap_name = NULL;
 
         free(c->syslog_identifier);
         c->syslog_identifier = NULL;
@@ -1777,13 +1923,41 @@ void exec_context_done(ExecContext *c) {
         free(c->apparmor_profile);
         c->apparmor_profile = NULL;
 
-#ifdef HAVE_SECCOMP
         set_free(c->syscall_filter);
         c->syscall_filter = NULL;
 
         set_free(c->syscall_archs);
         c->syscall_archs = NULL;
-#endif
+
+        set_free(c->address_families);
+        c->address_families = NULL;
+
+        strv_free(c->runtime_directory);
+        c->runtime_directory = NULL;
+}
+
+int exec_context_destroy_runtime_directory(ExecContext *c, const char *runtime_prefix) {
+        char **i;
+
+        assert(c);
+
+        if (!runtime_prefix)
+                return 0;
+
+        STRV_FOREACH(i, c->runtime_directory) {
+                _cleanup_free_ char *p;
+
+                p = strjoin(runtime_prefix, "/", *i, NULL);
+                if (!p)
+                        return -ENOMEM;
+
+                /* We execute this synchronously, since we need to be
+                 * sure this is gone when we start the service
+                 * next. */
+                rm_rf_dangerous(p, false, true, false);
+        }
+
+        return 0;
 }
 
 void exec_command_done(ExecCommand *c) {
@@ -1869,7 +2043,7 @@ int exec_context_load_environment(const ExecContext *c, char ***l) {
                         return -EINVAL;
                 }
                 for (n = 0; n < count; n++) {
-                        k = load_env_file(pglob.gl_pathv[n], NULL, &p);
+                        k = load_env_file(NULL, pglob.gl_pathv[n], NULL, &p);
                         if (k < 0) {
                                 if (ignore)
                                         continue;
@@ -1903,8 +2077,8 @@ int exec_context_load_environment(const ExecContext *c, char ***l) {
 }
 
 static bool tty_may_match_dev_console(const char *tty) {
-        char *active = NULL, *console;
-        bool b;
+        _cleanup_free_ char *active = NULL;
+       char *console;
 
         if (startswith(tty, "/dev/"))
                 tty += 5;
@@ -1919,10 +2093,7 @@ static bool tty_may_match_dev_console(const char *tty) {
                 return true;
 
         /* "tty0" means the active VC, so it may be the same sometimes */
-        b = streq(console, tty) || (streq(console, "tty0") && tty_is_vc(tty));
-        free(active);
-
-        return b;
+        return streq(console, tty) || (streq(console, "tty0") && tty_is_vc(tty));
 }
 
 bool exec_context_may_touch_console(ExecContext *ec) {
@@ -1959,6 +2130,8 @@ void exec_context_dump(ExecContext *c, FILE* f, const char *prefix) {
                 "%sPrivateTmp: %s\n"
                 "%sPrivateNetwork: %s\n"
                 "%sPrivateDevices: %s\n"
+                "%sProtectHome: %s\n"
+                "%sProtectSystem: %s\n"
                 "%sIgnoreSIGPIPE: %s\n",
                 prefix, c->umask,
                 prefix, c->working_directory ? c->working_directory : "/",
@@ -1967,6 +2140,8 @@ void exec_context_dump(ExecContext *c, FILE* f, const char *prefix) {
                 prefix, yes_no(c->private_tmp),
                 prefix, yes_no(c->private_network),
                 prefix, yes_no(c->private_devices),
+                prefix, protect_home_to_string(c->protect_home),
+                prefix, protect_system_to_string(c->protect_system),
                 prefix, yes_no(c->ignore_sigpipe));
 
         STRV_FOREACH(e, c->environment)
@@ -1974,11 +2149,6 @@ void exec_context_dump(ExecContext *c, FILE* f, const char *prefix) {
 
         STRV_FOREACH(e, c->environment_files)
                 fprintf(f, "%sEnvironmentFile: %s\n", prefix, *e);
-
-        if (c->tcpwrap_name)
-                fprintf(f,
-                        "%sTCPWrapName: %s\n",
-                        prefix, c->tcpwrap_name);
 
         if (c->nice_set)
                 fprintf(f,
@@ -1992,7 +2162,8 @@ void exec_context_dump(ExecContext *c, FILE* f, const char *prefix) {
 
         for (i = 0; i < RLIM_NLIMITS; i++)
                 if (c->rlimit[i])
-                        fprintf(f, "%s%s: %llu\n", prefix, rlimit_to_string(i), (unsigned long long) c->rlimit[i]->rlim_max);
+                        fprintf(f, "%s%s: "RLIM_FMT"\n",
+                                prefix, rlimit_to_string(i), c->rlimit[i]->rlim_max);
 
         if (c->ioprio_set) {
                 _cleanup_free_ char *class_str = NULL;
@@ -2026,7 +2197,7 @@ void exec_context_dump(ExecContext *c, FILE* f, const char *prefix) {
                 fputs("\n", f);
         }
 
-        if (c->timer_slack_nsec != (nsec_t) -1)
+        if (c->timer_slack_nsec != NSEC_INFINITY)
                 fprintf(f, "%sTimerSlackNSec: "NSEC_FMT "\n", prefix, c->timer_slack_nsec);
 
         fprintf(f,
@@ -2312,10 +2483,10 @@ char *exec_command_line(char **argv) {
 }
 
 void exec_command_dump(ExecCommand *c, FILE *f, const char *prefix) {
-        char *p2;
+        _cleanup_free_ char *p2 = NULL;
         const char *prefix2;
 
-        char *cmd;
+        _cleanup_free_ char *cmd = NULL;
 
         assert(c);
         assert(f);
@@ -2331,11 +2502,7 @@ void exec_command_dump(ExecCommand *c, FILE *f, const char *prefix) {
                 "%sCommand Line: %s\n",
                 prefix, cmd ? cmd : strerror(ENOMEM));
 
-        free(cmd);
-
         exec_status_dump(&c->exec_status, f, prefix2);
-
-        free(p2);
 }
 
 void exec_command_dump_list(ExecCommand *c, FILE *f, const char *prefix) {
@@ -2456,7 +2623,7 @@ ExecRuntime *exec_runtime_unref(ExecRuntime *r) {
         if (r->n_ref <= 0) {
                 free(r->tmp_dir);
                 free(r->var_tmp_dir);
-                close_pipe(r->netns_storage_socket);
+                safe_close_pair(r->netns_storage_socket);
                 free(r);
         }
 
@@ -2545,9 +2712,7 @@ int exec_runtime_deserialize_item(ExecRuntime **rt, Unit *u, const char *key, co
                 if (safe_atoi(value, &fd) < 0 || !fdset_contains(fds, fd))
                         log_debug_unit(u->id, "Failed to parse netns socket value %s", value);
                 else {
-                        if ((*rt)->netns_storage_socket[0] >= 0)
-                                close_nointr_nofail((*rt)->netns_storage_socket[0]);
-
+                        safe_close((*rt)->netns_storage_socket[0]);
                         (*rt)->netns_storage_socket[0] = fdset_remove(fds, fd);
                 }
         } else if (streq(key, "netns-socket-1")) {
@@ -2560,9 +2725,7 @@ int exec_runtime_deserialize_item(ExecRuntime **rt, Unit *u, const char *key, co
                 if (safe_atoi(value, &fd) < 0 || !fdset_contains(fds, fd))
                         log_debug_unit(u->id, "Failed to parse netns socket value %s", value);
                 else {
-                        if ((*rt)->netns_storage_socket[1] >= 0)
-                                close_nointr_nofail((*rt)->netns_storage_socket[1]);
-
+                        safe_close((*rt)->netns_storage_socket[1]);
                         (*rt)->netns_storage_socket[1] = fdset_remove(fds, fd);
                 }
         } else
@@ -2579,6 +2742,8 @@ static void *remove_tmpdir_thread(void *p) {
 }
 
 void exec_runtime_destroy(ExecRuntime *rt) {
+        int r;
+
         if (!rt)
                 return;
 
@@ -2588,17 +2753,29 @@ void exec_runtime_destroy(ExecRuntime *rt) {
 
         if (rt->tmp_dir) {
                 log_debug("Spawning thread to nuke %s", rt->tmp_dir);
-                asynchronous_job(remove_tmpdir_thread, rt->tmp_dir);
+
+                r = asynchronous_job(remove_tmpdir_thread, rt->tmp_dir);
+                if (r < 0) {
+                        log_warning("Failed to nuke %s: %s", rt->tmp_dir, strerror(-r));
+                        free(rt->tmp_dir);
+                }
+
                 rt->tmp_dir = NULL;
         }
 
         if (rt->var_tmp_dir) {
                 log_debug("Spawning thread to nuke %s", rt->var_tmp_dir);
-                asynchronous_job(remove_tmpdir_thread, rt->var_tmp_dir);
+
+                r = asynchronous_job(remove_tmpdir_thread, rt->var_tmp_dir);
+                if (r < 0) {
+                        log_warning("Failed to nuke %s: %s", rt->var_tmp_dir, strerror(-r));
+                        free(rt->var_tmp_dir);
+                }
+
                 rt->var_tmp_dir = NULL;
         }
 
-        close_pipe(rt->netns_storage_socket);
+        safe_close_pair(rt->netns_storage_socket);
 }
 
 static const char* const exec_input_table[_EXEC_INPUT_MAX] = {

@@ -26,6 +26,9 @@ TTYVHangup=yes
 KillMode=process
 IgnoreSIGPIPE=no
 SendSIGHUP=yes
+m4_ifdef(`DEFAULT_PROCESS_LABEL',
+SmackProcessLabel=systemd
+)m4_dnl
 
 [Install]
 WantedBy=getty.target

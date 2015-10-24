@@ -54,6 +54,7 @@
 #include <grp.h>
 #include <sys/mman.h>
 #include <sys/vfs.h>
+#include <sys/mount.h>
 #include <linux/magic.h>
 #include <limits.h>
 #include <langinfo.h>
@@ -73,6 +74,7 @@
 #include "log.h"
 #include "strv.h"
 #include "label.h"
+#include "mkdir.h"
 #include "path-util.h"
 #include "exit-status.h"
 #include "hashmap.h"
@@ -138,26 +140,38 @@ char* endswith(const char *s, const char *postfix) {
         return (char*) s + sl - pl;
 }
 
-bool first_word(const char *s, const char *word) {
+char* first_word(const char *s, const char *word) {
         size_t sl, wl;
+        const char *p;
 
         assert(s);
         assert(word);
+
+        /* Checks if the string starts with the specified word, either
+         * followed by NUL or by whitespace. Returns a pointer to the
+         * NUL or the first character after the whitespace. */
 
         sl = strlen(s);
         wl = strlen(word);
 
         if (sl < wl)
-                return false;
+                return NULL;
 
         if (wl == 0)
-                return true;
+                return (char*) s;
 
         if (memcmp(s, word, wl) != 0)
-                return false;
+                return NULL;
 
-        return s[wl] == 0 ||
-                strchr(WHITESPACE, s[wl]);
+        p = s + wl;
+        if (*p == 0)
+                return (char*) p;
+
+        if (!strchr(WHITESPACE, *p))
+                return NULL;
+
+        p += strspn(p, WHITESPACE);
+        return (char*) p;
 }
 
 int close_nointr(int fd) {
@@ -165,30 +179,45 @@ int close_nointr(int fd) {
 
         assert(fd >= 0);
         r = close(fd);
-
-        /* Just ignore EINTR; a retry loop is the wrong
-         * thing to do on Linux.
-         *
-         * http://lkml.indiana.edu/hypermail/linux/kernel/0509.1/0877.html
-         * https://bugzilla.gnome.org/show_bug.cgi?id=682819
-         * http://utcc.utoronto.ca/~cks/space/blog/unix/CloseEINTR
-         * https://sites.google.com/site/michaelsafyan/software-engineering/checkforeintrwheninvokingclosethinkagain
-         */
-        if (_unlikely_(r < 0 && errno == EINTR))
-                return 0;
-        else if (r >= 0)
+        if (r >= 0)
                 return r;
+        else if (errno == EINTR)
+                /*
+                 * Just ignore EINTR; a retry loop is the wrong
+                 * thing to do on Linux.
+                 *
+                 * http://lkml.indiana.edu/hypermail/linux/kernel/0509.1/0877.html
+                 * https://bugzilla.gnome.org/show_bug.cgi?id=682819
+                 * http://utcc.utoronto.ca/~cks/space/blog/unix/CloseEINTR
+                 * https://sites.google.com/site/michaelsafyan/software-engineering/checkforeintrwheninvokingclosethinkagain
+                 */
+                return 0;
         else
                 return -errno;
 }
 
-void close_nointr_nofail(int fd) {
-        PROTECT_ERRNO;
+int safe_close(int fd) {
 
-        /* like close_nointr() but cannot fail, and guarantees errno
-         * is unchanged */
+        /*
+         * Like close_nointr() but cannot fail. Guarantees errno is
+         * unchanged. Is a NOP with negative fds passed, and returns
+         * -1, so that it can be used in this syntax:
+         *
+         * fd = safe_close(fd);
+         */
 
-        assert_se(close_nointr(fd) == 0);
+        if (fd >= 0) {
+                PROTECT_ERRNO;
+
+                /* The kernel might return pretty much any error code
+                 * via close(), but the fd will be closed anyway. The
+                 * only condition we want to check for here is whether
+                 * the fd was invalid at all... */
+
+                assert_se(close_nointr(fd) != -EBADF);
+        }
+
+        return -1;
 }
 
 void close_many(const int fds[], unsigned n_fd) {
@@ -197,7 +226,7 @@ void close_many(const int fds[], unsigned n_fd) {
         assert(fds || n_fd <= 0);
 
         for (i = 0; i < n_fd; i++)
-                close_nointr_nofail(fds[i]);
+                safe_close(fds[i]);
 }
 
 int unlink_noerrno(const char *path) {
@@ -214,9 +243,9 @@ int unlink_noerrno(const char *path) {
 int parse_boolean(const char *v) {
         assert(v);
 
-        if (streq(v, "1") || v[0] == 'y' || v[0] == 'Y' || v[0] == 't' || v[0] == 'T' || strcaseeq(v, "on"))
+        if (streq(v, "1") || strcaseeq(v, "yes") || strcaseeq(v, "y") || strcaseeq(v, "true") || strcaseeq(v, "t") || strcaseeq(v, "on"))
                 return 1;
-        else if (streq(v, "0") || v[0] == 'n' || v[0] == 'N' || v[0] == 'f' || v[0] == 'F' || strcaseeq(v, "off"))
+        else if (streq(v, "0") || strcaseeq(v, "no") || strcaseeq(v, "n") || strcaseeq(v, "false") || strcaseeq(v, "f") || strcaseeq(v, "off"))
                 return 0;
 
         return -EINVAL;
@@ -263,6 +292,14 @@ int parse_uid(const char *s, uid_t* ret_uid) {
         if ((unsigned long) uid != ul)
                 return -ERANGE;
 
+        /* Some libc APIs use (uid_t) -1 as special placeholder */
+        if (uid == (uid_t) 0xFFFFFFFF)
+                return -ENXIO;
+
+        /* A long time ago UIDs where 16bit, hence explicitly avoid the 16bit -1 too */
+        if (uid == (uid_t) 0xFFFF)
+                return -ENXIO;
+
         *ret_uid = uid;
         return 0;
 }
@@ -304,6 +341,26 @@ int safe_atoi(const char *s, int *ret_i) {
                 return -ERANGE;
 
         *ret_i = (int) l;
+        return 0;
+}
+
+int safe_atou8(const char *s, uint8_t *ret) {
+        char *x = NULL;
+        unsigned long l;
+
+        assert(s);
+        assert(ret);
+
+        errno = 0;
+        l = strtoul(s, &x, 0);
+
+        if (!x || x == s || *x || errno)
+                return errno > 0 ? -errno : -EINVAL;
+
+        if ((unsigned long) (uint8_t) l != l)
+                return -ERANGE;
+
+        *ret = (uint8_t) l;
         return 0;
 }
 
@@ -370,37 +427,50 @@ static size_t strcspn_escaped(const char *s, const char *reject) {
                 else if (s[n] == '\\')
                         escaped = true;
                 else if (strchr(reject, s[n]))
-                        return n;
+                        break;
         }
-        return n;
+        /* if s ends in \, return index of previous char */
+        return n - escaped;
 }
 
 /* Split a string into words. */
-char *split(const char *c, size_t *l, const char *separator, bool quoted, char **state) {
-        char *current;
+const char* split(const char **state, size_t *l, const char *separator, bool quoted) {
+        const char *current;
 
-        current = *state ? *state : (char*) c;
+        current = *state;
 
-        if (!*current || *c == 0)
+        if (!*current) {
+                assert(**state == '\0');
                 return NULL;
-
-        current += strspn(current, separator);
-        if (!*current)
-                return NULL;
-
-        if (quoted && strchr("\'\"", *current)) {
-                char quotechar = *(current++);
-                *l = strcspn_escaped(current, (char[]){quotechar, '\0'});
-                *state = current+*l+1;
-        } else if (quoted) {
-                *l = strcspn_escaped(current, separator);
-                *state = current+*l;
-        } else {
-                *l = strcspn(current, separator);
-                *state = current+*l;
         }
 
-        return (char*) current;
+        current += strspn(current, separator);
+        if (!*current) {
+                *state = current;
+                return NULL;
+        }
+
+        if (quoted && strchr("\'\"", *current)) {
+                char quotechars[2] = {*current, '\0'};
+
+                *l = strcspn_escaped(current + 1, quotechars);
+                if (current[*l + 1] == '\0' ||
+                    (current[*l + 2] && !strchr(separator, current[*l + 2]))) {
+                        /* right quote missing or garbage at the end*/
+                        *state = current;
+                        return NULL;
+                }
+                assert(current[*l + 1] == quotechars[0]);
+                *state = current++ + *l + 2;
+        } else if (quoted) {
+                *l = strcspn_escaped(current, separator);
+                *state = current + *l;
+        } else {
+                *l = strcspn(current, separator);
+                *state = current + *l;
+        }
+
+        return current;
 }
 
 int get_parent_of_pid(pid_t pid, pid_t *_ppid) {
@@ -787,7 +857,7 @@ char *strappend(const char *s, const char *suffix) {
         return strnappend(s, suffix, suffix ? strlen(suffix) : 0);
 }
 
-int readlink_malloc(const char *p, char **ret) {
+int readlinkat_malloc(int fd, const char *p, char **ret) {
         size_t l = 100;
         int r;
 
@@ -802,7 +872,7 @@ int readlink_malloc(const char *p, char **ret) {
                 if (!c)
                         return -ENOMEM;
 
-                n = readlink(p, c, l-1);
+                n = readlinkat(fd, p, c, l-1);
                 if (n < 0) {
                         r = -errno;
                         free(c);
@@ -818,6 +888,10 @@ int readlink_malloc(const char *p, char **ret) {
                 free(c);
                 l *= 2;
         }
+}
+
+int readlink_malloc(const char *p, char **ret) {
+        return readlinkat_malloc(AT_FDCWD, p, ret);
 }
 
 int readlink_and_make_absolute(const char *p, char **r) {
@@ -919,19 +993,6 @@ char *delete_chars(char *s, const char *bad) {
         return s;
 }
 
-bool in_charset(const char *s, const char* charset) {
-        const char *i;
-
-        assert(s);
-        assert(charset);
-
-        for (i = s; *i; i++)
-                if (!strchr(charset, *i))
-                        return false;
-
-        return true;
-}
-
 char *file_in_same_dir(const char *path, const char *filename) {
         char *e, *r;
         size_t k;
@@ -1022,7 +1083,7 @@ int unhexchar(char c) {
         if (c >= 'A' && c <= 'F')
                 return c - 'A' + 10;
 
-        return -1;
+        return -EINVAL;
 }
 
 char *hexmem(const void *p, size_t l) {
@@ -1077,7 +1138,7 @@ int unoctchar(char c) {
         if (c >= '0' && c <= '7')
                 return c - '0';
 
-        return -1;
+        return -EINVAL;
 }
 
 char decchar(int x) {
@@ -1089,7 +1150,7 @@ int undecchar(char c) {
         if (c >= '0' && c <= '9')
                 return c - '0';
 
-        return -1;
+        return -EINVAL;
 }
 
 char *cescape(const char *s) {
@@ -1181,7 +1242,7 @@ char *cunescape_length_with_prefix(const char *s, size_t length, const char *pre
 
         r = new(char, pl+length+1);
         if (!r)
-                return r;
+                return NULL;
 
         if (prefix)
                 memcpy(r, prefix, pl);
@@ -1240,7 +1301,7 @@ char *cunescape_length_with_prefix(const char *s, size_t length, const char *pre
                         a = unhexchar(f[1]);
                         b = unhexchar(f[2]);
 
-                        if (a < 0 || b < 0) {
+                        if (a < 0 || b < 0 || (a == 0 && b == 0)) {
                                 /* Invalid escape code, let's take it literal then */
                                 *(t++) = '\\';
                                 *(t++) = 'x';
@@ -1267,7 +1328,7 @@ char *cunescape_length_with_prefix(const char *s, size_t length, const char *pre
                         b = unoctchar(f[1]);
                         c = unoctchar(f[2]);
 
-                        if (a < 0 || b < 0 || c < 0) {
+                        if (a < 0 || b < 0 || c < 0 || (a == 0 && b == 0 && c == 0)) {
                                 /* Invalid escape code, let's take it literal then */
                                 *(t++) = '\\';
                                 *(t++) = f[0];
@@ -1361,6 +1422,7 @@ _pure_ static bool ignore_file_allow_backup(const char *filename) {
                 endswith(filename, ".rpmorig") ||
                 endswith(filename, ".dpkg-old") ||
                 endswith(filename, ".dpkg-new") ||
+                endswith(filename, ".dpkg-tmp") ||
                 endswith(filename, ".swp");
 }
 
@@ -1368,44 +1430,52 @@ bool ignore_file(const char *filename) {
         assert(filename);
 
         if (endswith(filename, "~"))
-                return false;
+                return true;
 
         return ignore_file_allow_backup(filename);
 }
 
 int fd_nonblock(int fd, bool nonblock) {
-        int flags;
+        int flags, nflags;
 
         assert(fd >= 0);
 
-        if ((flags = fcntl(fd, F_GETFL, 0)) < 0)
+        flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0)
                 return -errno;
 
         if (nonblock)
-                flags |= O_NONBLOCK;
+                nflags = flags | O_NONBLOCK;
         else
-                flags &= ~O_NONBLOCK;
+                nflags = flags & ~O_NONBLOCK;
 
-        if (fcntl(fd, F_SETFL, flags) < 0)
+        if (nflags == flags)
+                return 0;
+
+        if (fcntl(fd, F_SETFL, nflags) < 0)
                 return -errno;
 
         return 0;
 }
 
 int fd_cloexec(int fd, bool cloexec) {
-        int flags;
+        int flags, nflags;
 
         assert(fd >= 0);
 
-        if ((flags = fcntl(fd, F_GETFD, 0)) < 0)
+        flags = fcntl(fd, F_GETFD, 0);
+        if (flags < 0)
                 return -errno;
 
         if (cloexec)
-                flags |= FD_CLOEXEC;
+                nflags = flags | FD_CLOEXEC;
         else
-                flags &= ~FD_CLOEXEC;
+                nflags = flags & ~FD_CLOEXEC;
 
-        if (fcntl(fd, F_SETFD, flags) < 0)
+        if (nflags == flags)
+                return 0;
+
+        if (fcntl(fd, F_SETFD, nflags) < 0)
                 return -errno;
 
         return 0;
@@ -1424,7 +1494,7 @@ _pure_ static bool fd_in_set(int fd, const int fdset[], unsigned n_fdset) {
 }
 
 int close_all_fds(const int except[], unsigned n_except) {
-        DIR *d;
+        _cleanup_closedir_ DIR *d = NULL;
         struct dirent *de;
         int r = 0;
 
@@ -1479,7 +1549,6 @@ int close_all_fds(const int except[], unsigned n_except) {
                 }
         }
 
-        closedir(d);
         return r;
 }
 
@@ -1498,12 +1567,20 @@ bool fstype_is_network(const char *fstype) {
         static const char table[] =
                 "cifs\0"
                 "smbfs\0"
+                "sshfs\0"
                 "ncpfs\0"
                 "ncp\0"
                 "nfs\0"
                 "nfs4\0"
                 "gfs\0"
-                "gfs2\0";
+                "gfs2\0"
+                "glusterfs\0";
+
+        const char *x;
+
+        x = startswith(fstype, "fuse.");
+        if (x)
+                fstype = x;
 
         return nulstr_contains(table, fstype);
 }
@@ -1535,8 +1612,7 @@ int chvt(int vt) {
 
 int read_one_char(FILE *f, char *ret, usec_t t, bool *need_nl) {
         struct termios old_termios, new_termios;
-        char c;
-        char line[LINE_MAX];
+        char c, line[LINE_MAX];
 
         assert(f);
         assert(ret);
@@ -1551,7 +1627,7 @@ int read_one_char(FILE *f, char *ret, usec_t t, bool *need_nl) {
                 if (tcsetattr(fileno(f), TCSADRAIN, &new_termios) >= 0) {
                         size_t k;
 
-                        if (t != (usec_t) -1) {
+                        if (t != USEC_INFINITY) {
                                 if (fd_wait_for_event(fileno(f), POLLIN, t) <= 0) {
                                         tcsetattr(fileno(f), TCSADRAIN, &old_termios);
                                         return -ETIMEDOUT;
@@ -1573,12 +1649,14 @@ int read_one_char(FILE *f, char *ret, usec_t t, bool *need_nl) {
                 }
         }
 
-        if (t != (usec_t) -1)
+        if (t != USEC_INFINITY) {
                 if (fd_wait_for_event(fileno(f), POLLIN, t) <= 0)
                         return -ETIMEDOUT;
+        }
 
+        errno = 0;
         if (!fgets(line, sizeof(line), f))
-                return -EIO;
+                return errno ? -errno : -EIO;
 
         truncate_nl(line);
 
@@ -1592,7 +1670,8 @@ int read_one_char(FILE *f, char *ret, usec_t t, bool *need_nl) {
         return 0;
 }
 
-int ask(char *ret, const char *replies, const char *text, ...) {
+int ask_char(char *ret, const char *replies, const char *text, ...) {
+        int r;
 
         assert(ret);
         assert(replies);
@@ -1601,7 +1680,6 @@ int ask(char *ret, const char *replies, const char *text, ...) {
         for (;;) {
                 va_list ap;
                 char c;
-                int r;
                 bool need_nl = true;
 
                 if (on_tty())
@@ -1616,7 +1694,7 @@ int ask(char *ret, const char *replies, const char *text, ...) {
 
                 fflush(stdout);
 
-                r = read_one_char(stdin, &c, (usec_t) -1, &need_nl);
+                r = read_one_char(stdin, &c, USEC_INFINITY, &need_nl);
                 if (r < 0) {
 
                         if (r == -EBADMSG) {
@@ -1637,6 +1715,49 @@ int ask(char *ret, const char *replies, const char *text, ...) {
                 }
 
                 puts("Read unexpected character, please try again.");
+        }
+}
+
+int ask_string(char **ret, const char *text, ...) {
+        assert(ret);
+        assert(text);
+
+        for (;;) {
+                char line[LINE_MAX];
+                va_list ap;
+
+                if (on_tty())
+                        fputs(ANSI_HIGHLIGHT_ON, stdout);
+
+                va_start(ap, text);
+                vprintf(text, ap);
+                va_end(ap);
+
+                if (on_tty())
+                        fputs(ANSI_HIGHLIGHT_OFF, stdout);
+
+                fflush(stdout);
+
+                errno = 0;
+                if (!fgets(line, sizeof(line), stdin))
+                        return errno ? -errno : -EIO;
+
+                if (!endswith(line, "\n"))
+                        putchar('\n');
+                else {
+                        char *s;
+
+                        if (isempty(line))
+                                continue;
+
+                        truncate_nl(line);
+                        s = strdup(line);
+                        if (!s)
+                                return -ENOMEM;
+
+                        *ret = s;
+                        return 0;
+                }
         }
 }
 
@@ -1705,16 +1826,13 @@ finish:
 }
 
 int reset_terminal(const char *name) {
-        int fd, r;
+        _cleanup_close_ int fd = -1;
 
         fd = open_terminal(name, O_RDWR|O_NOCTTY|O_CLOEXEC);
         if (fd < 0)
                 return fd;
 
-        r = reset_terminal_fd(fd, true);
-        close_nointr_nofail(fd);
-
-        return r;
+        return reset_terminal_fd(fd, true);
 }
 
 int open_terminal(const char *name, int mode) {
@@ -1753,12 +1871,12 @@ int open_terminal(const char *name, int mode) {
 
         r = isatty(fd);
         if (r < 0) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return -errno;
         }
 
         if (!r) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return -ENOTTY;
         }
 
@@ -1826,11 +1944,11 @@ int acquire_terminal(
          * on the same tty as an untrusted user this should not be a
          * problem. (Which he probably should not do anyway.) */
 
-        if (timeout != (usec_t) -1)
+        if (timeout != USEC_INFINITY)
                 ts = now(CLOCK_MONOTONIC);
 
         if (!fail && !force) {
-                notify = inotify_init1(IN_CLOEXEC | (timeout != (usec_t) -1 ? IN_NONBLOCK : 0));
+                notify = inotify_init1(IN_CLOEXEC | (timeout != USEC_INFINITY ? IN_NONBLOCK : 0));
                 if (notify < 0) {
                         r = -errno;
                         goto fail;
@@ -1894,7 +2012,7 @@ int acquire_terminal(
                         ssize_t l;
                         struct inotify_event *e;
 
-                        if (timeout != (usec_t) -1) {
+                        if (timeout != USEC_INFINITY) {
                                 usec_t n;
 
                                 n = now(CLOCK_MONOTONIC);
@@ -1947,11 +2065,10 @@ int acquire_terminal(
                  * ended our handle will be dead. It's important that
                  * we do this after sleeping, so that we don't enter
                  * an endless loop. */
-                close_nointr_nofail(fd);
+                safe_close(fd);
         }
 
-        if (notify >= 0)
-                close_nointr_nofail(notify);
+        safe_close(notify);
 
         r = reset_terminal_fd(fd, true);
         if (r < 0)
@@ -1960,22 +2077,21 @@ int acquire_terminal(
         return fd;
 
 fail:
-        if (fd >= 0)
-                close_nointr_nofail(fd);
-
-        if (notify >= 0)
-                close_nointr_nofail(notify);
+        safe_close(fd);
+        safe_close(notify);
 
         return r;
 }
 
 int release_terminal(void) {
-        int r = 0;
-        struct sigaction sa_old, sa_new = {
+        static const struct sigaction sa_new = {
                 .sa_handler = SIG_IGN,
                 .sa_flags = SA_RESTART,
         };
-        _cleanup_close_ int fd;
+
+        _cleanup_close_ int fd = -1;
+        struct sigaction sa_old;
+        int r = 0;
 
         fd = open("/dev/tty", O_RDWR|O_NOCTTY|O_NDELAY|O_CLOEXEC);
         if (fd < 0)
@@ -2014,7 +2130,6 @@ int ignore_signals(int sig, ...) {
         va_list ap;
         int r = 0;
 
-
         if (sigaction(sig, &sa, NULL) < 0)
                 r = -errno;
 
@@ -2047,22 +2162,18 @@ int default_signals(int sig, ...) {
         return r;
 }
 
-int close_pipe(int p[]) {
-        int a = 0, b = 0;
-
+void safe_close_pair(int p[]) {
         assert(p);
 
-        if (p[0] >= 0) {
-                a = close_nointr(p[0]);
-                p[0] = -1;
+        if (p[0] == p[1]) {
+                /* Special case pairs which use the same fd in both
+                 * directions... */
+                p[0] = p[1] = safe_close(p[0]);
+                return;
         }
 
-        if (p[1] >= 0) {
-                b = close_nointr(p[1]);
-                p[1] = -1;
-        }
-
-        return a < 0 ? a : b;
+        p[0] = safe_close(p[0]);
+        p[1] = safe_close(p[1]);
 }
 
 ssize_t loop_read(int fd, void *buf, size_t nbytes, bool do_poll) {
@@ -2085,7 +2196,7 @@ ssize_t loop_read(int fd, void *buf, size_t nbytes, bool do_poll) {
                          * and expect that any error/EOF is reported
                          * via read() */
 
-                        fd_wait_for_event(fd, POLLIN, (usec_t) -1);
+                        fd_wait_for_event(fd, POLLIN, USEC_INFINITY);
                         continue;
                 }
 
@@ -2120,7 +2231,7 @@ ssize_t loop_write(int fd, const void *buf, size_t nbytes, bool do_poll) {
                          * and expect that any error/EOF is reported
                          * via write() */
 
-                        fd_wait_for_event(fd, POLLOUT, (usec_t) -1);
+                        fd_wait_for_event(fd, POLLOUT, USEC_INFINITY);
                         continue;
                 }
 
@@ -2157,31 +2268,31 @@ int parse_size(const char *t, off_t base, off_t *size) {
         };
 
         static const struct table iec[] = {
-                { "B", 1 },
-                { "K", 1024ULL },
-                { "M", 1024ULL*1024ULL },
-                { "G", 1024ULL*1024ULL*1024ULL },
-                { "T", 1024ULL*1024ULL*1024ULL*1024ULL },
-                { "P", 1024ULL*1024ULL*1024ULL*1024ULL*1024ULL },
                 { "E", 1024ULL*1024ULL*1024ULL*1024ULL*1024ULL*1024ULL },
+                { "P", 1024ULL*1024ULL*1024ULL*1024ULL*1024ULL },
+                { "T", 1024ULL*1024ULL*1024ULL*1024ULL },
+                { "G", 1024ULL*1024ULL*1024ULL },
+                { "M", 1024ULL*1024ULL },
+                { "K", 1024ULL },
+                { "B", 1 },
                 { "", 1 },
         };
 
         static const struct table si[] = {
-                { "B", 1 },
-                { "K", 1000ULL },
-                { "M", 1000ULL*1000ULL },
-                { "G", 1000ULL*1000ULL*1000ULL },
-                { "T", 1000ULL*1000ULL*1000ULL*1000ULL },
-                { "P", 1000ULL*1000ULL*1000ULL*1000ULL*1000ULL },
                 { "E", 1000ULL*1000ULL*1000ULL*1000ULL*1000ULL*1000ULL },
+                { "P", 1000ULL*1000ULL*1000ULL*1000ULL*1000ULL },
+                { "T", 1000ULL*1000ULL*1000ULL*1000ULL },
+                { "G", 1000ULL*1000ULL*1000ULL },
+                { "M", 1000ULL*1000ULL },
+                { "K", 1000ULL },
+                { "B", 1 },
                 { "", 1 },
         };
 
         const struct table *table;
         const char *p;
         unsigned long long r = 0;
-        unsigned n_entries;
+        unsigned n_entries, start_pos = 0;
 
         assert(t);
         assert(base == 1000 || base == 1024);
@@ -2198,6 +2309,8 @@ int parse_size(const char *t, off_t base, off_t *size) {
         p = t;
         do {
                 long long l;
+                unsigned long long l2;
+                double frac = 0;
                 char *e;
                 unsigned i;
 
@@ -2213,14 +2326,32 @@ int parse_size(const char *t, off_t base, off_t *size) {
                 if (e == p)
                         return -EINVAL;
 
+                if (*e == '.') {
+                        e++;
+                        if (*e >= '0' && *e <= '9') {
+                                char *e2;
+
+                                /* strotoull itself would accept space/+/- */
+                                l2 = strtoull(e, &e2, 10);
+
+                                if (errno == ERANGE)
+                                        return -errno;
+
+                                /* Ignore failure. E.g. 10.M is valid */
+                                frac = l2;
+                                for (; e < e2; e++)
+                                        frac /= 10;
+                        }
+                }
+
                 e += strspn(e, WHITESPACE);
 
-                for (i = 0; i < n_entries; i++)
+                for (i = start_pos; i < n_entries; i++)
                         if (startswith(e, table[i].suffix)) {
                                 unsigned long long tmp;
-                                if ((unsigned long long) l > ULLONG_MAX / table[i].factor)
+                                if ((unsigned long long) l + (frac > 0) > ULLONG_MAX / table[i].factor)
                                         return -ERANGE;
-                                tmp = l * table[i].factor;
+                                tmp = l * table[i].factor + (unsigned long long) (frac * table[i].factor);
                                 if (tmp > ULLONG_MAX - r)
                                         return -ERANGE;
 
@@ -2229,6 +2360,8 @@ int parse_size(const char *t, off_t base, off_t *size) {
                                         return -ERANGE;
 
                                 p = e + strlen(table[i].suffix);
+
+                                start_pos = i + 1;
                                 break;
                         }
 
@@ -2252,7 +2385,7 @@ int make_stdio(int fd) {
         t = dup3(fd, STDERR_FILENO, 0);
 
         if (fd >= 3)
-                close_nointr_nofail(fd);
+                safe_close(fd);
 
         if (r < 0 || s < 0 || t < 0)
                 return -errno;
@@ -2422,6 +2555,24 @@ void sigset_add_many(sigset_t *ss, ...) {
         va_end(ap);
 }
 
+int sigprocmask_many(int how, ...) {
+        va_list ap;
+        sigset_t ss;
+        int sig;
+
+        assert_se(sigemptyset(&ss) == 0);
+
+        va_start(ap, how);
+        while ((sig = va_arg(ap, int)) > 0)
+                assert_se(sigaddset(&ss, sig) == 0);
+        va_end(ap);
+
+        if (sigprocmask(how, &ss, NULL) < 0)
+                return -errno;
+
+        return 0;
+}
+
 char* gethostname_malloc(void) {
         struct utsname u;
 
@@ -2462,7 +2613,7 @@ static char *lookup_uid(uid_t uid) {
         if (getpwuid_r(uid, &pwbuf, buf, bufsize, &pw) == 0 && pw)
                 return strdup(pw->pw_name);
 
-        if (asprintf(&name, "%lu", (unsigned long) uid) < 0)
+        if (asprintf(&name, UID_FMT, uid) < 0)
                 return NULL;
 
         return name;
@@ -2587,7 +2738,7 @@ int get_ctty(pid_t pid, dev_t *_devnr, char **r) {
 
                 /* This is an ugly hack */
                 if (major(devnr) == 136) {
-                        asprintf(&b, "pts/%lu", (unsigned long) minor(devnr));
+                        asprintf(&b, "pts/%u", minor(devnr));
                         goto finish;
                 }
 
@@ -2620,7 +2771,7 @@ finish:
 }
 
 int rm_rf_children_dangerous(int fd, bool only_dirs, bool honour_sticky, struct stat *root_dev) {
-        DIR *d;
+        _cleanup_closedir_ DIR *d = NULL;
         int ret = 0;
 
         assert(fd >= 0);
@@ -2630,7 +2781,7 @@ int rm_rf_children_dangerous(int fd, bool only_dirs, bool honour_sticky, struct 
 
         d = fdopendir(fd);
         if (!d) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
 
                 return errno == ENOENT ? 0 : -errno;
         }
@@ -2643,14 +2794,11 @@ int rm_rf_children_dangerous(int fd, bool only_dirs, bool honour_sticky, struct 
 
                 errno = 0;
                 de = readdir(d);
-                if (!de && errno != 0) {
-                        if (ret == 0)
+                if (!de) {
+                        if (errno != 0 && ret == 0)
                                 ret = -errno;
-                        break;
+                        return ret;
                 }
-
-                if (!de)
-                        break;
 
                 if (streq(de->d_name, ".") || streq(de->d_name, ".."))
                         continue;
@@ -2707,10 +2855,6 @@ int rm_rf_children_dangerous(int fd, bool only_dirs, bool honour_sticky, struct 
                         }
                 }
         }
-
-        closedir(d);
-
-        return ret;
 }
 
 _pure_ static int is_temporary_fs(struct statfs *s) {
@@ -2726,7 +2870,7 @@ int rm_rf_children(int fd, bool only_dirs, bool honour_sticky, struct stat *root
         assert(fd >= 0);
 
         if (fstatfs(fd, &s) < 0) {
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return -errno;
         }
 
@@ -2735,7 +2879,7 @@ int rm_rf_children(int fd, bool only_dirs, bool honour_sticky, struct stat *root
          * non-state data */
         if (!is_temporary_fs(&s)) {
                 log_error("Attempted to remove disk file system, and we can't allow that.");
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 return -EPERM;
         }
 
@@ -2781,13 +2925,13 @@ static int rm_rf_internal(const char *path, bool only_dirs, bool delete_root, bo
 
         if (!dangerous) {
                 if (fstatfs(fd, &s) < 0) {
-                        close_nointr_nofail(fd);
+                        safe_close(fd);
                         return -errno;
                 }
 
                 if (!is_temporary_fs(&s)) {
                         log_error("Attempted to remove disk file system, and we can't allow that.");
-                        close_nointr_nofail(fd);
+                        safe_close(fd);
                         return -EPERM;
                 }
         }
@@ -2914,7 +3058,7 @@ int status_vprintf(const char *status, bool ellipse, bool ephemeral, const char 
                 if (emax < 3)
                         emax = 3;
 
-                e = ellipsize(s, emax, 75);
+                e = ellipsize(s, emax, 50);
                 if (e) {
                         free(s);
                         s = e;
@@ -3034,12 +3178,13 @@ fail:
 }
 
 char **replace_env_argv(char **argv, char **env) {
-        char **r, **i;
+        char **ret, **i;
         unsigned k = 0, l = 0;
 
         l = strv_length(argv);
 
-        if (!(r = new(char*, l+1)))
+        ret = new(char*, l+1);
+        if (!ret)
                 return NULL;
 
         STRV_FOREACH(i, argv) {
@@ -3052,10 +3197,12 @@ char **replace_env_argv(char **argv, char **env) {
 
                         e = strv_env_get(env, *i+1);
                         if (e) {
+                                int r;
 
-                                if (!(m = strv_split_quoted(e))) {
-                                        r[k] = NULL;
-                                        strv_free(r);
+                                r = strv_split_quoted(&m, e);
+                                if (r < 0) {
+                                        ret[k] = NULL;
+                                        strv_free(ret);
                                         return NULL;
                                 }
                         } else
@@ -3064,16 +3211,17 @@ char **replace_env_argv(char **argv, char **env) {
                         q = strv_length(m);
                         l = l + q - 1;
 
-                        if (!(w = realloc(r, sizeof(char*) * (l+1)))) {
-                                r[k] = NULL;
-                                strv_free(r);
+                        w = realloc(ret, sizeof(char*) * (l+1));
+                        if (!w) {
+                                ret[k] = NULL;
+                                strv_free(ret);
                                 strv_free(m);
                                 return NULL;
                         }
 
-                        r = w;
+                        ret = w;
                         if (m) {
-                                memcpy(r + k, m, q * sizeof(char*));
+                                memcpy(ret + k, m, q * sizeof(char*));
                                 free(m);
                         }
 
@@ -3082,14 +3230,16 @@ char **replace_env_argv(char **argv, char **env) {
                 }
 
                 /* If ${FOO} appears as part of a word, replace it by the variable as-is */
-                if (!(r[k++] = replace_env(*i, env))) {
-                        strv_free(r);
+                ret[k] = replace_env(*i, env);
+                if (!ret[k]) {
+                        strv_free(ret);
                         return NULL;
                 }
+                k++;
         }
 
-        r[k] = NULL;
-        return r;
+        ret[k] = NULL;
+        return ret;
 }
 
 int fd_columns(int fd) {
@@ -3175,19 +3325,27 @@ bool on_tty(void) {
         return cached_on_tty;
 }
 
+int files_same(const char *filea, const char *fileb) {
+        struct stat a, b;
+
+        if (stat(filea, &a) < 0)
+                return -errno;
+
+        if (stat(fileb, &b) < 0)
+                return -errno;
+
+        return a.st_dev == b.st_dev &&
+               a.st_ino == b.st_ino;
+}
+
 int running_in_chroot(void) {
-        struct stat a = {}, b = {};
+        int ret;
 
-        /* Only works as root */
-        if (stat("/proc/1/root", &a) < 0)
-                return -errno;
+        ret = files_same("/proc/1/root", "/");
+        if (ret < 0)
+                return ret;
 
-        if (stat("/", &b) < 0)
-                return -errno;
-
-        return
-                a.st_dev != b.st_dev ||
-                a.st_ino != b.st_ino;
+        return ret == 0;
 }
 
 static char *ascii_ellipsize_mem(const char *s, size_t old_length, size_t new_length, unsigned percent) {
@@ -3299,21 +3457,47 @@ char *ellipsize(const char *s, size_t length, unsigned percent) {
         return ellipsize_mem(s, strlen(s), length, percent);
 }
 
-int touch(const char *path) {
-        int fd;
+int touch_file(const char *path, bool parents, usec_t stamp, uid_t uid, gid_t gid, mode_t mode) {
+        _cleanup_close_ int fd;
+        int r;
 
         assert(path);
 
-        /* This just opens the file for writing, ensuring it
-         * exists. It doesn't call utimensat() the way /usr/bin/touch
-         * does it. */
+        if (parents)
+                mkdir_parents(path, 0755);
 
-        fd = open(path, O_WRONLY|O_CREAT|O_CLOEXEC|O_NOCTTY, 0644);
+        fd = open(path, O_WRONLY|O_CREAT|O_CLOEXEC|O_NOCTTY, mode > 0 ? mode : 0644);
         if (fd < 0)
                 return -errno;
 
-        close_nointr_nofail(fd);
+        if (mode > 0) {
+                r = fchmod(fd, mode);
+                if (r < 0)
+                        return -errno;
+        }
+
+        if (uid != (uid_t) -1 || gid != (gid_t) -1) {
+                r = fchown(fd, uid, gid);
+                if (r < 0)
+                        return -errno;
+        }
+
+        if (stamp != USEC_INFINITY) {
+                struct timespec ts[2];
+
+                timespec_store(&ts[0], stamp);
+                ts[1] = ts[0];
+                r = futimens(fd, ts);
+        } else
+                r = futimens(fd, NULL);
+        if (r < 0)
+                return -errno;
+
         return 0;
+}
+
+int touch(const char *path) {
+        return touch_file(path, false, USEC_INFINITY, (uid_t) -1, (gid_t) -1, 0);
 }
 
 char *unquote(const char *s, const char* quotes) {
@@ -3396,6 +3580,17 @@ int wait_for_terminate(pid_t pid, siginfo_t *status) {
         }
 }
 
+/*
+ * Return values:
+ * < 0 : wait_for_terminate() failed to get the state of the
+ *       process, the process was terminated by a signal, or
+ *       failed for an unknown reason.
+ * >=0 : The process terminated normally, and its exit code is
+ *       returned.
+ *
+ * That is, success is indicated by a return value of zero, and an
+ * error is indicated by a non-zero value.
+ */
 int wait_for_terminate_and_warn(const char *name, pid_t pid) {
         int r;
         siginfo_t status;
@@ -3463,6 +3658,17 @@ int null_or_empty_path(const char *fn) {
         return null_or_empty(&st);
 }
 
+int null_or_empty_fd(int fd) {
+        struct stat st;
+
+        assert(fd >= 0);
+
+        if (fstat(fd, &st) < 0)
+                return -errno;
+
+        return null_or_empty(&st);
+}
+
 DIR *xopendirat(int fd, const char *name, int flags) {
         int nfd;
         DIR *d;
@@ -3475,7 +3681,7 @@ DIR *xopendirat(int fd, const char *name, int flags) {
 
         d = fdopendir(nfd);
         if (!d) {
-                close_nointr_nofail(nfd);
+                safe_close(nfd);
                 return NULL;
         }
 
@@ -3496,25 +3702,21 @@ int signal_from_string_try_harder(const char *s) {
 
 static char *tag_to_udev_node(const char *tagvalue, const char *by) {
         _cleanup_free_ char *t = NULL, *u = NULL;
-        char *dn;
         size_t enc_len;
 
         u = unquote(tagvalue, "\"\'");
-        if (u == NULL)
+        if (!u)
                 return NULL;
 
         enc_len = strlen(u) * 4 + 1;
         t = new(char, enc_len);
-        if (t == NULL)
+        if (!t)
                 return NULL;
 
         if (encode_devnode_name(u, t, enc_len) < 0)
                 return NULL;
 
-        if (asprintf(&dn, "/dev/disk/by-%s/%s", by, t) < 0)
-                return NULL;
-
-        return dn;
+        return strjoin("/dev/disk/by-", by, "/", t, NULL);
 }
 
 char *fstab_node_to_udev_node(const char *p) {
@@ -3537,9 +3739,6 @@ char *fstab_node_to_udev_node(const char *p) {
 
 bool tty_is_vc(const char *tty) {
         assert(tty);
-
-        if (startswith(tty, "/dev/"))
-                tty += 5;
 
         return vtnr_from_tty(tty) >= 0;
 }
@@ -3661,111 +3860,123 @@ bool dirent_is_file_with_suffix(const struct dirent *de, const char *suffix) {
         return endswith(de->d_name, suffix);
 }
 
-void execute_directory(const char *directory, DIR *d, char *argv[]) {
-        DIR *_d = NULL;
-        struct dirent *de;
-        Hashmap *pids = NULL;
+void execute_directory(const char *directory, DIR *d, usec_t timeout, char *argv[]) {
+        pid_t executor_pid;
+        int r;
 
         assert(directory);
 
-        /* Executes all binaries in a directory in parallel and
-         * waits for them to finish. */
+        /* Executes all binaries in a directory in parallel and waits
+         * for them to finish. Optionally a timeout is applied. */
 
-        if (!d) {
-                if (!(_d = opendir(directory))) {
+        executor_pid = fork();
+        if (executor_pid < 0) {
+                log_error("Failed to fork: %m");
+                return;
 
-                        if (errno == ENOENT)
-                                return;
+        } else if (executor_pid == 0) {
+                _cleanup_hashmap_free_free_ Hashmap *pids = NULL;
+                _cleanup_closedir_ DIR *_d = NULL;
+                struct dirent *de;
+                sigset_t ss;
 
-                        log_error("Failed to enumerate directory %s: %m", directory);
-                        return;
+                /* We fork this all off from a child process so that
+                 * we can somewhat cleanly make use of SIGALRM to set
+                 * a time limit */
+
+                reset_all_signal_handlers();
+
+                assert_se(sigemptyset(&ss) == 0);
+                assert_se(sigprocmask(SIG_SETMASK, &ss, NULL) == 0);
+
+                assert_se(prctl(PR_SET_PDEATHSIG, SIGTERM) == 0);
+
+                if (!d) {
+                        d = _d = opendir(directory);
+                        if (!d) {
+                                if (errno == ENOENT)
+                                        _exit(EXIT_SUCCESS);
+
+                                log_error("Failed to enumerate directory %s: %m", directory);
+                                _exit(EXIT_FAILURE);
+                        }
                 }
 
-                d = _d;
-        }
-
-        if (!(pids = hashmap_new(trivial_hash_func, trivial_compare_func))) {
-                log_error("Failed to allocate set.");
-                goto finish;
-        }
-
-        while ((de = readdir(d))) {
-                char *path;
-                pid_t pid;
-                int k;
-
-                if (!dirent_is_file(de))
-                        continue;
-
-                if (asprintf(&path, "%s/%s", directory, de->d_name) < 0) {
+                pids = hashmap_new(NULL, NULL);
+                if (!pids) {
                         log_oom();
-                        continue;
-                }
-
-                if ((pid = fork()) < 0) {
-                        log_error("Failed to fork: %m");
-                        free(path);
-                        continue;
-                }
-
-                if (pid == 0) {
-                        char *_argv[2];
-                        /* Child */
-
-                        if (!argv) {
-                                _argv[0] = path;
-                                _argv[1] = NULL;
-                                argv = _argv;
-                        } else
-                                argv[0] = path;
-
-                        execv(path, argv);
-
-                        log_error("Failed to execute %s: %m", path);
                         _exit(EXIT_FAILURE);
                 }
 
-                log_debug("Spawned %s as %lu", path, (unsigned long) pid);
+                FOREACH_DIRENT(de, d, break) {
+                        _cleanup_free_ char *path = NULL;
+                        pid_t pid;
 
-                if ((k = hashmap_put(pids, UINT_TO_PTR(pid), path)) < 0) {
-                        log_error("Failed to add PID to set: %s", strerror(-k));
-                        free(path);
-                }
-        }
-
-        while (!hashmap_isempty(pids)) {
-                pid_t pid = PTR_TO_UINT(hashmap_first_key(pids));
-                siginfo_t si = {};
-                char *path;
-
-                if (waitid(P_PID, pid, &si, WEXITED) < 0) {
-
-                        if (errno == EINTR)
+                        if (!dirent_is_file(de))
                                 continue;
 
-                        log_error("waitid() failed: %m");
-                        goto finish;
+                        path = strjoin(directory, "/", de->d_name, NULL);
+                        if (!path) {
+                                log_oom();
+                                _exit(EXIT_FAILURE);
+                        }
+
+                        pid = fork();
+                        if (pid < 0) {
+                                log_error("Failed to fork: %m");
+                                continue;
+                        } else if (pid == 0) {
+                                char *_argv[2];
+
+                                assert_se(prctl(PR_SET_PDEATHSIG, SIGTERM) == 0);
+
+                                if (!argv) {
+                                        _argv[0] = path;
+                                        _argv[1] = NULL;
+                                        argv = _argv;
+                                } else
+                                        argv[0] = path;
+
+                                execv(path, argv);
+                                log_error("Failed to execute %s: %m", path);
+                                _exit(EXIT_FAILURE);
+                        }
+
+                        log_debug("Spawned %s as " PID_FMT ".", path, pid);
+
+                        r = hashmap_put(pids, UINT_TO_PTR(pid), path);
+                        if (r < 0) {
+                                log_oom();
+                                _exit(EXIT_FAILURE);
+                        }
+
+                        path = NULL;
                 }
 
-                if ((path = hashmap_remove(pids, UINT_TO_PTR(si.si_pid)))) {
-                        if (!is_clean_exit(si.si_code, si.si_status, NULL)) {
-                                if (si.si_code == CLD_EXITED)
-                                        log_error("%s exited with exit status %i.", path, si.si_status);
-                                else
-                                        log_error("%s terminated by signal %s.", path, signal_to_string(si.si_status));
-                        } else
-                                log_debug("%s exited successfully.", path);
+                /* Abort execution of this process after the
+                 * timout. We simply rely on SIGALRM as default action
+                 * terminating the process, and turn on alarm(). */
 
-                        free(path);
+                if (timeout != USEC_INFINITY)
+                        alarm((timeout + USEC_PER_SEC - 1) / USEC_PER_SEC);
+
+                while (!hashmap_isempty(pids)) {
+                        _cleanup_free_ char *path = NULL;
+                        pid_t pid;
+
+                        pid = PTR_TO_UINT(hashmap_first_key(pids));
+                        assert(pid > 0);
+
+                        path = hashmap_remove(pids, UINT_TO_PTR(pid));
+                        assert(path);
+
+                        wait_for_terminate_and_warn(path, pid);
                 }
+
+                _exit(EXIT_SUCCESS);
         }
 
-finish:
-        if (_d)
-                closedir(_d);
-
-        if (pids)
-                hashmap_free_free(pids);
+        wait_for_terminate_and_warn(directory, executor_pid);
 }
 
 int kill_and_sigcont(pid_t pid, int sig) {
@@ -3873,6 +4084,21 @@ char* hostname_cleanup(char *s, bool lowercase) {
         return s;
 }
 
+bool machine_name_is_valid(const char *s) {
+
+        if (!hostname_is_valid(s))
+                return false;
+
+        /* Machine names should be useful hostnames, but also be
+         * useful in unit names, hence we enforce a stricter length
+         * limitation. */
+
+        if (strlen(s) > 64)
+                return false;
+
+        return true;
+}
+
 int pipe_eof(int fd) {
         struct pollfd pollfd = {
                 .fd = fd,
@@ -3901,7 +4127,7 @@ int fd_wait_for_event(int fd, int event, usec_t t) {
         struct timespec ts;
         int r;
 
-        r = ppoll(&pollfd, 1, t == (usec_t) -1 ? NULL : timespec_store(&ts, t), NULL);
+        r = ppoll(&pollfd, 1, t == USEC_INFINITY ? NULL : timespec_store(&ts, t), NULL);
         if (r < 0)
                 return -errno;
 
@@ -3914,23 +4140,15 @@ int fd_wait_for_event(int fd, int event, usec_t t) {
 int fopen_temporary(const char *path, FILE **_f, char **_temp_path) {
         FILE *f;
         char *t;
-        const char *fn;
-        size_t k;
         int fd;
 
         assert(path);
         assert(_f);
         assert(_temp_path);
 
-        t = new(char, strlen(path) + 1 + 6 + 1);
+        t = tempfn_xxxxxx(path);
         if (!t)
                 return -ENOMEM;
-
-        fn = basename(path);
-        k = fn - path;
-        memcpy(t, path, k);
-        t[k] = '.';
-        stpcpy(stpcpy(t+k+1, fn), "XXXXXX");
 
         fd = mkostemp_safe(t, O_WRONLY|O_CLOEXEC);
         if (fd < 0) {
@@ -3961,16 +4179,13 @@ int terminal_vhangup_fd(int fd) {
 }
 
 int terminal_vhangup(const char *name) {
-        int fd, r;
+        _cleanup_close_ int fd;
 
         fd = open_terminal(name, O_RDWR|O_NOCTTY|O_CLOEXEC);
         if (fd < 0)
                 return fd;
 
-        r = terminal_vhangup_fd(fd);
-        close_nointr_nofail(fd);
-
-        return r;
+        return terminal_vhangup_fd(fd);
 }
 
 int vt_disallocate(const char *name) {
@@ -3997,7 +4212,7 @@ int vt_disallocate(const char *name) {
                            "\033[H"    /* move home */
                            "\033[2J",  /* clear screen */
                            10, false);
-                close_nointr_nofail(fd);
+                safe_close(fd);
 
                 return 0;
         }
@@ -4018,7 +4233,7 @@ int vt_disallocate(const char *name) {
                 return fd;
 
         r = ioctl(fd, VT_DISALLOCATE, u);
-        close_nointr_nofail(fd);
+        safe_close(fd);
 
         if (r >= 0)
                 return 0;
@@ -4037,102 +4252,67 @@ int vt_disallocate(const char *name) {
                    "\033[H"   /* move home */
                    "\033[3J", /* clear screen including scrollback, requires Linux 2.6.40 */
                    10, false);
-        close_nointr_nofail(fd);
-
-        return 0;
-}
-
-int copy_file(const char *from, const char *to, int flags) {
-        _cleanup_close_ int fdf = -1;
-        int r, fdt;
-
-        assert(from);
-        assert(to);
-
-        fdf = open(from, O_RDONLY|O_CLOEXEC|O_NOCTTY);
-        if (fdf < 0)
-                return -errno;
-
-        fdt = open(to, flags|O_WRONLY|O_CREAT|O_CLOEXEC|O_NOCTTY, 0644);
-        if (fdt < 0)
-                return -errno;
-
-        for (;;) {
-                char buf[PIPE_BUF];
-                ssize_t n, k;
-
-                n = read(fdf, buf, sizeof(buf));
-                if (n < 0) {
-                        r = -errno;
-
-                        close_nointr(fdt);
-                        unlink(to);
-
-                        return r;
-                }
-
-                if (n == 0)
-                        break;
-
-                errno = 0;
-                k = loop_write(fdt, buf, n, false);
-                if (n != k) {
-                        r = k < 0 ? k : (errno ? -errno : -EIO);
-
-                        close_nointr(fdt);
-                        unlink(to);
-
-                        return r;
-                }
-        }
-
-        r = close_nointr(fdt);
-
-        if (r < 0) {
-                unlink(to);
-                return r;
-        }
+        safe_close(fd);
 
         return 0;
 }
 
 int symlink_atomic(const char *from, const char *to) {
-        char *x;
-        _cleanup_free_ char *t;
-        const char *fn;
-        size_t k;
-        uint64_t u;
-        unsigned i;
-        int r;
+        _cleanup_free_ char *t = NULL;
 
         assert(from);
         assert(to);
 
-        t = new(char, strlen(to) + 1 + 16 + 1);
+        t = tempfn_random(to);
         if (!t)
                 return -ENOMEM;
-
-        fn = basename(to);
-        k = fn-to;
-        memcpy(t, to, k);
-        t[k] = '.';
-        x = stpcpy(t+k+1, fn);
-
-        u = random_u64();
-        for (i = 0; i < 16; i++) {
-                *(x++) = hexchar(u & 0xF);
-                u >>= 4;
-        }
-
-        *x = 0;
 
         if (symlink(from, t) < 0)
                 return -errno;
 
         if (rename(t, to) < 0) {
-                r = -errno;
-                unlink(t);
-                return r;
+                unlink_noerrno(t);
+                return -errno;
+        }
+
+        return 0;
+}
+
+int mknod_atomic(const char *path, mode_t mode, dev_t dev) {
+        _cleanup_free_ char *t = NULL;
+
+        assert(path);
+
+        t = tempfn_random(path);
+        if (!t)
+                return -ENOMEM;
+
+        if (mknod(t, mode, dev) < 0)
+                return -errno;
+
+        if (rename(t, path) < 0) {
+                unlink_noerrno(t);
+                return -errno;
+        }
+
+        return 0;
+}
+
+int mkfifo_atomic(const char *path, mode_t mode) {
+        _cleanup_free_ char *t = NULL;
+
+        assert(path);
+
+        t = tempfn_random(path);
+        if (!t)
+                return -ENOMEM;
+
+        if (mkfifo(t, mode) < 0)
+                return -errno;
+
+        if (rename(t, path) < 0) {
+                unlink_noerrno(t);
+                return -errno;
         }
 
         return 0;
@@ -4159,7 +4339,7 @@ int socket_from_display(const char *display, char **path) {
 
         k = strspn(display+1, "0123456789");
 
-        f = new(char, sizeof("/tmp/.X11-unix/X") + k);
+        f = new(char, strlen("/tmp/.X11-unix/X") + k + 1);
         if (!f)
                 return -ENOMEM;
 
@@ -4250,7 +4430,7 @@ char* uid_to_name(uid_t uid) {
         if (p)
                 return strdup(p->pw_name);
 
-        if (asprintf(&r, "%lu", (unsigned long) uid) < 0)
+        if (asprintf(&r, UID_FMT, uid) < 0)
                 return NULL;
 
         return r;
@@ -4267,7 +4447,7 @@ char* gid_to_name(gid_t gid) {
         if (p)
                 return strdup(p->gr_name);
 
-        if (asprintf(&r, "%lu", (unsigned long) gid) < 0)
+        if (asprintf(&r, GID_FMT, gid) < 0)
                 return NULL;
 
         return r;
@@ -4412,22 +4592,6 @@ int dirent_ensure_type(DIR *d, struct dirent *de) {
                 S_ISCHR(st.st_mode)  ? DT_CHR  :
                 S_ISBLK(st.st_mode)  ? DT_BLK  :
                                        DT_UNKNOWN;
-
-        return 0;
-}
-
-int in_search_path(const char *path, char **search) {
-        char **i;
-        _cleanup_free_ char *parent = NULL;
-        int r;
-
-        r = path_get_parent(path, &parent);
-        if (r < 0)
-                return r;
-
-        STRV_FOREACH(i, search)
-                if (path_equal(parent, *i))
-                        return 1;
 
         return 0;
 }
@@ -4691,7 +4855,7 @@ static const char* const sched_policy_table[] = {
 
 DEFINE_STRING_TABLE_LOOKUP_WITH_FALLBACK(sched_policy, int, INT_MAX);
 
-static const char* const rlimit_table[] = {
+static const char* const rlimit_table[_RLIMIT_MAX] = {
         [RLIMIT_CPU] = "LimitCPU",
         [RLIMIT_FSIZE] = "LimitFSIZE",
         [RLIMIT_DATA] = "LimitDATA",
@@ -4793,7 +4957,7 @@ int signal_from_string(const char *s) {
                 if (signo > 0 && signo < _NSIG)
                         return signo;
         }
-        return -1;
+        return -EINVAL;
 }
 
 bool kexec_loaded(void) {
@@ -5162,7 +5326,7 @@ int make_console_stdio(void) {
 
         /* Make /dev/console the controlling terminal and stdin/stdout/stderr */
 
-        fd = acquire_terminal("/dev/console", false, true, true, (usec_t) -1);
+        fd = acquire_terminal("/dev/console", false, true, true, USEC_INFINITY);
         if (fd < 0) {
                 log_error("Failed to acquire terminal: %s", strerror(-fd));
                 return fd;
@@ -5186,8 +5350,8 @@ int get_home_dir(char **_h) {
         assert(_h);
 
         /* Take the user specified one */
-        e = getenv("HOME");
-        if (e) {
+        e = secure_getenv("HOME");
+        if (e && path_is_absolute(e)) {
                 h = strdup(e);
                 if (!h)
                         return -ENOMEM;
@@ -5294,13 +5458,14 @@ bool filename_is_safe(const char *p) {
 bool string_is_safe(const char *p) {
         const char *t;
 
-        assert(p);
+        if (!p)
+                return false;
 
         for (t = p; *t; t++) {
                 if (*t > 0 && *t < ' ')
                         return false;
 
-                if (strchr("\\\"\'", *t))
+                if (strchr("\\\"\'\0x7f", *t))
                         return false;
         }
 
@@ -5308,17 +5473,24 @@ bool string_is_safe(const char *p) {
 }
 
 /**
- * Check if a string contains control characters.
- * Spaces and tabs are not considered control characters.
+ * Check if a string contains control characters. If 'ok' is non-NULL
+ * it may be a string containing additional CCs to be considered OK.
  */
-bool string_has_cc(const char *p) {
+bool string_has_cc(const char *p, const char *ok) {
         const char *t;
 
         assert(p);
 
-        for (t = p; *t; t++)
-                if (*t > 0 && *t < ' ' && *t != '\t')
+        for (t = p; *t; t++) {
+                if (ok && strchr(ok, *t))
+                        continue;
+
+                if (*t > 0 && *t < ' ')
                         return true;
+
+                if (*t == 127)
+                        return true;
+        }
 
         return false;
 }
@@ -5412,21 +5584,27 @@ out:
 
 const char *draw_special_char(DrawSpecialChar ch) {
         static const char *draw_table[2][_DRAW_SPECIAL_CHAR_MAX] = {
+
                 /* UTF-8 */ {
-                        [DRAW_TREE_VERT]          = "\342\224\202 ",            /* │  */
+                        [DRAW_TREE_VERTICAL]      = "\342\224\202 ",            /* │  */
                         [DRAW_TREE_BRANCH]        = "\342\224\234\342\224\200", /* ├─ */
                         [DRAW_TREE_RIGHT]         = "\342\224\224\342\224\200", /* └─ */
                         [DRAW_TREE_SPACE]         = "  ",                       /*    */
-                        [DRAW_TRIANGULAR_BULLET]  = "\342\200\243 ",            /* ‣  */
-                        [DRAW_BLACK_CIRCLE]       = "\342\227\217 ",            /* ●  */
+                        [DRAW_TRIANGULAR_BULLET]  = "\342\200\243",             /* ‣ */
+                        [DRAW_BLACK_CIRCLE]       = "\342\227\217",             /* ● */
+                        [DRAW_ARROW]              = "\342\206\222",             /* → */
+                        [DRAW_DASH]               = "\342\200\223",             /* – */
                 },
+
                 /* ASCII fallback */ {
-                        [DRAW_TREE_VERT]          = "| ",
+                        [DRAW_TREE_VERTICAL]      = "| ",
                         [DRAW_TREE_BRANCH]        = "|-",
                         [DRAW_TREE_RIGHT]         = "`-",
                         [DRAW_TREE_SPACE]         = "  ",
-                        [DRAW_TRIANGULAR_BULLET]  = "> ",
-                        [DRAW_BLACK_CIRCLE]       = "* ",
+                        [DRAW_TRIANGULAR_BULLET]  = ">",
+                        [DRAW_BLACK_CIRCLE]       = "*",
+                        [DRAW_ARROW]              = "->",
+                        [DRAW_DASH]               = "-",
                 }
         };
 
@@ -5614,7 +5792,7 @@ int on_ac_power(void) {
                 if (n != 6 || memcmp(contents, "Mains\n", 6))
                         continue;
 
-                close_nointr_nofail(fd);
+                safe_close(fd);
                 fd = openat(device, "online", O_RDONLY|O_CLOEXEC|O_NOCTTY);
                 if (fd < 0) {
                         if (errno == ENOENT)
@@ -5642,21 +5820,24 @@ int on_ac_power(void) {
         return found_online || !found_offline;
 }
 
-static int search_and_fopen_internal(const char *path, const char *mode, char **search, FILE **_f) {
+static int search_and_fopen_internal(const char *path, const char *mode, const char *root, char **search, FILE **_f) {
         char **i;
 
         assert(path);
         assert(mode);
         assert(_f);
 
-        if (!path_strv_canonicalize_absolute_uniq(search, NULL))
+        if (!path_strv_resolve_uniq(search, root))
                 return -ENOMEM;
 
         STRV_FOREACH(i, search) {
                 _cleanup_free_ char *p = NULL;
                 FILE *f;
 
-                p = strjoin(*i, "/", path, NULL);
+                if (root)
+                        p = strjoin(root, *i, "/", path, NULL);
+                else
+                        p = strjoin(*i, "/", path, NULL);
                 if (!p)
                         return -ENOMEM;
 
@@ -5673,7 +5854,7 @@ static int search_and_fopen_internal(const char *path, const char *mode, char **
         return -ENOENT;
 }
 
-int search_and_fopen(const char *path, const char *mode, const char **search, FILE **_f) {
+int search_and_fopen(const char *path, const char *mode, const char *root, const char **search, FILE **_f) {
         _cleanup_strv_free_ char **copy = NULL;
 
         assert(path);
@@ -5696,10 +5877,10 @@ int search_and_fopen(const char *path, const char *mode, const char **search, FI
         if (!copy)
                 return -ENOMEM;
 
-        return search_and_fopen_internal(path, mode, copy, _f);
+        return search_and_fopen_internal(path, mode, root, copy, _f);
 }
 
-int search_and_fopen_nulstr(const char *path, const char *mode, const char *search, FILE **_f) {
+int search_and_fopen_nulstr(const char *path, const char *mode, const char *root, const char *search, FILE **_f) {
         _cleanup_strv_free_ char **s = NULL;
 
         if (path_is_absolute(path)) {
@@ -5718,7 +5899,7 @@ int search_and_fopen_nulstr(const char *path, const char *mode, const char *sear
         if (!s)
                 return -ENOMEM;
 
-        return search_and_fopen_internal(path, mode, s, _f);
+        return search_and_fopen_internal(path, mode, root, s, _f);
 }
 
 char *strextend(char **x, ...) {
@@ -5792,8 +5973,8 @@ char *strrep(const char *s, unsigned n) {
         return r;
 }
 
-void* greedy_realloc(void **p, size_t *allocated, size_t need) {
-        size_t a;
+void* greedy_realloc(void **p, size_t *allocated, size_t need, size_t size) {
+        size_t a, newalloc;
         void *q;
 
         assert(p);
@@ -5802,10 +5983,11 @@ void* greedy_realloc(void **p, size_t *allocated, size_t need) {
         if (*allocated >= need)
                 return *p;
 
-        a = MAX(64u, need * 2);
+        newalloc = MAX(need * 2, 64u / size);
+        a = newalloc * size;
 
         /* check for overflows */
-        if (a < need)
+        if (a < size * need)
                 return NULL;
 
         q = realloc(*p, a);
@@ -5813,11 +5995,11 @@ void* greedy_realloc(void **p, size_t *allocated, size_t need) {
                 return NULL;
 
         *p = q;
-        *allocated = a;
+        *allocated = newalloc;
         return q;
 }
 
-void* greedy_realloc0(void **p, size_t *allocated, size_t need) {
+void* greedy_realloc0(void **p, size_t *allocated, size_t need, size_t size) {
         size_t prev;
         uint8_t *q;
 
@@ -5826,12 +6008,12 @@ void* greedy_realloc0(void **p, size_t *allocated, size_t need) {
 
         prev = *allocated;
 
-        q = greedy_realloc(p, allocated, need);
+        q = greedy_realloc(p, allocated, need, size);
         if (!q)
                 return NULL;
 
         if (*allocated > prev)
-                memzero(&q[prev], *allocated - prev);
+                memzero(q + prev * size, (*allocated - prev) * size);
 
         return q;
 }
@@ -5909,8 +6091,8 @@ int split_pair(const char *s, const char *sep, char **l, char **r) {
 }
 
 int shall_restore_state(void) {
-        _cleanup_free_ char *line;
-        char *w, *state;
+        _cleanup_free_ char *line = NULL;
+        const char *word, *state;
         size_t l;
         int r;
 
@@ -5920,11 +6102,26 @@ int shall_restore_state(void) {
         if (r == 0) /* Container ... */
                 return 1;
 
-        FOREACH_WORD_QUOTED(w, l, line, state)
-                if (l == 23 && strneq(w, "systemd.restore_state=0", 23))
-                        return 0;
+        r = 1;
 
-        return 1;
+        FOREACH_WORD_QUOTED(word, l, line, state) {
+                const char *e;
+                char n[l+1];
+                int k;
+
+                memcpy(n, word, l);
+                n[l] = 0;
+
+                e = startswith(n, "systemd.restore_state=");
+                if (!e)
+                        continue;
+
+                k = parse_boolean(e);
+                if (k >= 0)
+                        r = k;
+        }
+
+        return r;
 }
 
 int proc_cmdline(char **ret) {
@@ -5942,7 +6139,7 @@ int proc_cmdline(char **ret) {
                         if (*p == 0)
                                 *p = ' ';
 
-                *p  = 0;
+                *p = 0;
                 *ret = buf;
                 return 1;
         }
@@ -5954,11 +6151,13 @@ int proc_cmdline(char **ret) {
         return 1;
 }
 
-int parse_proc_cmdline(int (*parse_word)(const char *word)) {
+int parse_proc_cmdline(int (*parse_item)(const char *key, const char *value)) {
         _cleanup_free_ char *line = NULL;
-        char *w, *state;
+        const char *w, *state;
         size_t l;
         int r;
+
+        assert(parse_item);
 
         r = proc_cmdline(&line);
         if (r < 0)
@@ -5967,17 +6166,23 @@ int parse_proc_cmdline(int (*parse_word)(const char *word)) {
                 return 0;
 
         FOREACH_WORD_QUOTED(w, l, line, state) {
-                _cleanup_free_ char *word;
+                char word[l+1], *value;
 
-                word = strndup(w, l);
-                if (!word)
-                        return log_oom();
+                memcpy(word, w, l);
+                word[l] = 0;
 
-                r = parse_word(word);
-                if (r < 0) {
-                        log_error("Failed on cmdline argument %s: %s", word, strerror(-r));
+                /* Filter out arguments that are intended only for the
+                 * initrd */
+                if (!in_initrd() && startswith(word, "rd."))
+                        continue;
+
+                value = strchr(word, '=');
+                if (value)
+                        *(value++) = 0;
+
+                r = parse_item(word, value);
+                if (r < 0)
                         return r;
-                }
         }
 
         return 0;
@@ -6014,58 +6219,91 @@ int container_get_leader(const char *machine, pid_t *pid) {
         return 0;
 }
 
-int namespace_open(pid_t pid, int *pidns_fd, int *mntns_fd, int *root_fd) {
-        _cleanup_close_ int pidnsfd = -1, mntnsfd = -1;
-        const char *pidns, *mntns, *root;
-        int rfd;
+int namespace_open(pid_t pid, int *pidns_fd, int *mntns_fd, int *netns_fd, int *root_fd) {
+        _cleanup_close_ int pidnsfd = -1, mntnsfd = -1, netnsfd = -1;
+        int rfd = -1;
 
         assert(pid >= 0);
-        assert(pidns_fd);
-        assert(mntns_fd);
-        assert(root_fd);
 
-        mntns = procfs_file_alloca(pid, "ns/mnt");
-        mntnsfd = open(mntns, O_RDONLY|O_NOCTTY|O_CLOEXEC);
-        if (mntnsfd < 0)
-                return -errno;
+        if (mntns_fd) {
+                const char *mntns;
 
-        pidns = procfs_file_alloca(pid, "ns/pid");
-        pidnsfd = open(pidns, O_RDONLY|O_NOCTTY|O_CLOEXEC);
-        if (pidnsfd < 0)
-                return -errno;
+                mntns = procfs_file_alloca(pid, "ns/mnt");
+                mntnsfd = open(mntns, O_RDONLY|O_NOCTTY|O_CLOEXEC);
+                if (mntnsfd < 0)
+                        return -errno;
+        }
 
-        root = procfs_file_alloca(pid, "root");
-        rfd = open(root, O_RDONLY|O_NOCTTY|O_CLOEXEC|O_DIRECTORY);
-        if (rfd < 0)
-                return -errno;
+        if (pidns_fd) {
+                const char *pidns;
 
-        *pidns_fd = pidnsfd;
-        *mntns_fd = mntnsfd;
-        *root_fd = rfd;
-        pidnsfd = -1;
-        mntnsfd = -1;
+                pidns = procfs_file_alloca(pid, "ns/pid");
+                pidnsfd = open(pidns, O_RDONLY|O_NOCTTY|O_CLOEXEC);
+                if (pidnsfd < 0)
+                        return -errno;
+        }
+
+        if (netns_fd) {
+                const char *netns;
+
+                netns = procfs_file_alloca(pid, "ns/net");
+                netnsfd = open(netns, O_RDONLY|O_NOCTTY|O_CLOEXEC);
+                if (netnsfd < 0)
+                        return -errno;
+        }
+
+        if (root_fd) {
+                const char *root;
+
+                root = procfs_file_alloca(pid, "root");
+                rfd = open(root, O_RDONLY|O_NOCTTY|O_CLOEXEC|O_DIRECTORY);
+                if (rfd < 0)
+                        return -errno;
+        }
+
+        if (pidns_fd)
+                *pidns_fd = pidnsfd;
+
+        if (mntns_fd)
+                *mntns_fd = mntnsfd;
+
+        if (netns_fd)
+                *netns_fd = netnsfd;
+
+        if (root_fd)
+                *root_fd = rfd;
+
+        pidnsfd = mntnsfd = netnsfd = -1;
 
         return 0;
 }
 
-int namespace_enter(int pidns_fd, int mntns_fd, int root_fd) {
-        assert(pidns_fd >= 0);
-        assert(mntns_fd >= 0);
-        assert(root_fd >= 0);
+int namespace_enter(int pidns_fd, int mntns_fd, int netns_fd, int root_fd) {
 
-        if (setns(pidns_fd, CLONE_NEWPID) < 0)
-                return -errno;
+        if (pidns_fd >= 0)
+                if (setns(pidns_fd, CLONE_NEWPID) < 0)
+                        return -errno;
 
-        if (setns(mntns_fd, CLONE_NEWNS) < 0)
-                return -errno;
+        if (mntns_fd >= 0)
+                if (setns(mntns_fd, CLONE_NEWNS) < 0)
+                        return -errno;
 
-        if (fchdir(root_fd) < 0)
-                return -errno;
+        if (netns_fd >= 0)
+                if (setns(netns_fd, CLONE_NEWNET) < 0)
+                        return -errno;
 
-        if (chroot(".") < 0)
-                return -errno;
+        if (root_fd >= 0) {
+                if (fchdir(root_fd) < 0)
+                        return -errno;
+
+                if (chroot(".") < 0)
+                        return -errno;
+        }
 
         if (setresgid(0, 0, 0) < 0)
+                return -errno;
+
+        if (setgroups(0, NULL) < 0)
                 return -errno;
 
         if (setresuid(0, 0, 0) < 0)
@@ -6268,4 +6506,635 @@ const char* personality_to_string(unsigned long p) {
 #endif
 
         return NULL;
+}
+
+uint64_t physical_memory(void) {
+        long mem;
+
+        /* We return this as uint64_t in case we are running as 32bit
+         * process on a 64bit kernel with huge amounts of memory */
+
+        mem = sysconf(_SC_PHYS_PAGES);
+        assert(mem > 0);
+
+        return (uint64_t) mem * (uint64_t) page_size();
+}
+
+char* mount_test_option(const char *haystack, const char *needle) {
+
+        struct mntent me = {
+                .mnt_opts = (char*) haystack
+        };
+
+        assert(needle);
+
+        /* Like glibc's hasmntopt(), but works on a string, not a
+         * struct mntent */
+
+        if (!haystack)
+                return NULL;
+
+        return hasmntopt(&me, needle);
+}
+
+void hexdump(FILE *f, const void *p, size_t s) {
+        const uint8_t *b = p;
+        unsigned n = 0;
+
+        assert(s == 0 || b);
+
+        while (s > 0) {
+                size_t i;
+
+                fprintf(f, "%04x  ", n);
+
+                for (i = 0; i < 16; i++) {
+
+                        if (i >= s)
+                                fputs("   ", f);
+                        else
+                                fprintf(f, "%02x ", b[i]);
+
+                        if (i == 7)
+                                fputc(' ', f);
+                }
+
+                fputc(' ', f);
+
+                for (i = 0; i < 16; i++) {
+
+                        if (i >= s)
+                                fputc(' ', f);
+                        else
+                                fputc(isprint(b[i]) ? (char) b[i] : '.', f);
+                }
+
+                fputc('\n', f);
+
+                if (s < 16)
+                        break;
+
+                n += 16;
+                b += 16;
+                s -= 16;
+        }
+}
+
+int update_reboot_param_file(const char *param) {
+        int r = 0;
+
+        if (param) {
+
+                r = write_string_file(REBOOT_PARAM_FILE, param);
+                if (r < 0)
+                        log_error("Failed to write reboot param to "
+                                  REBOOT_PARAM_FILE": %s", strerror(-r));
+        } else
+                unlink(REBOOT_PARAM_FILE);
+
+        return r;
+}
+
+int umount_recursive(const char *prefix, int flags) {
+        bool again;
+        int n = 0, r;
+
+        /* Try to umount everything recursively below a
+         * directory. Also, take care of stacked mounts, and keep
+         * unmounting them until they are gone. */
+
+        do {
+                _cleanup_fclose_ FILE *proc_self_mountinfo = NULL;
+
+                again = false;
+                r = 0;
+
+                proc_self_mountinfo = fopen("/proc/self/mountinfo", "re");
+                if (!proc_self_mountinfo)
+                        return -errno;
+
+                for (;;) {
+                        _cleanup_free_ char *path = NULL, *p = NULL;
+                        int k;
+
+                        k = fscanf(proc_self_mountinfo,
+                                   "%*s "       /* (1) mount id */
+                                   "%*s "       /* (2) parent id */
+                                   "%*s "       /* (3) major:minor */
+                                   "%*s "       /* (4) root */
+                                   "%ms "       /* (5) mount point */
+                                   "%*s"        /* (6) mount options */
+                                   "%*[^-]"     /* (7) optional fields */
+                                   "- "         /* (8) separator */
+                                   "%*s "       /* (9) file system type */
+                                   "%*s"        /* (10) mount source */
+                                   "%*s"        /* (11) mount options 2 */
+                                   "%*[^\n]",   /* some rubbish at the end */
+                                   &path);
+                        if (k != 1) {
+                                if (k == EOF)
+                                        break;
+
+                                continue;
+                        }
+
+                        p = cunescape(path);
+                        if (!p)
+                                return -ENOMEM;
+
+                        if (!path_startswith(p, prefix))
+                                continue;
+
+                        if (umount2(p, flags) < 0) {
+                                r = -errno;
+                                continue;
+                        }
+
+                        again = true;
+                        n++;
+
+                        break;
+                }
+
+        } while (again);
+
+        return r ? r : n;
+}
+
+int bind_remount_recursive(const char *prefix, bool ro) {
+        _cleanup_set_free_free_ Set *done = NULL;
+        _cleanup_free_ char *cleaned = NULL;
+        int r;
+
+        /* Recursively remount a directory (and all its submounts)
+         * read-only or read-write. If the directory is already
+         * mounted, we reuse the mount and simply mark it
+         * MS_BIND|MS_RDONLY (or remove the MS_RDONLY for read-write
+         * operation). If it isn't we first make it one. Afterwards we
+         * apply MS_BIND|MS_RDONLY (or remove MS_RDONLY) to all
+         * submounts we can access, too. When mounts are stacked on
+         * the same mount point we only care for each individual
+         * "top-level" mount on each point, as we cannot
+         * influence/access the underlying mounts anyway. We do not
+         * have any effect on future submounts that might get
+         * propagated, they migt be writable. This includes future
+         * submounts that have been triggered via autofs. */
+
+        cleaned = strdup(prefix);
+        if (!cleaned)
+                return -ENOMEM;
+
+        path_kill_slashes(cleaned);
+
+        done = set_new(string_hash_func, string_compare_func);
+        if (!done)
+                return -ENOMEM;
+
+        for (;;) {
+                _cleanup_fclose_ FILE *proc_self_mountinfo = NULL;
+                _cleanup_set_free_free_ Set *todo = NULL;
+                bool top_autofs = false;
+                char *x;
+
+                todo = set_new(string_hash_func, string_compare_func);
+                if (!todo)
+                        return -ENOMEM;
+
+                proc_self_mountinfo = fopen("/proc/self/mountinfo", "re");
+                if (!proc_self_mountinfo)
+                        return -errno;
+
+                for (;;) {
+                        _cleanup_free_ char *path = NULL, *p = NULL, *type = NULL;
+                        int k;
+
+                        k = fscanf(proc_self_mountinfo,
+                                   "%*s "       /* (1) mount id */
+                                   "%*s "       /* (2) parent id */
+                                   "%*s "       /* (3) major:minor */
+                                   "%*s "       /* (4) root */
+                                   "%ms "       /* (5) mount point */
+                                   "%*s"        /* (6) mount options (superblock) */
+                                   "%*[^-]"     /* (7) optional fields */
+                                   "- "         /* (8) separator */
+                                   "%ms "       /* (9) file system type */
+                                   "%*s"        /* (10) mount source */
+                                   "%*s"        /* (11) mount options (bind mount) */
+                                   "%*[^\n]",   /* some rubbish at the end */
+                                   &path,
+                                   &type);
+                        if (k != 2) {
+                                if (k == EOF)
+                                        break;
+
+                                continue;
+                        }
+
+                        p = cunescape(path);
+                        if (!p)
+                                return -ENOMEM;
+
+                        /* Let's ignore autofs mounts.  If they aren't
+                         * triggered yet, we want to avoid triggering
+                         * them, as we don't make any guarantees for
+                         * future submounts anyway.  If they are
+                         * already triggered, then we will find
+                         * another entry for this. */
+                        if (streq(type, "autofs")) {
+                                top_autofs = top_autofs || path_equal(cleaned, p);
+                                continue;
+                        }
+
+                        if (path_startswith(p, cleaned) &&
+                            !set_contains(done, p)) {
+
+                                r = set_consume(todo, p);
+                                p = NULL;
+
+                                if (r == -EEXIST)
+                                        continue;
+                                if (r < 0)
+                                        return r;
+                        }
+                }
+
+                /* If we have no submounts to process anymore and if
+                 * the root is either already done, or an autofs, we
+                 * are done */
+                if (set_isempty(todo) &&
+                    (top_autofs || set_contains(done, cleaned)))
+                        return 0;
+
+                if (!set_contains(done, cleaned) &&
+                    !set_contains(todo, cleaned)) {
+                        /* The prefix directory itself is not yet a
+                         * mount, make it one. */
+                        if (mount(cleaned, cleaned, NULL, MS_BIND|MS_REC, NULL) < 0)
+                                return -errno;
+
+                        if (mount(NULL, prefix, NULL, MS_BIND|MS_REMOUNT|(ro ? MS_RDONLY : 0), NULL) < 0)
+                                return -errno;
+
+                        x = strdup(cleaned);
+                        if (!x)
+                                return -ENOMEM;
+
+                        r = set_consume(done, x);
+                        if (r < 0)
+                                return r;
+                }
+
+                while ((x = set_steal_first(todo))) {
+
+                        r = set_consume(done, x);
+                        if (r == -EEXIST)
+                                continue;
+                        if (r < 0)
+                                return r;
+
+                        if (mount(NULL, x, NULL, MS_BIND|MS_REMOUNT|(ro ? MS_RDONLY : 0), NULL) < 0) {
+
+                                /* Deal with mount points that are
+                                 * obstructed by a later mount */
+
+                                if (errno != ENOENT)
+                                        return -errno;
+                        }
+
+                }
+        }
+}
+
+int fflush_and_check(FILE *f) {
+        assert(f);
+
+        errno = 0;
+        fflush(f);
+
+        if (ferror(f))
+                return errno ? -errno : -EIO;
+
+        return 0;
+}
+
+char *tempfn_xxxxxx(const char *p) {
+        const char *fn;
+        char *t;
+        size_t k;
+
+        assert(p);
+
+        t = new(char, strlen(p) + 1 + 6 + 1);
+        if (!t)
+                return NULL;
+
+        fn = basename(p);
+        k = fn - p;
+
+        strcpy(stpcpy(stpcpy(mempcpy(t, p, k), "."), fn), "XXXXXX");
+
+        return t;
+}
+
+char *tempfn_random(const char *p) {
+        const char *fn;
+        char *t, *x;
+        uint64_t u;
+        size_t k;
+        unsigned i;
+
+        assert(p);
+
+        t = new(char, strlen(p) + 1 + 16 + 1);
+        if (!t)
+                return NULL;
+
+        fn = basename(p);
+        k = fn - p;
+
+        x = stpcpy(stpcpy(mempcpy(t, p, k), "."), fn);
+
+        u = random_u64();
+        for (i = 0; i < 16; i++) {
+                *(x++) = hexchar(u & 0xF);
+                u >>= 4;
+        }
+
+        *x = 0;
+
+        return t;
+}
+
+/* make sure the hostname is not "localhost" */
+bool is_localhost(const char *hostname) {
+        assert(hostname);
+
+        /* This tries to identify local host and domain names
+         * described in RFC6761 plus the redhatism of .localdomain */
+
+        return streq(hostname, "localhost") ||
+               streq(hostname, "localhost.") ||
+               streq(hostname, "localdomain.") ||
+               streq(hostname, "localdomain") ||
+               endswith(hostname, ".localhost") ||
+               endswith(hostname, ".localhost.") ||
+               endswith(hostname, ".localdomain") ||
+               endswith(hostname, ".localdomain.");
+}
+
+int take_password_lock(const char *root) {
+
+        struct flock flock = {
+                .l_type = F_WRLCK,
+                .l_whence = SEEK_SET,
+                .l_start = 0,
+                .l_len = 0,
+        };
+
+        const char *path;
+        int fd, r;
+
+        /* This is roughly the same as lckpwdf(), but not as awful. We
+         * don't want to use alarm() and signals, hence we implement
+         * our own trivial version of this.
+         *
+         * Note that shadow-utils also takes per-database locks in
+         * addition to lckpwdf(). However, we don't given that they
+         * are redundant as they they invoke lckpwdf() first and keep
+         * it during everything they do. The per-database locks are
+         * awfully racy, and thus we just won't do them. */
+
+        if (root)
+                path = strappenda(root, "/etc/.pwd.lock");
+        else
+                path = "/etc/.pwd.lock";
+
+        fd = open(path, O_WRONLY|O_CREAT|O_CLOEXEC|O_NOCTTY|O_NOFOLLOW, 0600);
+        if (fd < 0)
+                return -errno;
+
+        r = fcntl(fd, F_SETLKW, &flock);
+        if (r < 0) {
+                safe_close(fd);
+                return -errno;
+        }
+
+        return fd;
+}
+
+int is_symlink(const char *path) {
+        struct stat info;
+
+        if (lstat(path, &info) < 0)
+                return -errno;
+
+        if (S_ISLNK(info.st_mode))
+                return 1;
+
+        return 0;
+}
+
+int unquote_first_word(const char **p, char **ret) {
+        _cleanup_free_ char *s = NULL;
+        size_t allocated = 0, sz = 0;
+
+        enum {
+                START,
+                VALUE,
+                VALUE_ESCAPE,
+                SINGLE_QUOTE,
+                SINGLE_QUOTE_ESCAPE,
+                DOUBLE_QUOTE,
+                DOUBLE_QUOTE_ESCAPE,
+                SPACE,
+        } state = START;
+
+        assert(p);
+        assert(*p);
+        assert(ret);
+
+        /* Parses the first word of a string, and returns it in
+         * *ret. Removes all quotes in the process. When parsing fails
+         * (because of an uneven number of quotes or similar), leaves
+         * the pointer *p at the first invalid character. */
+
+        for (;;) {
+                char c = **p;
+
+                switch (state) {
+
+                case START:
+                        if (c == 0)
+                                goto finish;
+                        else if (strchr(WHITESPACE, c))
+                                break;
+
+                        state = VALUE;
+                        /* fallthrough */
+
+                case VALUE:
+                        if (c == 0)
+                                goto finish;
+                        else if (c == '\'')
+                                state = SINGLE_QUOTE;
+                        else if (c == '\\')
+                                state = VALUE_ESCAPE;
+                        else if (c == '\"')
+                                state = DOUBLE_QUOTE;
+                        else if (strchr(WHITESPACE, c))
+                                state = SPACE;
+                        else {
+                                if (!GREEDY_REALLOC(s, allocated, sz+2))
+                                        return -ENOMEM;
+
+                                s[sz++] = c;
+                        }
+
+                        break;
+
+                case VALUE_ESCAPE:
+                        if (c == 0)
+                                return -EINVAL;
+
+                        if (!GREEDY_REALLOC(s, allocated, sz+2))
+                                return -ENOMEM;
+
+                        s[sz++] = c;
+                        state = VALUE;
+
+                        break;
+
+                case SINGLE_QUOTE:
+                        if (c == 0)
+                                return -EINVAL;
+                        else if (c == '\'')
+                                state = VALUE;
+                        else if (c == '\\')
+                                state = SINGLE_QUOTE_ESCAPE;
+                        else {
+                                if (!GREEDY_REALLOC(s, allocated, sz+2))
+                                        return -ENOMEM;
+
+                                s[sz++] = c;
+                        }
+
+                        break;
+
+                case SINGLE_QUOTE_ESCAPE:
+                        if (c == 0)
+                                return -EINVAL;
+
+                        if (!GREEDY_REALLOC(s, allocated, sz+2))
+                                return -ENOMEM;
+
+                        s[sz++] = c;
+                        state = SINGLE_QUOTE;
+                        break;
+
+                case DOUBLE_QUOTE:
+                        if (c == 0)
+                                return -EINVAL;
+                        else if (c == '\"')
+                                state = VALUE;
+                        else if (c == '\\')
+                                state = DOUBLE_QUOTE_ESCAPE;
+                        else {
+                                if (!GREEDY_REALLOC(s, allocated, sz+2))
+                                        return -ENOMEM;
+
+                                s[sz++] = c;
+                        }
+
+                        break;
+
+                case DOUBLE_QUOTE_ESCAPE:
+                        if (c == 0)
+                                return -EINVAL;
+
+                        if (!GREEDY_REALLOC(s, allocated, sz+2))
+                                return -ENOMEM;
+
+                        s[sz++] = c;
+                        state = DOUBLE_QUOTE;
+                        break;
+
+                case SPACE:
+                        if (c == 0)
+                                goto finish;
+                        if (!strchr(WHITESPACE, c))
+                                goto finish;
+
+                        break;
+                }
+
+                (*p) ++;
+        }
+
+finish:
+        if (!s) {
+                *ret = NULL;
+                return 0;
+        }
+
+        s[sz] = 0;
+        *ret = s;
+        s = NULL;
+
+        return 1;
+}
+
+int unquote_many_words(const char **p, ...) {
+        va_list ap;
+        char **l;
+        int n = 0, i, c, r;
+
+        /* Parses a number of words from a string, stripping any
+         * quotes if necessary. */
+
+        assert(p);
+
+        /* Count how many words are expected */
+        va_start(ap, p);
+        for (;;) {
+                if (!va_arg(ap, char **))
+                        break;
+                n++;
+        }
+        va_end(ap);
+
+        if (n <= 0)
+                return 0;
+
+        /* Read all words into a temporary array */
+        l = newa0(char*, n);
+        for (c = 0; c < n; c++) {
+
+                r = unquote_first_word(p, &l[c]);
+                if (r < 0) {
+                        int j;
+
+                        for (j = 0; j < c; j++) {
+                                free(l[j]);
+                                return r;
+                        }
+                }
+
+                if (r == 0)
+                        break;
+        }
+
+        /* If we managed to parse all words, return them in the passed
+         * in parameters */
+        va_start(ap, p);
+        for (i = 0; i < n; i++) {
+                char **v;
+
+                v = va_arg(ap, char **);
+                assert(v);
+
+                *v = l[i];
+        }
+        va_end(ap);
+
+        return c;
 }

@@ -189,7 +189,7 @@ static int method_get_session_by_pid(sd_bus *bus, sd_bus_message *message, void 
         if (r < 0)
                 return r;
         if (!session)
-                return sd_bus_error_setf(error, BUS_ERROR_NO_SESSION_FOR_PID, "PID %lu does not belong to any known session", (unsigned long) pid);
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SESSION_FOR_PID, "PID "PID_FMT" does not belong to any known session", pid);
 
         p = session_bus_path(session);
         if (!p)
@@ -215,7 +215,7 @@ static int method_get_user(sd_bus *bus, sd_bus_message *message, void *userdata,
 
         user = hashmap_get(m->users, ULONG_TO_PTR((unsigned long) uid));
         if (!user)
-                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_USER, "No user '%lu' known or logged in", (unsigned long) uid);
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_USER, "No user "UID_FMT" known or logged in", uid);
 
         p = user_bus_path(user);
         if (!p)
@@ -257,7 +257,7 @@ static int method_get_user_by_pid(sd_bus *bus, sd_bus_message *message, void *us
         if (r < 0)
                 return r;
         if (!user)
-                return sd_bus_error_setf(error, BUS_ERROR_NO_USER_FOR_PID, "PID %lu does not belong to any known or logged in user", (unsigned long) pid);
+                return sd_bus_error_setf(error, BUS_ERROR_NO_USER_FOR_PID, "PID "PID_FMT" does not belong to any known or logged in user", pid);
 
         p = user_bus_path(user);
         if (!p)
@@ -594,6 +594,17 @@ static int method_create_session(sd_bus *bus, sd_bus_message *message, void *use
                 if (!path)
                         return -ENOMEM;
 
+                log_debug("Sending reply about an existing session: "
+                          "id=%s object_path=%s uid=%u runtime_path=%s "
+                          "session_fd=%d seat=%s vtnr=%u",
+                          session->id,
+                          path,
+                          (uint32_t) session->user->uid,
+                          session->user->runtime_path,
+                          fifo_fd,
+                          session->seat ? session->seat->id : "",
+                          (uint32_t) session->vtnr);
+
                 return sd_bus_reply_method_return(
                                 message, "soshusub",
                                 session->id,
@@ -610,7 +621,7 @@ static int method_create_session(sd_bus *bus, sd_bus_message *message, void *use
         if (audit_id > 0) {
                 /* Keep our session IDs and the audit session IDs in sync */
 
-                if (asprintf(&id, "%lu", (unsigned long) audit_id) < 0)
+                if (asprintf(&id, "%"PRIu32, audit_id) < 0)
                         return -ENOMEM;
 
                 /* Wut? There's already a session by this name and we
@@ -912,7 +923,7 @@ static int method_kill_user(sd_bus *bus, sd_bus_message *message, void *userdata
 
         user = hashmap_get(m->users, ULONG_TO_PTR((unsigned long) uid));
         if (!user)
-                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_USER, "No user '%lu' known or logged in", (unsigned long) uid);
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_USER, "No user "UID_FMT" known or logged in", uid);
 
         r = user_kill(user, signo);
         if (r < 0)
@@ -962,7 +973,7 @@ static int method_terminate_user(sd_bus *bus, sd_bus_message *message, void *use
 
         user = hashmap_get(m->users, ULONG_TO_PTR((unsigned long) uid));
         if (!user)
-                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_USER, "No user '%lu' known or logged in", (unsigned long) uid);
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_USER, "No user "UID_FMT" known or logged in", uid);
 
         r = user_stop(user, true);
         if (r < 0)
@@ -1018,13 +1029,13 @@ static int method_set_user_linger(sd_bus *bus, sd_bus_message *message, void *us
         if (!pw)
                 return errno ? -errno : -ENOENT;
 
-        r = bus_verify_polkit_async(bus,
-                                    &m->polkit_registry,
-                                    message,
-                                    "org.freedesktop.login1.set-user-linger",
-                                    interactive,
-                                    error,
-                                    method_set_user_linger, m);
+        r = bus_verify_polkit_async(
+                        message,
+                        CAP_SYS_ADMIN,
+                        "org.freedesktop.login1.set-user-linger",
+                        interactive,
+                        &m->polkit_registry,
+                        error);
         if (r < 0)
                 return r;
         if (r == 0)
@@ -1190,13 +1201,13 @@ static int method_attach_device(sd_bus *bus, sd_bus_message *message, void *user
         if (!seat_name_is_valid(seat))
                 return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Seat %s is not valid", seat);
 
-        r = bus_verify_polkit_async(bus,
-                                    &m->polkit_registry,
-                                    message,
-                                    "org.freedesktop.login1.attach-device",
-                                    interactive,
-                                    error,
-                                    method_attach_device, m);
+        r = bus_verify_polkit_async(
+                        message,
+                        CAP_SYS_ADMIN,
+                        "org.freedesktop.login1.attach-device",
+                        interactive,
+                        &m->polkit_registry,
+                        error);
         if (r < 0)
                 return r;
         if (r == 0)
@@ -1221,13 +1232,13 @@ static int method_flush_devices(sd_bus *bus, sd_bus_message *message, void *user
         if (r < 0)
                 return r;
 
-        r = bus_verify_polkit_async(bus,
-                                    &m->polkit_registry,
-                                    message,
-                                    "org.freedesktop.login1.flush-devices",
-                                    interactive,
-                                    error,
-                                    method_flush_devices, m);
+        r = bus_verify_polkit_async(
+                        message,
+                        CAP_SYS_ADMIN,
+                        "org.freedesktop.login1.flush-devices",
+                        interactive,
+                        &m->polkit_registry,
+                        error);
         if (r < 0)
                 return r;
         if (r == 0)
@@ -1294,6 +1305,51 @@ static int bus_manager_log_shutdown(
                           q, NULL);
 }
 
+static int lid_switch_ignore_handler(sd_event_source *e, uint64_t usec, void *userdata) {
+        Manager *m = userdata;
+
+        assert(e);
+        assert(m);
+
+        m->lid_switch_ignore_event_source = sd_event_source_unref(m->lid_switch_ignore_event_source);
+        return 0;
+}
+
+int manager_set_lid_switch_ignore(Manager *m, usec_t until) {
+        int r;
+
+        assert(m);
+
+        if (until <= now(CLOCK_MONOTONIC))
+                return 0;
+
+        /* We want to ignore the lid switch for a while after each
+         * suspend, and after boot-up. Hence let's install a timer for
+         * this. As long as the event source exists we ignore the lid
+         * switch. */
+
+        if (m->lid_switch_ignore_event_source) {
+                usec_t u;
+
+                r = sd_event_source_get_time(m->lid_switch_ignore_event_source, &u);
+                if (r < 0)
+                        return r;
+
+                if (until <= u)
+                        return 0;
+
+                r = sd_event_source_set_time(m->lid_switch_ignore_event_source, until);
+        } else
+                r = sd_event_add_time(
+                                m->event,
+                                &m->lid_switch_ignore_event_source,
+                                CLOCK_MONOTONIC,
+                                until, 0,
+                                lid_switch_ignore_handler, m);
+
+        return r;
+}
+
 static int execute_shutdown_or_sleep(
                 Manager *m,
                 InhibitWhat w,
@@ -1336,6 +1392,9 @@ static int execute_shutdown_or_sleep(
         free(m->action_job);
         m->action_job = c;
         m->action_what = w;
+
+        /* Make sure the lid switch is ignored for a while */
+        manager_set_lid_switch_ignore(m, now(CLOCK_MONOTONIC) + IGNORE_LID_SWITCH_SUSPEND_USEC);
 
         return 0;
 }
@@ -1473,24 +1532,27 @@ static int method_do_shutdown_or_sleep(
         blocked = manager_is_inhibited(m, w, INHIBIT_BLOCK, NULL, false, true, uid, NULL);
 
         if (multiple_sessions) {
-                r = bus_verify_polkit_async(m->bus, &m->polkit_registry, message,
-                                            action_multiple_sessions, interactive, error, method, m);
+                r = bus_verify_polkit_async(message, CAP_SYS_BOOT, action_multiple_sessions, interactive, &m->polkit_registry, error);
                 if (r < 0)
                         return r;
+                if (r == 0)
+                        return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
         }
 
         if (blocked) {
-                r = bus_verify_polkit_async(m->bus, &m->polkit_registry, message,
-                                            action_ignore_inhibit, interactive, error, method, m);
+                r = bus_verify_polkit_async(message, CAP_SYS_BOOT, action_ignore_inhibit, interactive, &m->polkit_registry, error);
                 if (r < 0)
                         return r;
+                if (r == 0)
+                        return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
         }
 
         if (!multiple_sessions && !blocked) {
-                r = bus_verify_polkit_async(m->bus, &m->polkit_registry, message,
-                                            action, interactive, error, method, m);
+                r = bus_verify_polkit_async(message, CAP_SYS_BOOT, action, interactive, &m->polkit_registry, error);
                 if (r < 0)
                         return r;
+                if (r == 0)
+                        return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
         }
 
         r = bus_manager_shutdown_or_sleep_now_or_later(m, unit_name, w, error);
@@ -1623,7 +1685,7 @@ static int method_can_shutdown_or_sleep(
         blocked = manager_is_inhibited(m, w, INHIBIT_BLOCK, NULL, false, true, uid, NULL);
 
         if (multiple_sessions) {
-                r = bus_verify_polkit(m->bus, message, action_multiple_sessions, false, &challenge, error);
+                r = bus_verify_polkit(message, CAP_SYS_BOOT, action_multiple_sessions, false, &challenge, error);
                 if (r < 0)
                         return r;
 
@@ -1636,7 +1698,7 @@ static int method_can_shutdown_or_sleep(
         }
 
         if (blocked) {
-                r = bus_verify_polkit(m->bus, message, action_ignore_inhibit, false, &challenge, error);
+                r = bus_verify_polkit(message, CAP_SYS_BOOT, action_ignore_inhibit, false, &challenge, error);
                 if (r < 0)
                         return r;
 
@@ -1652,7 +1714,7 @@ static int method_can_shutdown_or_sleep(
                 /* If neither inhibit nor multiple sessions
                  * apply then just check the normal policy */
 
-                r = bus_verify_polkit(m->bus, message, action, false, &challenge, error);
+                r = bus_verify_polkit(message, CAP_SYS_BOOT, action, false, &challenge, error);
                 if (r < 0)
                         return r;
 
@@ -1772,7 +1834,7 @@ static int method_inhibit(sd_bus *bus, sd_bus_message *message, void *userdata, 
         if (m->action_what & w)
                 return sd_bus_error_setf(error, BUS_ERROR_OPERATION_IN_PROGRESS, "The operation inhibition has been requested for is already running");
 
-        r = bus_verify_polkit_async(bus, &m->polkit_registry, message,
+        r = bus_verify_polkit_async(message, CAP_SYS_BOOT,
                                     w == INHIBIT_SHUTDOWN             ? (mm == INHIBIT_BLOCK ? "org.freedesktop.login1.inhibit-block-shutdown" : "org.freedesktop.login1.inhibit-delay-shutdown") :
                                     w == INHIBIT_SLEEP                ? (mm == INHIBIT_BLOCK ? "org.freedesktop.login1.inhibit-block-sleep"    : "org.freedesktop.login1.inhibit-delay-sleep") :
                                     w == INHIBIT_IDLE                 ? "org.freedesktop.login1.inhibit-block-idle" :
@@ -1780,7 +1842,7 @@ static int method_inhibit(sd_bus *bus, sd_bus_message *message, void *userdata, 
                                     w == INHIBIT_HANDLE_SUSPEND_KEY   ? "org.freedesktop.login1.inhibit-handle-suspend-key" :
                                     w == INHIBIT_HANDLE_HIBERNATE_KEY ? "org.freedesktop.login1.inhibit-handle-hibernate-key" :
                                                                         "org.freedesktop.login1.inhibit-handle-lid-switch",
-                                    false, error, method_inhibit, m);
+                                    false, &m->polkit_registry, error);
         if (r < 0)
                 return r;
         if (r == 0)
@@ -2155,9 +2217,9 @@ int manager_dispatch_delayed(Manager *manager) {
                 if (manager->action_timestamp + manager->inhibit_delay_max > now(CLOCK_MONOTONIC))
                         return 0;
 
-                log_info("Delay lock is active (UID %lu/%s, PID %lu/%s) but inhibitor timeout is reached.",
-                         (unsigned long) offending->uid, strna(u),
-                         (unsigned long) offending->pid, strna(comm));
+                log_info("Delay lock is active (UID "UID_FMT"/%s, PID "PID_FMT"/%s) but inhibitor timeout is reached.",
+                         offending->uid, strna(u),
+                         offending->pid, strna(comm));
         }
 
         /* Actually do the operation */

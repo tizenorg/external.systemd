@@ -128,11 +128,13 @@ _public_ int sd_bus_request_name(sd_bus *bus, const char *name, uint64_t flags) 
         assert_return(bus, -EINVAL);
         assert_return(name, -EINVAL);
         assert_return(bus->bus_client, -EINVAL);
-        assert_return(BUS_IS_OPEN(bus->state), -ENOTCONN);
         assert_return(!bus_pid_changed(bus), -ECHILD);
         assert_return(!(flags & ~(SD_BUS_NAME_ALLOW_REPLACEMENT|SD_BUS_NAME_REPLACE_EXISTING|SD_BUS_NAME_QUEUE)), -EINVAL);
         assert_return(service_name_is_valid(name), -EINVAL);
         assert_return(name[0] != ':', -EINVAL);
+
+        if (!BUS_IS_OPEN(bus->state))
+                return -ENOTCONN;
 
         if (bus->is_kernel)
                 return bus_request_name_kernel(bus, name, flags);
@@ -201,10 +203,12 @@ _public_ int sd_bus_release_name(sd_bus *bus, const char *name) {
         assert_return(bus, -EINVAL);
         assert_return(name, -EINVAL);
         assert_return(bus->bus_client, -EINVAL);
-        assert_return(BUS_IS_OPEN(bus->state), -ENOTCONN);
         assert_return(!bus_pid_changed(bus), -ECHILD);
         assert_return(service_name_is_valid(name), -EINVAL);
         assert_return(name[0] != ':', -EINVAL);
+
+        if (!BUS_IS_OPEN(bus->state))
+                return -ENOTCONN;
 
         if (bus->is_kernel)
                 return bus_release_name_kernel(bus, name);
@@ -237,11 +241,9 @@ static int kernel_get_list(sd_bus *bus, uint64_t flags, char ***x) {
                         if (asprintf(&n, ":1.%llu", (unsigned long long) name->owner_id) < 0)
                                 return -ENOMEM;
 
-                        r = strv_push(x, n);
-                        if (r < 0) {
-                                free(n);
-                                return -ENOMEM;
-                        }
+                        r = strv_consume(x, n);
+                        if (r < 0)
+                                return r;
 
                         previous_id = name->owner_id;
                 }
@@ -344,8 +346,10 @@ static int bus_list_names_dbus1(sd_bus *bus, char ***acquired, char ***activatab
 _public_ int sd_bus_list_names(sd_bus *bus, char ***acquired, char ***activatable) {
         assert_return(bus, -EINVAL);
         assert_return(acquired || activatable, -EINVAL);
-        assert_return(BUS_IS_OPEN(bus->state), -ENOTCONN);
         assert_return(!bus_pid_changed(bus), -ECHILD);
+
+        if (!BUS_IS_OPEN(bus->state))
+                return -ENOTCONN;
 
         if (bus->is_kernel)
                 return bus_list_names_kernel(bus, acquired, activatable);
@@ -391,7 +395,7 @@ static int bus_get_owner_kdbus(
 
         /* Non-activated names are considered not available */
         if (conn_info->flags & KDBUS_HELLO_ACTIVATOR)
-                return name[0] == ':' ? -ENXIO : -ENOENT;
+                return name[0] == ':' ? -ENXIO : -ESRCH;
 
         c = bus_creds_new();
         if (!c)
@@ -491,11 +495,9 @@ static int bus_get_owner_kdbus(
                                         goto fail;
                                 }
 
-                                if (!bus->cgroup_root) {
-                                        r = cg_get_root_path(&bus->cgroup_root);
-                                        if (r < 0)
-                                                goto fail;
-                                }
+                                r = bus_get_root_path(bus);
+                                if (r < 0)
+                                        goto fail;
 
                                 c->cgroup_root = strdup(bus->cgroup_root);
                                 if (!c->cgroup_root) {
@@ -737,10 +739,12 @@ _public_ int sd_bus_get_owner(
         assert_return(name, -EINVAL);
         assert_return(mask <= _SD_BUS_CREDS_ALL, -ENOTSUP);
         assert_return(mask == 0 || creds, -EINVAL);
-        assert_return(BUS_IS_OPEN(bus->state), -ENOTCONN);
         assert_return(!bus_pid_changed(bus), -ECHILD);
         assert_return(service_name_is_valid(name), -EINVAL);
         assert_return(bus->bus_client, -ENODATA);
+
+        if (!BUS_IS_OPEN(bus->state))
+                return -ENOTCONN;
 
         if (bus->is_kernel)
                 return bus_get_owner_kdbus(bus, name, mask, creds);
@@ -919,7 +923,6 @@ static int add_name_change_match(sd_bus *bus,
 
 int bus_add_match_internal_kernel(
                 sd_bus *bus,
-                uint64_t id,
                 struct bus_match_component *components,
                 unsigned n_components,
                 uint64_t cookie) {
@@ -1057,7 +1060,6 @@ int bus_add_match_internal_kernel(
         m = alloca0(sz);
         m->size = sz;
         m->cookie = cookie;
-        m->owner_id = id;
 
         item = m->items;
 
@@ -1100,12 +1102,21 @@ int bus_add_match_internal_kernel(
         return 0;
 }
 
+#define internal_match(bus, m)                                          \
+        ((bus)->hello_flags & KDBUS_HELLO_MONITOR                       \
+         ? (isempty(m) ? "eavesdrop='true'" : strappenda((m), ",eavesdrop='true'")) \
+         : (m))
+
 static int bus_add_match_internal_dbus1(
                 sd_bus *bus,
                 const char *match) {
 
+        const char *e;
+
         assert(bus);
         assert(match);
+
+        e = internal_match(bus, match);
 
         return sd_bus_call_method(
                         bus,
@@ -1116,7 +1127,7 @@ static int bus_add_match_internal_dbus1(
                         NULL,
                         NULL,
                         "s",
-                        match);
+                        e);
 }
 
 int bus_add_match_internal(
@@ -1127,17 +1138,15 @@ int bus_add_match_internal(
                 uint64_t cookie) {
 
         assert(bus);
-        assert(match);
 
         if (bus->is_kernel)
-                return bus_add_match_internal_kernel(bus, 0, components, n_components, cookie);
+                return bus_add_match_internal_kernel(bus, components, n_components, cookie);
         else
                 return bus_add_match_internal_dbus1(bus, match);
 }
 
 int bus_remove_match_internal_kernel(
                 sd_bus *bus,
-                uint64_t id,
                 uint64_t cookie) {
 
         struct kdbus_cmd_match m;
@@ -1148,7 +1157,6 @@ int bus_remove_match_internal_kernel(
         zero(m);
         m.size = offsetof(struct kdbus_cmd_match, items);
         m.cookie = cookie;
-        m.owner_id = id;
 
         r = ioctl(bus->input_fd, KDBUS_CMD_MATCH_REMOVE, &m);
         if (r < 0)
@@ -1161,8 +1169,12 @@ static int bus_remove_match_internal_dbus1(
                 sd_bus *bus,
                 const char *match) {
 
+        const char *e;
+
         assert(bus);
         assert(match);
+
+        e = internal_match(bus, match);
 
         return sd_bus_call_method(
                         bus,
@@ -1173,7 +1185,7 @@ static int bus_remove_match_internal_dbus1(
                         NULL,
                         NULL,
                         "s",
-                        match);
+                        e);
 }
 
 int bus_remove_match_internal(
@@ -1182,10 +1194,9 @@ int bus_remove_match_internal(
                 uint64_t cookie) {
 
         assert(bus);
-        assert(match);
 
         if (bus->is_kernel)
-                return bus_remove_match_internal_kernel(bus, 0, cookie);
+                return bus_remove_match_internal_kernel(bus, cookie);
         else
                 return bus_remove_match_internal_dbus1(bus, match);
 }
@@ -1198,9 +1209,11 @@ _public_ int sd_bus_get_owner_machine_id(sd_bus *bus, const char *name, sd_id128
         assert_return(bus, -EINVAL);
         assert_return(name, -EINVAL);
         assert_return(machine, -EINVAL);
-        assert_return(BUS_IS_OPEN(bus->state), -ENOTCONN);
         assert_return(!bus_pid_changed(bus), -ECHILD);
         assert_return(service_name_is_valid(name), -EINVAL);
+
+        if (!BUS_IS_OPEN(bus->state))
+                return -ENOTCONN;
 
         if (streq_ptr(name, bus->unique_name))
                 return sd_id128_get_machine(machine);

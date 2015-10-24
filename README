@@ -38,8 +38,12 @@ LICENSE:
 
 REQUIREMENTS:
         Linux kernel >= 3.0
+        Linux kernel >= 3.3 for loop device partition support features with nspawn
+        Linux kernel >= 3.8 for Smack support
+
+        Kernel Config Options:
           CONFIG_DEVTMPFS
-          CONFIG_CGROUPS (it's OK to disable all controllers)
+          CONFIG_CGROUPS (it is OK to disable all controllers)
           CONFIG_INOTIFY_USER
           CONFIG_SIGNALFD
           CONFIG_TIMERFD
@@ -48,8 +52,6 @@ REQUIREMENTS:
           CONFIG_SYSFS
           CONFIG_PROC_FS
           CONFIG_FHANDLE (libudev, mount and bind mount handling)
-
-        Linux kernel >= 3.8 for Smack support
 
         Udev will fail to work with the legacy layout:
           CONFIG_SYSFS_DEPRECATED=n
@@ -68,6 +70,9 @@ REQUIREMENTS:
         create additional symlinks in /dev/disk/ and /dev/tape:
           CONFIG_BLK_DEV_BSG
 
+        Required for PrivateNetwork in service units:
+          CONFIG_NET_NS
+
         Optional but strongly recommended:
           CONFIG_IPV6
           CONFIG_AUTOFS4_FS
@@ -75,12 +80,16 @@ REQUIREMENTS:
           CONFIG_TMPFS_XATTR
           CONFIG_SECCOMP
 
+        Required for CPUShares in resource control unit settings
+          CONFIG_CGROUP_SCHED
+          CONFIG_FAIR_GROUP_SCHED
+
         For systemd-bootchart, several proc debug interfaces are required:
           CONFIG_SCHEDSTATS
           CONFIG_SCHED_DEBUG
 
         For UEFI systems:
-          CONFIG_EFI_VARS
+          CONFIG_EFIVAR_FS
           CONFIG_EFI_PARTITION
 
         Note that kernel auditing is broken when used with systemd's
@@ -89,6 +98,13 @@ REQUIREMENTS:
         runtime using the kernel command line option "audit=0", or
         turn it off at kernel compile time using:
           CONFIG_AUDIT=n
+        If systemd is compiled with libseccomp support on
+        architectures which do not use socketcall() and where seccomp
+        is supported (this effectively means x86-64 and ARM, but
+        excludes 32-bit x86!), then nspawn will now install a
+        work-around seccomp filter that makes containers boot even
+        with audit being enabled. This works correctly only on kernels
+        3.14 and newer though. TL;DR: turn audit off, still.
 
         glibc >= 2.14
         libcap
@@ -99,17 +115,17 @@ REQUIREMENTS:
         libcryptsetup (optional)
         libaudit (optional)
         libacl (optional)
-        libattr (optional)
         libselinux (optional)
         liblzma (optional)
-        tcpwrappers (optional)
+        liblz4 >= 119 (optional)
         libgcrypt (optional)
         libqrencode (optional)
         libmicrohttpd (optional)
         libpython (optional)
+        libidn (optional)
+        gobject-introspection > 1.40.0 (optional)
+        elfutils >= 158 (optional)
         make, gcc, and similar tools
-
-        To sucessfully use --compat-libs, gcc >= 4.8 seems necessary.
 
         During runtime, you need the following additional
         dependencies:
@@ -155,7 +171,7 @@ USERS AND GROUPS:
         even in the very early boot stages, where no other databases
         and network are available:
 
-        tty, dialout, kmem, video, audio, lp, floppy, cdrom, tape, disk
+        audio, cdrom, dialout, disk, input, kmem, lp, tape, tty, video
 
         During runtime, the journal daemon requires the
         "systemd-journal" system group to exist. New journal files will
@@ -174,6 +190,39 @@ USERS AND GROUPS:
         exist. During execution this network facing service will drop
         privileges and assume this uid/gid for security reasons.
 
+        Similarly, the NTP daemon requires the "systemd-timesync" system
+        user and group to exist.
+
+        Similarly, the network management daemon requires the
+        "systemd-network" system user and group to exist.
+
+        Similarly, the name resolution daemon requires the
+        "systemd-resolve" system user and group to exist.
+
+        Similarly, the kdbus dbus1 proxy daemon requires the
+        "systemd-bus-proxy" system user and group to exist.
+
+NSS:
+        systemd ships with three NSS modules:
+
+        nss-myhostname resolves the local hostname to locally
+        configured IP addresses, as well as "localhost" to
+        127.0.0.1/::1.
+
+        nss-resolve enables DNS resolution via the systemd-resolved
+        DNS/LLMNR caching stub resolver "systemd-resolved".
+
+        nss-mymachines enables resolution of all local containers
+        registered with machined to their respective IP addresses.
+
+        To make use of these NSS modules, please add them to the
+        "hosts: " line in /etc/nsswitch.conf. The "resolve" module
+        should replace the glibc "dns" module in this file.
+
+        The three modules should be used in the following order:
+
+                hosts: files mymachines resolve myhostname
+
 WARNINGS:
         systemd will warn you during boot if /etc/mtab is not a
         symlink to /proc/mounts. Please ensure that /etc/mtab is a
@@ -189,6 +238,9 @@ WARNINGS:
         breakages are not always directly visible, systemd will warn
         about this, since this kind of file system setup is not really
         supported anymore by the basic set of Linux OS components.
+
+        systemd requires that the /run mount point exists. systemd also
+        requires that /var/run is a a symlink to /run.
 
         For more information on this issue consult
         http://freedesktop.org/wiki/Software/systemd/separate-usr-is-broken

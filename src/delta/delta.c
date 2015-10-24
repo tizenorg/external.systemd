@@ -103,8 +103,9 @@ static int notify_override_masked(const char *top, const char *bottom) {
         if (!(arg_flags & SHOW_MASKED))
                 return 0;
 
-        printf("%s%s%s     %s → %s\n",
-               ansi_highlight_red(), "[MASKED]", ansi_highlight_off(), top, bottom);
+        printf("%s%s%s     %s %s %s\n",
+               ansi_highlight_red(), "[MASKED]", ansi_highlight_off(),
+               top, draw_special_char(DRAW_ARROW), bottom);
         return 1;
 }
 
@@ -112,8 +113,9 @@ static int notify_override_equivalent(const char *top, const char *bottom) {
         if (!(arg_flags & SHOW_EQUIVALENT))
                 return 0;
 
-        printf("%s%s%s %s → %s\n",
-               ansi_highlight_green(), "[EQUIVALENT]", ansi_highlight_off(), top, bottom);
+        printf("%s%s%s %s %s %s\n",
+               ansi_highlight_green(), "[EQUIVALENT]", ansi_highlight_off(),
+               top, draw_special_char(DRAW_ARROW), bottom);
         return 1;
 }
 
@@ -121,8 +123,9 @@ static int notify_override_redirected(const char *top, const char *bottom) {
         if (!(arg_flags & SHOW_REDIRECTED))
                 return 0;
 
-        printf("%s%s%s   %s → %s\n",
-               ansi_highlight(), "[REDIRECTED]", ansi_highlight_off(), top, bottom);
+        printf("%s%s%s   %s %s %s\n",
+               ansi_highlight(), "[REDIRECTED]", ansi_highlight_off(),
+               top, draw_special_char(DRAW_ARROW), bottom);
         return 1;
 }
 
@@ -130,8 +133,9 @@ static int notify_override_overridden(const char *top, const char *bottom) {
         if (!(arg_flags & SHOW_OVERRIDDEN))
                 return 0;
 
-        printf("%s%s%s %s → %s\n",
-               ansi_highlight(), "[OVERRIDDEN]", ansi_highlight_off(), top, bottom);
+        printf("%s%s%s %s %s %s\n",
+               ansi_highlight(), "[OVERRIDDEN]", ansi_highlight_off(),
+               top, draw_special_char(DRAW_ARROW), bottom);
         return 1;
 }
 
@@ -139,8 +143,9 @@ static int notify_override_extended(const char *top, const char *bottom) {
         if (!(arg_flags & SHOW_EXTENDED))
                return 0;
 
-        printf("%s%s%s   %s → %s\n",
-               ansi_highlight(), "[EXTENDED]", ansi_highlight_off(), top, bottom);
+        printf("%s%s%s   %s %s %s\n",
+               ansi_highlight(), "[EXTENDED]", ansi_highlight_off(),
+               top, draw_special_char(DRAW_ARROW), bottom);
         return 1;
 }
 
@@ -241,7 +246,7 @@ static int enumerate_dir_d(Hashmap *top, Hashmap *bottom, Hashmap *drops, const 
                         return -ENOMEM;
                 d = p + strlen(toppath) + 1;
 
-                log_debug("Adding at top: %s → %s", d, p);
+                log_debug("Adding at top: %s %s %s", d, draw_special_char(DRAW_ARROW), p);
                 k = hashmap_put(top, d, p);
                 if (k >= 0) {
                         p = strdup(p);
@@ -253,7 +258,7 @@ static int enumerate_dir_d(Hashmap *top, Hashmap *bottom, Hashmap *drops, const 
                         return k;
                 }
 
-                log_debug("Adding at bottom: %s → %s", d, p);
+                log_debug("Adding at bottom: %s %s %s", d, draw_special_char(DRAW_ARROW), p);
                 free(hashmap_remove(bottom, d));
                 k = hashmap_put(bottom, d, p);
                 if (k < 0) {
@@ -276,7 +281,8 @@ static int enumerate_dir_d(Hashmap *top, Hashmap *bottom, Hashmap *drops, const 
                 if (!p)
                         return -ENOMEM;
 
-                log_debug("Adding to drops: %s → %s → %s", unit, basename(p), p);
+                log_debug("Adding to drops: %s %s %s %s %s",
+                          unit, draw_special_char(DRAW_ARROW), basename(p), draw_special_char(DRAW_ARROW), p);
                 k = hashmap_put(h, basename(p), p);
                 if (k < 0) {
                         free(p);
@@ -328,7 +334,7 @@ static int enumerate_dir(Hashmap *top, Hashmap *bottom, Hashmap *drops, const ch
                 if (!p)
                         return -ENOMEM;
 
-                log_debug("Adding at top: %s → %s", basename(p), p);
+                log_debug("Adding at top: %s %s %s", basename(p), draw_special_char(DRAW_ARROW), p);
                 k = hashmap_put(top, basename(p), p);
                 if (k >= 0) {
                         p = strdup(p);
@@ -339,7 +345,7 @@ static int enumerate_dir(Hashmap *top, Hashmap *bottom, Hashmap *drops, const ch
                         return k;
                 }
 
-                log_debug("Adding at bottom: %s → %s", basename(p), p);
+                log_debug("Adding at bottom: %s %s %s", basename(p), draw_special_char(DRAW_ARROW), p);
                 free(hashmap_remove(bottom, basename(p)));
                 k = hashmap_put(bottom, basename(p), p);
                 if (k < 0) {
@@ -467,38 +473,35 @@ static int process_suffix_chop(const char *arg) {
         return -EINVAL;
 }
 
-static int help(void) {
-
+static void help(void) {
         printf("%s [OPTIONS...] [SUFFIX...]\n\n"
                "Find overridden configuration files.\n\n"
                "  -h --help           Show this help\n"
                "     --version        Show package version\n"
                "     --no-pager       Do not pipe output into a pager\n"
                "     --diff[=1|0]     Show a diff when overridden files differ\n"
-               "  -t --type=LIST...   Only display a selected set of override types\n",
-               program_invocation_short_name);
-
-        return 0;
+               "  -t --type=LIST...   Only display a selected set of override types\n"
+               , program_invocation_short_name);
 }
 
 static int parse_flags(const char *flag_str, int flags) {
-        char *w, *state;
+        const char *word, *state;
         size_t l;
 
-        FOREACH_WORD(w, l, flag_str, state) {
-                if (strneq("masked", w, l))
+        FOREACH_WORD(word, l, flag_str, state) {
+                if (strneq("masked", word, l))
                         flags |= SHOW_MASKED;
-                else if (strneq ("equivalent", w, l))
+                else if (strneq ("equivalent", word, l))
                         flags |= SHOW_EQUIVALENT;
-                else if (strneq("redirected", w, l))
+                else if (strneq("redirected", word, l))
                         flags |= SHOW_REDIRECTED;
-                else if (strneq("overridden", w, l))
+                else if (strneq("overridden", word, l))
                         flags |= SHOW_OVERRIDDEN;
-                else if (strneq("unchanged", w, l))
+                else if (strneq("unchanged", word, l))
                         flags |= SHOW_UNCHANGED;
-                else if (strneq("extended", w, l))
+                else if (strneq("extended", word, l))
                         flags |= SHOW_EXTENDED;
-                else if (strneq("default", w, l))
+                else if (strneq("default", word, l))
                         flags |= SHOW_DEFAULTS;
                 else
                         return -EINVAL;
@@ -528,7 +531,7 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 1);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "ht:", options, NULL)) >= 0) {
+        while ((c = getopt_long(argc, argv, "ht:", options, NULL)) >= 0)
 
                 switch (c) {
 
@@ -579,7 +582,6 @@ static int parse_argv(int argc, char *argv[]) {
                 default:
                         assert_not_reached("Unhandled option");
                 }
-        }
 
         return 1;
 }

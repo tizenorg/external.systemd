@@ -35,8 +35,18 @@
 
 typedef struct Manager Manager;
 
-typedef enum ManagerExitCode {
+typedef enum ManagerState {
+        MANAGER_STARTING,
         MANAGER_RUNNING,
+        MANAGER_DEGRADED,
+        MANAGER_MAINTENANCE,
+        MANAGER_STOPPING,
+        _MANAGER_STATE_MAX,
+        _MANAGER_STATE_INVALID = -1
+} ManagerState;
+
+typedef enum ManagerExitCode {
+        MANAGER_OK,
         MANAGER_EXIT,
         MANAGER_RELOAD,
         MANAGER_REEXECUTE,
@@ -58,6 +68,7 @@ typedef enum ManagerExitCode {
 #include "execute.h"
 #include "unit-name.h"
 #include "exit-status.h"
+#include "show-status.h"
 
 struct Manager {
         /* Note that the set of units we know of is allowed to be
@@ -105,6 +116,12 @@ struct Manager {
         Hashmap *watch_pids1;  /* pid => Unit object n:1 */
         Hashmap *watch_pids2;  /* pid => Unit object n:1 */
 
+        /* A set contains all units which cgroup should be refreshed after startup */
+        Set *startup_units;
+
+        /* A set which contains all currently failed units */
+        Set *failed_units;
+
         sd_event_source *run_queue_event_source;
 
         char *notify_socket;
@@ -127,7 +144,7 @@ struct Manager {
         char **environment;
 #ifdef CONFIG_TIZEN
         char **dependencies;
-        Set *dep_ignore_list;
+        Hashmap *dep_ignore_list;
 #endif
 
         usec_t runtime_watchdog;
@@ -171,7 +188,13 @@ struct Manager {
         Set *private_buses;
         int private_listen_fd;
         sd_event_source *private_listen_event_source;
-        Set *subscribed;
+
+        /* Contains all the clients that are subscribed to signals via
+        the API bus. Note that private bus connections are always
+        considered subscribes, since they last for very short only,
+        and it is much simpler that way. */
+        sd_bus_track *subscribed;
+        char **deserialized_subscribed;
 
         sd_bus_message *queued_message; /* This is used during reloading:
                                       * before the reload we queue the
@@ -209,6 +232,9 @@ struct Manager {
         bool dispatching_dbus_queue:1;
 
         bool taint_usr:1;
+        bool first_boot:1;
+
+        bool test_run:1;
 
         ShowStatus show_status;
         bool confirm_spawn;
@@ -216,13 +242,18 @@ struct Manager {
 
         ExecOutput default_std_output, default_std_error;
 
-        usec_t default_restart_usec, default_timeout_start_usec,
-                default_timeout_stop_usec;
+        usec_t default_restart_usec, default_timeout_start_usec, default_timeout_stop_usec;
 
         usec_t default_start_limit_interval;
         unsigned default_start_limit_burst;
 
-        struct rlimit *rlimit[RLIMIT_NLIMITS];
+        bool default_cpu_accounting;
+        bool default_memory_accounting;
+        bool default_blockio_accounting;
+
+        usec_t default_timer_accuracy_usec;
+
+        struct rlimit *rlimit[_RLIMIT_MAX];
 
         /* non-zero if we are reloading or reexecuting, */
         int n_reloading;
@@ -249,9 +280,12 @@ struct Manager {
 
         /* Reference to the kdbus bus control fd */
         int kdbus_fd;
+
+        /* Used for processing polkit authorization responses */
+        Hashmap *polkit_registry;
 };
 
-int manager_new(SystemdRunningAs running_as, Manager **m);
+int manager_new(SystemdRunningAs running_as, bool test_run, Manager **m);
 void manager_free(Manager *m);
 
 int manager_enumerate(Manager *m);
@@ -312,7 +346,16 @@ void manager_undo_generators(Manager *m);
 void manager_recheck_journal(Manager *m);
 
 void manager_set_show_status(Manager *m, ShowStatus mode);
+void manager_set_first_boot(Manager *m, bool b);
+
 void manager_status_printf(Manager *m, bool ephemeral, const char *status, const char *format, ...) _printf_(4,5);
 void manager_flip_auto_status(Manager *m, bool enable);
 
 Set *manager_get_units_requiring_mounts_for(Manager *m, const char *path);
+
+const char *manager_get_runtime_prefix(Manager *m);
+
+ManagerState manager_state(Manager *m);
+
+const char *manager_state_to_string(ManagerState m) _const_;
+ManagerState manager_state_from_string(const char *s) _pure_;

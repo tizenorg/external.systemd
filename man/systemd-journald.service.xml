@@ -45,6 +45,7 @@
         <refnamediv>
                 <refname>systemd-journald.service</refname>
                 <refname>systemd-journald.socket</refname>
+                <refname>systemd-journald-dev-log.socket</refname>
                 <refname>systemd-journald</refname>
                 <refpurpose>Journal service</refpurpose>
         </refnamediv>
@@ -52,6 +53,7 @@
         <refsynopsisdiv>
                 <para><filename>systemd-journald.service</filename></para>
                 <para><filename>systemd-journald.socket</filename></para>
+                <para><filename>systemd-journald-dev-log.socket</filename></para>
                 <para><filename>/usr/lib/systemd/systemd-journald</filename></para>
         </refsynopsisdiv>
 
@@ -63,7 +65,7 @@
                 It creates and maintains structured, indexed journals
                 based on logging information that is received from the
                 kernel, from user processes via the libc
-                <citerefentry><refentrytitle>syslog</refentrytitle><manvolnum>3</manvolnum></citerefentry>
+                <citerefentry project='man-pages'><refentrytitle>syslog</refentrytitle><manvolnum>3</manvolnum></citerefentry>
                 call, from standard input and standard error of system
                 services or via its native API. It will implicitly
                 collect numerous metadata fields for each log
@@ -142,11 +144,12 @@
                                 <term><varname>systemd.journald.forward_to_syslog=</varname></term>
                                 <term><varname>systemd.journald.forward_to_kmsg=</varname></term>
                                 <term><varname>systemd.journald.forward_to_console=</varname></term>
+                                <term><varname>systemd.journald.forward_to_wall=</varname></term>
 
                                 <listitem><para>Enables/disables
                                 forwarding of collected log messages
-                                to syslog, the kernel log buffer or
-                                the system console.
+                                to syslog, the kernel log buffer, the
+                                system console or wall.
                                 </para>
 
                                 <para>See
@@ -245,6 +248,7 @@
                         <citerefentry><refentrytitle>journald.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
                         <citerefentry><refentrytitle>systemd.journal-fields</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
                         <citerefentry><refentrytitle>sd-journal</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
+                        <citerefentry><refentrytitle>systemd-coredump</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
                         <citerefentry><refentrytitle>setfacl</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
                         <command>pydoc systemd.journal</command>.
                 </para>

@@ -39,59 +39,54 @@ usec_t arg_timeout = 2*USEC_PER_MINUTE;
 const char *arg_savedir;
 #endif
 
-static int help(void) {
-
-        printf("%s [OPTIONS...] collect [DIRECTORY]\n\n"
+static void help(void) {
+        printf("%1$s [OPTIONS...] collect [DIRECTORY]\n\n"
                "Collect read-ahead data on early boot.\n\n"
                "  -h --help                 Show this help\n"
                "     --version              Show package version\n"
+               "     --files-max=INT        Maximum number of files to read ahead\n"
+               "     --file-size-max=BYTES  Maximum size of files to read ahead\n"
 #ifdef CONFIG_TIZEN
                "     --savedir=PATH         Directory path to save collecting data\n"
 #endif
-               "     --max-files=INT        Maximum number of files to read ahead\n"
-               "     --file-size-max=BYTES  Maximum size of files to read ahead\n"
-               "     --timeout=USEC         Maximum time to spend collecting data\n\n\n",
-               program_invocation_short_name);
-
-        printf("%s [OPTIONS...] replay [DIRECTORY]\n\n"
+               "     --timeout=USEC         Maximum time to spend collecting data\n"
+               "\n\n"
+               "%1$s [OPTIONS...] replay [DIRECTORY]\n\n"
                "Replay collected read-ahead data on early boot.\n\n"
                "  -h --help                 Show this help\n"
                "     --version              Show package version\n"
+               "     --file-size-max=BYTES  Maximum size of files to read ahead\n"
 #ifdef CONFIG_TIZEN
                "     --savedir=PATH         Directory path to save collecting data\n"
 #endif
-               "     --file-size-max=BYTES  Maximum size of files to read ahead\n\n\n",
-               program_invocation_short_name);
-
-        printf("%s [OPTIONS...] analyze [PACK FILE]\n\n"
+               "\n\n"
+               "%1$s [OPTIONS...] analyze [PACK-FILE]\n\n"
                "Analyze collected read-ahead data.\n\n"
                "  -h --help                 Show this help\n"
                "     --version              Show package version\n",
                program_invocation_short_name);
-
-        return 0;
 }
 
 static int parse_argv(int argc, char *argv[]) {
 
         enum {
                 ARG_VERSION = 0x100,
+                ARG_FILES_MAX,
+                ARG_FILE_SIZE_MAX,
 #ifdef CONFIG_TIZEN
                 ARG_SAVEDIR,
 #endif
-                ARG_FILES_MAX,
-                ARG_FILE_SIZE_MAX,
                 ARG_TIMEOUT
         };
 
         static const struct option options[] = {
                 { "help",          no_argument,       NULL, 'h'                },
                 { "version",       no_argument,       NULL, ARG_VERSION        },
+                { "files-max",     required_argument, NULL, ARG_FILES_MAX      },
+                { "file-size-max", required_argument, NULL, ARG_FILE_SIZE_MAX  },
 #ifdef CONFIG_TIZEN
                 { "savedir",       required_argument, NULL, ARG_SAVEDIR        },
 #endif
-                { "files-max",     required_argument, NULL, ARG_FILES_MAX      },
-                { "file-size-max", required_argument, NULL, ARG_FILE_SIZE_MAX  },
                 { "timeout",       required_argument, NULL, ARG_TIMEOUT        },
                 {}
         };
@@ -101,12 +96,13 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "h", options, NULL)) >= 0) {
+        while ((c = getopt_long(argc, argv, "h", options, NULL)) >= 0)
 
                 switch (c) {
 
                 case 'h':
-                        return help();
+                        help();
+                        return 0;
 
                 case ARG_VERSION:
                         puts(PACKAGE_STRING);
@@ -132,6 +128,12 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
                 }
 
+#ifdef CONFIG_TIZEN
+                case ARG_SAVEDIR:
+                        arg_savedir = optarg;
+                        break;
+#endif
+
                 case ARG_TIMEOUT:
                         if (parse_sec(optarg, &arg_timeout) < 0 || arg_timeout <= 0) {
                                 log_error("Failed to parse timeout %s.", optarg);
@@ -140,23 +142,17 @@ static int parse_argv(int argc, char *argv[]) {
 
                         break;
 
-#ifdef CONFIG_TIZEN
-                case ARG_SAVEDIR:
-                        arg_savedir = optarg;
-                        break;
-#endif
-
                 case '?':
                         return -EINVAL;
 
                 default:
                         assert_not_reached("Unhandled option");
                 }
-        }
 
         if (optind != argc-1 &&
             optind != argc-2) {
-                help();
+                log_error("%s: wrong number of arguments.",
+                          program_invocation_short_name);
                 return -EINVAL;
         }
 

@@ -25,15 +25,71 @@
 #include <fcntl.h>
 #include <locale.h>
 #include <errno.h>
+#include <signal.h>
+#include <math.h>
+#include <sys/wait.h>
 
 #include "util.h"
+#include "mkdir.h"
 #include "strv.h"
 #include "def.h"
 #include "fileio.h"
+#include "conf-parser.h"
 
 static void test_streq_ptr(void) {
         assert_se(streq_ptr(NULL, NULL));
         assert_se(!streq_ptr("abc", "cdef"));
+}
+
+static void test_align_power2(void) {
+        unsigned long i, p2;
+
+        assert_se(ALIGN_POWER2(0) == 0);
+        assert_se(ALIGN_POWER2(1) == 1);
+        assert_se(ALIGN_POWER2(2) == 2);
+        assert_se(ALIGN_POWER2(3) == 4);
+        assert_se(ALIGN_POWER2(12) == 16);
+
+        assert_se(ALIGN_POWER2(ULONG_MAX) == 0);
+        assert_se(ALIGN_POWER2(ULONG_MAX - 1) == 0);
+        assert_se(ALIGN_POWER2(ULONG_MAX - 1024) == 0);
+        assert_se(ALIGN_POWER2(ULONG_MAX / 2) == ULONG_MAX / 2 + 1);
+        assert_se(ALIGN_POWER2(ULONG_MAX + 1) == 0);
+
+        for (i = 1; i < 131071; ++i) {
+                for (p2 = 1; p2 < i; p2 <<= 1)
+                        /* empty */ ;
+
+                assert_se(ALIGN_POWER2(i) == p2);
+        }
+
+        for (i = ULONG_MAX - 1024; i < ULONG_MAX; ++i) {
+                for (p2 = 1; p2 && p2 < i; p2 <<= 1)
+                        /* empty */ ;
+
+                assert_se(ALIGN_POWER2(i) == p2);
+        }
+}
+
+static void test_max(void) {
+        static const struct {
+                int a;
+                int b[CONST_MAX(10, 100)];
+        } val1 = {
+                .a = CONST_MAX(10, 100),
+        };
+        int d = 0;
+
+        assert_cc(sizeof(val1.b) == sizeof(int) * 100);
+
+        /* CONST_MAX returns (void) instead of a value if the passed arguments
+         * are not of the same type or not constant expressions. */
+        assert_cc(__builtin_types_compatible_p(typeof(CONST_MAX(1, 10)), int));
+        assert_cc(__builtin_types_compatible_p(typeof(CONST_MAX(1, 1U)), void));
+
+        assert_se(val1.a == 100);
+        assert_se(MAX(++d, 0) == 1);
+        assert_se(d == 1);
 }
 
 static void test_first_word(void) {
@@ -66,7 +122,7 @@ static void test_close_many(void) {
         assert_se(fcntl(fds[1], F_GETFD) == -1);
         assert_se(fcntl(fds[2], F_GETFD) >= 0);
 
-        close_nointr_nofail(fds[2]);
+        safe_close(fds[2]);
 
         unlink(name0);
         unlink(name1);
@@ -96,6 +152,7 @@ static void test_parse_boolean(void) {
 
         assert_se(parse_boolean("garbage") < 0);
         assert_se(parse_boolean("") < 0);
+        assert_se(parse_boolean("full") < 0);
 }
 
 static void test_parse_pid(void) {
@@ -157,7 +214,7 @@ static void test_safe_atod(void) {
 
         r = safe_atod("0.2244", &d);
         assert_se(r == 0);
-        assert_se(abs(d - 0.2244) < 0.000001);
+        assert_se(fabs(d - 0.2244) < 0.000001);
 
         r = safe_atod("0,5", &d);
         assert_se(r == -EINVAL);
@@ -167,24 +224,25 @@ static void test_safe_atod(void) {
         assert_se(*e == ',');
 
         /* Check if this really is locale independent */
-        setlocale(LC_NUMERIC, "de_DE.utf8");
+        if (setlocale(LC_NUMERIC, "de_DE.utf8")) {
 
-        r = safe_atod("0.2244", &d);
-        assert_se(r == 0);
-        assert_se(abs(d - 0.2244) < 0.000001);
+                r = safe_atod("0.2244", &d);
+                assert_se(r == 0);
+                assert_se(fabs(d - 0.2244) < 0.000001);
 
-        r = safe_atod("0,5", &d);
-        assert_se(r == -EINVAL);
+                r = safe_atod("0,5", &d);
+                assert_se(r == -EINVAL);
 
-        errno = 0;
-        assert_se(abs(strtod("0,5", &e) - 0.5) < 0.00001);
+                errno = 0;
+                assert_se(fabs(strtod("0,5", &e) - 0.5) < 0.00001);
+        }
 
         /* And check again, reset */
-        setlocale(LC_NUMERIC, "C");
+        assert_se(setlocale(LC_NUMERIC, "C"));
 
         r = safe_atod("0.2244", &d);
         assert_se(r == 0);
-        assert_se(abs(d - 0.2244) < 0.000001);
+        assert_se(fabs(d - 0.2244) < 0.000001);
 
         r = safe_atod("0,5", &d);
         assert_se(r == -EINVAL);
@@ -264,18 +322,20 @@ static void test_undecchar(void) {
 
 static void test_cescape(void) {
         _cleanup_free_ char *escaped;
-        escaped = cescape("abc\\\"\b\f\n\r\t\v\003\177\234\313");
-        assert_se(streq(escaped, "abc\\\\\\\"\\b\\f\\n\\r\\t\\v\\003\\177\\234\\313"));
+
+        assert_se(escaped = cescape("abc\\\"\b\f\n\r\t\v\a\003\177\234\313"));
+        assert_se(streq(escaped, "abc\\\\\\\"\\b\\f\\n\\r\\t\\v\\a\\003\\177\\234\\313"));
 }
 
 static void test_cunescape(void) {
         _cleanup_free_ char *unescaped;
-        unescaped = cunescape("abc\\\\\\\"\\b\\f\\n\\r\\t\\v\\003\\177\\234\\313");
-        assert_se(streq(unescaped, "abc\\\"\b\f\n\r\t\v\003\177\234\313"));
+
+        assert_se(unescaped = cunescape("abc\\\\\\\"\\b\\f\\a\\n\\r\\t\\v\\003\\177\\234\\313\\000\\x00"));
+        assert_se(streq(unescaped, "abc\\\"\b\f\a\n\r\t\v\003\177\234\313\\000\\x00"));
 }
 
 static void test_foreach_word(void) {
-        char *w, *state;
+        const char *word, *state;
         size_t l;
         int i = 0;
         const char test[] = "test abc d\te   f   ";
@@ -289,13 +349,12 @@ static void test_foreach_word(void) {
                 NULL
         };
 
-        FOREACH_WORD(w, l, test, state) {
-                assert_se(strneq(expected[i++], w, l));
-        }
+        FOREACH_WORD(word, l, test, state)
+                assert_se(strneq(expected[i++], word, l));
 }
 
 static void test_foreach_word_quoted(void) {
-        char *w, *state;
+        const char *word, *state;
         size_t l;
         int i = 0;
         const char test[] = "test a b c 'd' e '' '' hhh '' '' \"a b c\"";
@@ -316,13 +375,14 @@ static void test_foreach_word_quoted(void) {
         };
 
         printf("<%s>\n", test);
-        FOREACH_WORD_QUOTED(w, l, test, state) {
+        FOREACH_WORD_QUOTED(word, l, test, state) {
                 _cleanup_free_ char *t = NULL;
 
-                assert_se(t = strndup(w, l));
-                assert_se(strneq(expected[i++], w, l));
+                assert_se(t = strndup(word, l));
+                assert_se(strneq(expected[i++], word, l));
                 printf("<%s>\n", t);
         }
+        assert(isempty(state));
 }
 
 static void test_default_term_for_tty(void) {
@@ -403,7 +463,7 @@ static void test_get_process_comm(void) {
         log_info("pid1 cmdline truncated: '%s'", d);
 
         assert_se(get_parent_of_pid(1, &e) >= 0);
-        log_info("pid1 ppid: '%llu'", (unsigned long long) e);
+        log_info("pid1 ppid: "PID_FMT, e);
         assert_se(e == 0);
 
         assert_se(is_kernel_thread(1) == 0);
@@ -413,11 +473,11 @@ static void test_get_process_comm(void) {
         log_info("pid1 exe: '%s'", strna(f));
 
         assert_se(get_process_uid(1, &u) == 0);
-        log_info("pid1 uid: '%llu'", (unsigned long long) u);
+        log_info("pid1 uid: "UID_FMT, u);
         assert_se(u == 0);
 
         assert_se(get_process_gid(1, &g) == 0);
-        log_info("pid1 gid: '%llu'", (unsigned long long) g);
+        log_info("pid1 gid: "GID_FMT, g);
         assert_se(g == 0);
 
         assert(get_ctty_devnr(1, &h) == -ENOENT);
@@ -441,28 +501,58 @@ static void test_parse_size(void) {
         assert_se(parse_size("111", 1024, &bytes) == 0);
         assert_se(bytes == 111);
 
+        assert_se(parse_size("111.4", 1024, &bytes) == 0);
+        assert_se(bytes == 111);
+
         assert_se(parse_size(" 112 B", 1024, &bytes) == 0);
         assert_se(bytes == 112);
 
-        assert_se(parse_size("3 K", 1024, &bytes) == 0);
+        assert_se(parse_size(" 112.6 B", 1024, &bytes) == 0);
+        assert_se(bytes == 112);
+
+        assert_se(parse_size("3.5 K", 1024, &bytes) == 0);
+        assert_se(bytes == 3*1024 + 512);
+
+        assert_se(parse_size("3. K", 1024, &bytes) == 0);
         assert_se(bytes == 3*1024);
 
-        assert_se(parse_size(" 4 M 11K", 1024, &bytes) == 0);
-        assert_se(bytes == 4*1024*1024 + 11 * 1024);
+        assert_se(parse_size("3.0 K", 1024, &bytes) == 0);
+        assert_se(bytes == 3*1024);
 
-        assert_se(parse_size("3B3G", 1024, &bytes) == 0);
-        assert_se(bytes == 3ULL*1024*1024*1024 + 3);
+        assert_se(parse_size("3. 0 K", 1024, &bytes) == -EINVAL);
 
-        assert_se(parse_size("3B3G4T", 1024, &bytes) == 0);
+        assert_se(parse_size(" 4 M 11.5K", 1024, &bytes) == 0);
+        assert_se(bytes == 4*1024*1024 + 11 * 1024 + 512);
+
+        assert_se(parse_size("3B3.5G", 1024, &bytes) == -EINVAL);
+
+        assert_se(parse_size("3.5G3B", 1024, &bytes) == 0);
+        assert_se(bytes == 3ULL*1024*1024*1024 + 512*1024*1024 + 3);
+
+        assert_se(parse_size("3.5G 4B", 1024, &bytes) == 0);
+        assert_se(bytes == 3ULL*1024*1024*1024 + 512*1024*1024 + 4);
+
+        assert_se(parse_size("3B3G4T", 1024, &bytes) == -EINVAL);
+
+        assert_se(parse_size("4T3G3B", 1024, &bytes) == 0);
+        assert_se(bytes == (4ULL*1024 + 3)*1024*1024*1024 + 3);
+
+        assert_se(parse_size(" 4 T 3 G 3 B", 1024, &bytes) == 0);
         assert_se(bytes == (4ULL*1024 + 3)*1024*1024*1024 + 3);
 
         assert_se(parse_size("12P", 1024, &bytes) == 0);
         assert_se(bytes == 12ULL * 1024*1024*1024*1024*1024);
 
+        assert_se(parse_size("12P12P", 1024, &bytes) == -EINVAL);
+
         assert_se(parse_size("3E 2P", 1024, &bytes) == 0);
         assert_se(bytes == (3 * 1024 + 2ULL) * 1024*1024*1024*1024*1024);
 
         assert_se(parse_size("12X", 1024, &bytes) == -EINVAL);
+
+        assert_se(parse_size("12.5X", 1024, &bytes) == -EINVAL);
+
+        assert_se(parse_size("12.5e3", 1024, &bytes) == -EINVAL);
 
         assert_se(parse_size("1024E", 1024, &bytes) == -ERANGE);
         assert_se(parse_size("-1", 1024, &bytes) == -ERANGE);
@@ -471,6 +561,14 @@ static void test_parse_size(void) {
         assert_se(parse_size("-1024P", 1024, &bytes) == -ERANGE);
 
         assert_se(parse_size("-10B 20K", 1024, &bytes) == -ERANGE);
+}
+
+static void test_config_parse_iec_off(void) {
+        off_t offset = 0;
+        assert_se(config_parse_iec_off(NULL, "/this/file", 11, "Section", 22, "Size", 0, "4M", &offset, NULL) == 0);
+        assert_se(offset == 4 * 1024 * 1024);
+
+        assert_se(config_parse_iec_off(NULL, "/this/file", 11, "Section", 22, "Size", 0, "4.5M", &offset, NULL) == 0);
 }
 
 static void test_strextend(void) {
@@ -535,7 +633,6 @@ static void test_fstab_node_to_udev_node(void) {
         assert_se(streq(n, "/dev/disk/by-partuuid/037b9d94-148e-4ee4-8d38-67bfe15bb535"));
         free(n);
 
-
         n = fstab_node_to_udev_node("PONIES=awesome");
         puts(n);
         assert_se(streq(n, "PONIES=awesome"));
@@ -586,10 +683,537 @@ static void test_writing_tmpfile(void) {
         assert(r == 0);
         printf("contents: %s", contents);
         assert(streq(contents, "abc\n" ALPHANUMERICAL "\n"));
+
+        unlink(name);
+}
+
+static void test_hexdump(void) {
+        uint8_t data[146];
+        unsigned i;
+
+        hexdump(stdout, NULL, 0);
+        hexdump(stdout, "", 0);
+        hexdump(stdout, "", 1);
+        hexdump(stdout, "x", 1);
+        hexdump(stdout, "x", 2);
+        hexdump(stdout, "foobar", 7);
+        hexdump(stdout, "f\nobar", 7);
+        hexdump(stdout, "xxxxxxxxxxxxxxxxxxxxyz", 23);
+
+        for (i = 0; i < ELEMENTSOF(data); i++)
+                data[i] = i*2;
+
+        hexdump(stdout, data, sizeof(data));
+}
+
+static void test_log2i(void) {
+        assert_se(log2i(1) == 0);
+        assert_se(log2i(2) == 1);
+        assert_se(log2i(3) == 1);
+        assert_se(log2i(4) == 2);
+        assert_se(log2i(32) == 5);
+        assert_se(log2i(33) == 5);
+        assert_se(log2i(63) == 5);
+        assert_se(log2i(INT_MAX) == sizeof(int)*8-2);
+}
+
+static void test_foreach_string(void) {
+        const char * const t[] = {
+                "foo",
+                "bar",
+                "waldo",
+                NULL
+        };
+        const char *x;
+        unsigned i = 0;
+
+        FOREACH_STRING(x, "foo", "bar", "waldo")
+                assert_se(streq_ptr(t[i++], x));
+
+        assert_se(i == 3);
+
+        FOREACH_STRING(x, "zzz")
+                assert_se(streq(x, "zzz"));
+}
+
+static void test_filename_is_safe(void) {
+        char foo[FILENAME_MAX+2];
+        int i;
+
+        assert_se(!filename_is_safe(""));
+        assert_se(!filename_is_safe("/bar/foo"));
+        assert_se(!filename_is_safe("/"));
+        assert_se(!filename_is_safe("."));
+        assert_se(!filename_is_safe(".."));
+
+        for (i=0; i<FILENAME_MAX+1; i++)
+                foo[i] = 'a';
+        foo[FILENAME_MAX+1] = '\0';
+
+        assert_se(!filename_is_safe(foo));
+
+        assert_se(filename_is_safe("foo_bar-333"));
+        assert_se(filename_is_safe("o.o"));
+}
+
+static void test_string_has_cc(void) {
+        assert_se(string_has_cc("abc\1", NULL));
+        assert_se(string_has_cc("abc\x7f", NULL));
+        assert_se(string_has_cc("abc\x7f", NULL));
+        assert_se(string_has_cc("abc\t\x7f", "\t"));
+        assert_se(string_has_cc("abc\t\x7f", "\t"));
+        assert_se(string_has_cc("\x7f", "\t"));
+        assert_se(string_has_cc("\x7f", "\t\a"));
+
+        assert_se(!string_has_cc("abc\t\t", "\t"));
+        assert_se(!string_has_cc("abc\t\t\a", "\t\a"));
+        assert_se(!string_has_cc("a\ab\tc", "\t\a"));
+}
+
+static void test_ascii_strlower(void) {
+        char a[] = "AabBcC Jk Ii Od LKJJJ kkd LK";
+        assert_se(streq(ascii_strlower(a), "aabbcc jk ii od lkjjj kkd lk"));
+}
+
+static void test_files_same(void) {
+        _cleanup_close_ int fd = -1;
+        char name[] = "/tmp/test-files_same.XXXXXX";
+        char name_alias[] = "/tmp/test-files_same.alias";
+
+        fd = mkostemp_safe(name, O_RDWR|O_CLOEXEC);
+        assert_se(fd >= 0);
+        assert_se(symlink(name, name_alias) >= 0);
+
+        assert_se(files_same(name, name));
+        assert_se(files_same(name, name_alias));
+
+        unlink(name);
+        unlink(name_alias);
+}
+
+static void test_is_valid_documentation_url(void) {
+        assert_se(is_valid_documentation_url("http://www.freedesktop.org/wiki/Software/systemd"));
+        assert_se(is_valid_documentation_url("https://www.kernel.org/doc/Documentation/binfmt_misc.txt"));
+        assert_se(is_valid_documentation_url("file:foo"));
+        assert_se(is_valid_documentation_url("man:systemd.special(7)"));
+        assert_se(is_valid_documentation_url("info:bar"));
+
+        assert_se(!is_valid_documentation_url("foo:"));
+        assert_se(!is_valid_documentation_url("info:"));
+        assert_se(!is_valid_documentation_url(""));
+}
+
+static void test_file_in_same_dir(void) {
+        assert_se(streq(file_in_same_dir("/", "a"), "/a"));
+        assert_se(streq(file_in_same_dir("/", "/a"), "/a"));
+        assert_se(streq(file_in_same_dir("", "a"), "a"));
+        assert_se(streq(file_in_same_dir("a/", "a"), "a/a"));
+        assert_se(streq(file_in_same_dir("bar/foo", "bar"), "bar/bar"));
+}
+
+static void test_endswith(void) {
+        assert_se(endswith("foobar", "bar"));
+        assert_se(endswith("foobar", ""));
+        assert_se(endswith("foobar", "foobar"));
+        assert_se(endswith("", ""));
+
+        assert_se(!endswith("foobar", "foo"));
+        assert_se(!endswith("foobar", "foobarfoofoo"));
+}
+
+static void test_close_nointr(void) {
+        char name[] = "/tmp/test-test-close_nointr.XXXXXX";
+        int fd;
+
+        fd = mkostemp_safe(name, O_RDWR|O_CLOEXEC);
+        assert_se(fd >= 0);
+        assert_se(close_nointr(fd) >= 0);
+        assert_se(close_nointr(fd) < 0);
+
+        unlink(name);
+}
+
+
+static void test_unlink_noerrno(void) {
+        char name[] = "/tmp/test-close_nointr.XXXXXX";
+        int fd;
+
+        fd = mkostemp_safe(name, O_RDWR|O_CLOEXEC);
+        assert_se(fd >= 0);
+        assert_se(close_nointr(fd) >= 0);
+
+        {
+                PROTECT_ERRNO;
+                errno = -42;
+                assert_se(unlink_noerrno(name) >= 0);
+                assert_se(errno == -42);
+                assert_se(unlink_noerrno(name) < 0);
+                assert_se(errno == -42);
+        }
+}
+
+static void test_readlink_and_make_absolute(void) {
+        char tempdir[] = "/tmp/test-readlink_and_make_absolute";
+        char name[] = "/tmp/test-readlink_and_make_absolute/original";
+        char name2[] = "test-readlink_and_make_absolute/original";
+        char name_alias[] = "/tmp/test-readlink_and_make_absolute-alias";
+        char *r = NULL;
+
+        assert(mkdir_safe(tempdir, 0755, getuid(), getgid()) >= 0);
+        assert_se(touch(name) >= 0);
+
+        assert_se(symlink(name, name_alias) >= 0);
+        assert_se(readlink_and_make_absolute(name_alias, &r) >= 0);
+        assert_se(streq(r, name));
+        free(r);
+        assert_se(unlink(name_alias) >= 0);
+
+        assert_se(chdir(tempdir) >= 0);
+        assert_se(symlink(name2, name_alias) >= 0);
+        assert_se(readlink_and_make_absolute(name_alias, &r) >= 0);
+        assert_se(streq(r, name));
+        free(r);
+        assert_se(unlink(name_alias) >= 0);
+
+        assert_se(rm_rf_dangerous(tempdir, false, true, false) >= 0);
+}
+
+static void test_read_one_char(void) {
+        char r;
+        bool need_nl;
+        char name[] = "/tmp/test-read_one_char.XXXXXX";
+        _cleanup_close_ int fd = -1;
+        FILE *file;
+
+        fd = mkostemp_safe(name, O_RDWR|O_CLOEXEC);
+        assert_se(fd >= 0);
+        file = fdopen(fd, "r+");
+        assert_se(file);
+        assert_se(fputs("c\n", file) >= 0);
+        rewind(file);
+
+        assert_se(read_one_char(file, &r, 1000000, &need_nl) >= 0);
+        assert_se(!need_nl);
+        assert_se(r == 'c');
+        assert_se(read_one_char(file, &r, 1000000, &need_nl) < 0);
+
+        rewind(file);
+        assert_se(fputs("foobar\n", file) >= 0);
+        rewind(file);
+        assert_se(read_one_char(file, &r, 1000000, &need_nl) < 0);
+
+        rewind(file);
+        assert_se(fputs("\n", file) >= 0);
+        rewind(file);
+        assert_se(read_one_char(file, &r, 1000000, &need_nl) < 0);
+
+        unlink(name);
+}
+
+static void test_ignore_signals(void) {
+        assert_se(ignore_signals(SIGINT, -1) >= 0);
+        assert_se(kill(getpid(), SIGINT) >= 0);
+        assert_se(ignore_signals(SIGUSR1, SIGUSR2, SIGTERM, SIGPIPE, -1) >= 0);
+        assert_se(kill(getpid(), SIGUSR1) >= 0);
+        assert_se(kill(getpid(), SIGUSR2) >= 0);
+        assert_se(kill(getpid(), SIGTERM) >= 0);
+        assert_se(kill(getpid(), SIGPIPE) >= 0);
+        assert_se(default_signals(SIGINT, SIGUSR1, SIGUSR2, SIGTERM, SIGPIPE, -1) >= 0);
+}
+
+static void test_strshorten(void) {
+        char s[] = "foobar";
+
+        assert_se(strlen(strshorten(s, 6)) == 6);
+        assert_se(strlen(strshorten(s, 12)) == 6);
+        assert_se(strlen(strshorten(s, 2)) == 2);
+        assert_se(strlen(strshorten(s, 0)) == 0);
+}
+
+static void test_strappenda(void) {
+        char *actual;
+
+        actual = strappenda("", "foo", "bar");
+        assert_se(streq(actual, "foobar"));
+
+        actual = strappenda("foo", "bar", "baz");
+        assert_se(streq(actual, "foobarbaz"));
+
+        actual = strappenda("foo", "", "bar", "baz");
+        assert_se(streq(actual, "foobarbaz"));
+}
+
+static void test_is_symlink(void) {
+        char name[] = "/tmp/test-is_symlink.XXXXXX";
+        char name_link[] = "/tmp/test-is_symlink.link";
+        _cleanup_close_ int fd = -1;
+
+        fd = mkostemp_safe(name, O_RDWR|O_CLOEXEC);
+        assert_se(fd >= 0);
+        assert_se(symlink(name, name_link) >= 0);
+
+        assert_se(is_symlink(name) == 0);
+        assert_se(is_symlink(name_link) == 1);
+        assert_se(is_symlink("/a/file/which/does/not/exist/i/guess") < 0);
+
+
+        unlink(name);
+        unlink(name_link);
+}
+
+static void test_pid_is_unwaited(void) {
+        pid_t pid;
+
+        pid = fork();
+        assert_se(pid >= 0);
+        if (pid == 0) {
+                _exit(EXIT_SUCCESS);
+        } else {
+                int status;
+
+                waitpid(pid, &status, 0);
+                assert_se(!pid_is_unwaited(pid));
+        }
+        assert_se(pid_is_unwaited(getpid()));
+        assert_se(!pid_is_unwaited(-1));
+}
+
+static void test_pid_is_alive(void) {
+        pid_t pid;
+
+        pid = fork();
+        assert_se(pid >= 0);
+        if (pid == 0) {
+                _exit(EXIT_SUCCESS);
+        } else {
+                int status;
+
+                waitpid(pid, &status, 0);
+                assert_se(!pid_is_alive(pid));
+        }
+        assert_se(pid_is_alive(getpid()));
+        assert_se(!pid_is_alive(-1));
+}
+
+static void test_search_and_fopen(void) {
+        const char *dirs[] = {"/tmp/foo/bar", "/tmp", NULL};
+        char name[] = "/tmp/test-search_and_fopen.XXXXXX";
+        int fd = -1;
+        int r;
+        FILE *f;
+
+        fd = mkostemp_safe(name, O_RDWR|O_CLOEXEC);
+        assert_se(fd >= 0);
+        close(fd);
+
+        r = search_and_fopen(basename(name), "r", NULL, dirs, &f);
+        assert_se(r >= 0);
+        fclose(f);
+
+        r = search_and_fopen(name, "r", NULL, dirs, &f);
+        assert_se(r >= 0);
+        fclose(f);
+
+        r = search_and_fopen(basename(name), "r", "/", dirs, &f);
+        assert_se(r >= 0);
+        fclose(f);
+
+        r = search_and_fopen("/a/file/which/does/not/exist/i/guess", "r", NULL, dirs, &f);
+        assert_se(r < 0);
+        r = search_and_fopen("afilewhichdoesnotexistiguess", "r", NULL, dirs, &f);
+        assert_se(r < 0);
+
+        r = unlink(name);
+        assert_se(r == 0);
+
+        r = search_and_fopen(basename(name), "r", NULL, dirs, &f);
+        assert_se(r < 0);
+}
+
+
+static void test_search_and_fopen_nulstr(void) {
+        const char dirs[] = "/tmp/foo/bar\0/tmp\0";
+        char name[] = "/tmp/test-search_and_fopen.XXXXXX";
+        int fd = -1;
+        int r;
+        FILE *f;
+
+        fd = mkostemp_safe(name, O_RDWR|O_CLOEXEC);
+        assert_se(fd >= 0);
+        close(fd);
+
+        r = search_and_fopen_nulstr(basename(name), "r", NULL, dirs, &f);
+        assert_se(r >= 0);
+        fclose(f);
+
+        r = search_and_fopen_nulstr(name, "r", NULL, dirs, &f);
+        assert_se(r >= 0);
+        fclose(f);
+
+        r = search_and_fopen_nulstr("/a/file/which/does/not/exist/i/guess", "r", NULL, dirs, &f);
+        assert_se(r < 0);
+        r = search_and_fopen_nulstr("afilewhichdoesnotexistiguess", "r", NULL, dirs, &f);
+        assert_se(r < 0);
+
+        r = unlink(name);
+        assert_se(r == 0);
+
+        r = search_and_fopen_nulstr(basename(name), "r", NULL, dirs, &f);
+        assert_se(r < 0);
+}
+
+static void test_glob_exists(void) {
+        char name[] = "/tmp/test-glob_exists.XXXXXX";
+        int fd = -1;
+        int r;
+
+        fd = mkostemp_safe(name, O_RDWR|O_CLOEXEC);
+        assert_se(fd >= 0);
+        close(fd);
+
+        r = glob_exists("/tmp/test-glob_exists*");
+        assert_se(r == 1);
+
+        r = unlink(name);
+        assert_se(r == 0);
+        r = glob_exists("/tmp/test-glob_exists*");
+        assert_se(r == 0);
+}
+
+static void test_execute_directory(void) {
+        char name[] = "/tmp/test-execute_directory/script1";
+        char name2[] = "/tmp/test-execute_directory/script2";
+        char name3[] = "/tmp/test-execute_directory/useless";
+        char tempdir[] = "/tmp/test-execute_directory/";
+
+        assert_se(mkdir_safe(tempdir, 0755, getuid(), getgid()) >= 0);
+        assert_se(write_string_file(name, "#!/bin/sh\necho 'Executing '$0\ntouch /tmp/test-execute_directory/it_works") == 0);
+        assert_se(write_string_file(name2, "#!/bin/sh\necho 'Executing '$0\ntouch /tmp/test-execute_directory/it_works2") == 0);
+        assert_se(chmod(name, 0755) == 0);
+        assert_se(chmod(name2, 0755) == 0);
+        assert_se(touch(name3) >= 0);
+
+        execute_directory(tempdir, NULL, DEFAULT_TIMEOUT_USEC, NULL);
+        assert_se(access("/tmp/test-execute_directory/it_works", F_OK) >= 0);
+        assert_se(access("/tmp/test-execute_directory/it_works2", F_OK) >= 0);
+
+        rm_rf_dangerous(tempdir, false, true, false);
+}
+
+static void test_unquote_first_word(void) {
+        const char *p, *original;
+        char *t;
+
+        p = original = "foobar waldo";
+        assert_se(unquote_first_word(&p, &t) > 0);
+        assert_se(streq(t, "foobar"));
+        free(t);
+        assert_se(p == original + 7);
+
+        assert_se(unquote_first_word(&p, &t) > 0);
+        assert_se(streq(t, "waldo"));
+        free(t);
+        assert_se(p == original + 12);
+
+        assert_se(unquote_first_word(&p, &t) == 0);
+        assert_se(!t);
+        assert_se(p == original + 12);
+
+        p = original = "\"foobar\" \'waldo\'";
+        assert_se(unquote_first_word(&p, &t) > 0);
+        assert_se(streq(t, "foobar"));
+        free(t);
+        assert_se(p == original + 9);
+
+        assert_se(unquote_first_word(&p, &t) > 0);
+        assert_se(streq(t, "waldo"));
+        free(t);
+        assert_se(p == original + 16);
+
+        assert_se(unquote_first_word(&p, &t) == 0);
+        assert_se(!t);
+        assert_se(p == original + 16);
+
+        p = original = "\"";
+        assert_se(unquote_first_word(&p, &t) == -EINVAL);
+        assert_se(p == original + 1);
+
+        p = original = "\'";
+        assert_se(unquote_first_word(&p, &t) == -EINVAL);
+        assert_se(p == original + 1);
+
+        p = original = "yay\'foo\'bar";
+        assert_se(unquote_first_word(&p, &t) > 0);
+        assert_se(streq(t, "yayfoobar"));
+        free(t);
+        assert_se(p == original + 11);
+
+        p = original = "   foobar   ";
+        assert_se(unquote_first_word(&p, &t) > 0);
+        assert_se(streq(t, "foobar"));
+        free(t);
+        assert_se(p == original + 12);
+}
+
+static void test_unquote_many_words(void) {
+        const char *p, *original;
+        char *a, *b, *c;
+
+        p = original = "foobar waldi piep";
+        assert_se(unquote_many_words(&p, &a, &b, &c, NULL) == 3);
+        assert_se(p == original + 17);
+        assert_se(streq_ptr(a, "foobar"));
+        assert_se(streq_ptr(b, "waldi"));
+        assert_se(streq_ptr(c, "piep"));
+        free(a);
+        free(b);
+        free(c);
+
+        p = original = "'foobar' wa\"ld\"i   ";
+        assert_se(unquote_many_words(&p, &a, &b, &c, NULL) == 2);
+        assert_se(p == original + 19);
+        assert_se(streq_ptr(a, "foobar"));
+        assert_se(streq_ptr(b, "waldi"));
+        assert_se(streq_ptr(c, NULL));
+        free(a);
+        free(b);
+
+        p = original = "";
+        assert_se(unquote_many_words(&p, &a, &b, &c, NULL) == 0);
+        assert_se(p == original);
+        assert_se(streq_ptr(a, NULL));
+        assert_se(streq_ptr(b, NULL));
+        assert_se(streq_ptr(c, NULL));
+
+        p = original = "  ";
+        assert_se(unquote_many_words(&p, &a, &b, &c, NULL) == 0);
+        assert_se(p == original+2);
+        assert_se(streq_ptr(a, NULL));
+        assert_se(streq_ptr(b, NULL));
+        assert_se(streq_ptr(c, NULL));
+
+        p = original = "foobar";
+        assert_se(unquote_many_words(&p, NULL) == 0);
+        assert_se(p == original);
+
+        p = original = "foobar waldi";
+        assert_se(unquote_many_words(&p, &a, NULL) == 1);
+        assert_se(p == original+7);
+        assert_se(streq_ptr(a, "foobar"));
+
+        p = original = "     foobar    ";
+        assert_se(unquote_many_words(&p, &a, NULL) == 1);
+        assert_se(p == original+15);
+        assert_se(streq_ptr(a, "foobar"));
 }
 
 int main(int argc, char *argv[]) {
+        log_parse_environment();
+        log_open();
+
         test_streq_ptr();
+        test_align_power2();
+        test_max();
         test_first_word();
         test_close_many();
         test_parse_boolean();
@@ -618,6 +1242,7 @@ int main(int argc, char *argv[]) {
         test_get_process_comm();
         test_protect_errno();
         test_parse_size();
+        test_config_parse_iec_off();
         test_strextend();
         test_strrep();
         test_split_pair();
@@ -625,6 +1250,32 @@ int main(int argc, char *argv[]) {
         test_get_files_in_directory();
         test_in_set();
         test_writing_tmpfile();
+        test_hexdump();
+        test_log2i();
+        test_foreach_string();
+        test_filename_is_safe();
+        test_string_has_cc();
+        test_ascii_strlower();
+        test_files_same();
+        test_is_valid_documentation_url();
+        test_file_in_same_dir();
+        test_endswith();
+        test_close_nointr();
+        test_unlink_noerrno();
+        test_readlink_and_make_absolute();
+        test_read_one_char();
+        test_ignore_signals();
+        test_strshorten();
+        test_strappenda();
+        test_is_symlink();
+        test_pid_is_unwaited();
+        test_pid_is_alive();
+        test_search_and_fopen();
+        test_search_and_fopen_nulstr();
+        test_glob_exists();
+        test_execute_directory();
+        test_unquote_first_word();
+        test_unquote_many_words();
 
         return 0;
 }

@@ -33,15 +33,13 @@ typedef struct ExecRuntime ExecRuntime;
 #include <stdbool.h>
 #include <stdio.h>
 #include <sched.h>
-#ifdef HAVE_SECCOMP
-#include <seccomp.h>
-
-#include "set.h"
-#endif
 
 #include "list.h"
 #include "util.h"
+#include "set.h"
 #include "fdset.h"
+#include "missing.h"
+#include "namespace.h"
 
 typedef enum ExecInput {
         EXEC_INPUT_NULL,
@@ -97,7 +95,7 @@ struct ExecContext {
         char **environment;
         char **environment_files;
 
-        struct rlimit *rlimit[RLIMIT_NLIMITS];
+        struct rlimit *rlimit[_RLIMIT_MAX];
         char *working_directory, *root_directory;
 
         mode_t umask;
@@ -115,8 +113,6 @@ struct ExecContext {
         ExecOutput std_error;
 
         nsec_t timer_slack_nsec;
-
-        char *tcpwrap_name;
 
         char *tty_path;
 
@@ -144,6 +140,9 @@ struct ExecContext {
         bool apparmor_profile_ignore;
         char *apparmor_profile;
 
+        bool smack_process_label_ignore;
+        char *smack_process_label;
+
         char **read_write_dirs, **read_only_dirs, **inaccessible_dirs;
         unsigned long mount_flags;
 
@@ -161,6 +160,8 @@ struct ExecContext {
         bool private_tmp;
         bool private_network;
         bool private_devices;
+        ProtectSystem protect_system;
+        ProtectHome protect_home;
 
         bool no_new_privileges;
 
@@ -178,10 +179,17 @@ struct ExecContext {
         int syscall_errno;
         bool syscall_whitelist:1;
 
+        Set *address_families;
+        bool address_families_whitelist:1;
+
+        char **runtime_directory;
+        mode_t runtime_directory_mode;
+
         bool oom_score_adjust_set:1;
         bool nice_set:1;
         bool ioprio_set:1;
         bool cpu_sched_set:1;
+        bool no_new_privileges_set:1;
 };
 
 #include "cgroup.h"
@@ -197,6 +205,7 @@ int exec_spawn(ExecCommand *command,
                bool confirm_spawn,
                CGroupControllerMask cgroup_mask,
                const char *cgroup_path,
+               const char *runtime_prefix,
                const char *unit_id,
                usec_t watchdog_usec,
                int pipe_fd[2],
@@ -219,6 +228,8 @@ int exec_command_set(ExecCommand *c, const char *path, ...);
 void exec_context_init(ExecContext *c);
 void exec_context_done(ExecContext *c);
 void exec_context_dump(ExecContext *c, FILE* f, const char *prefix);
+
+int exec_context_destroy_runtime_directory(ExecContext *c, const char *runtime_root);
 
 int exec_context_load_environment(const ExecContext *c, char ***l);
 

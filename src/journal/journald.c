@@ -24,9 +24,9 @@
 #include <errno.h>
 #include <unistd.h>
 
-#include <systemd/sd-journal.h>
-#include <systemd/sd-messages.h>
-#include <systemd/sd-daemon.h>
+#include "systemd/sd-journal.h"
+#include "systemd/sd-messages.h"
+#include "systemd/sd-daemon.h"
 
 #include "journal-authenticate.h"
 #include "journald-server.h"
@@ -36,11 +36,6 @@
 int main(int argc, char *argv[]) {
         Server server;
         int r;
-
-        /* if (getppid() != 1) { */
-        /*         log_error("This program should be invoked by init only."); */
-        /*         return EXIT_FAILURE; */
-        /* } */
 
         if (argc > 1) {
                 log_error("This program does not take arguments.");
@@ -62,7 +57,7 @@ int main(int argc, char *argv[]) {
         server_flush_to_var(&server);
         server_flush_dev_kmsg(&server);
 
-        log_debug("systemd-journald running as pid %lu", (unsigned long) getpid());
+        log_debug("systemd-journald running as pid "PID_FMT, getpid());
         server_driver_message(&server, SD_MESSAGE_JOURNAL_START, "Journal started");
 
         sd_notify(false,
@@ -70,7 +65,7 @@ int main(int argc, char *argv[]) {
                   "STATUS=Processing requests...");
 
         for (;;) {
-                usec_t t = (usec_t) -1, n;
+                usec_t t = USEC_INFINITY, n;
 
                 r = sd_event_get_state(server.event);
                 if (r < 0)
@@ -110,7 +105,6 @@ int main(int argc, char *argv[]) {
                 r = sd_event_run(server.event, t);
                 if (r < 0) {
                         log_error("Failed to run event loop: %s", strerror(-r));
-                        r = -errno;
                         goto finish;
                 }
 
@@ -118,7 +112,7 @@ int main(int argc, char *argv[]) {
                 server_maybe_warn_forward_syslog_missed(&server);
         }
 
-        log_debug("systemd-journald stopped as pid %lu", (unsigned long) getpid());
+        log_debug("systemd-journald stopped as pid "PID_FMT, getpid());
         server_driver_message(&server, SD_MESSAGE_JOURNAL_STOP, "Journal stopped");
 
 finish:

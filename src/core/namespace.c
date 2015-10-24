@@ -42,6 +42,7 @@
 #include "mkdir.h"
 #include "dev-setup.h"
 #include "def.h"
+#include "label.h"
 
 typedef enum MountMode {
         /* This is ordered by priority! */
@@ -68,8 +69,9 @@ static int append_mounts(BindMount **p, char **strv, MountMode mode) {
         STRV_FOREACH(i, strv) {
 
                 (*p)->ignore = false;
+                (*p)->done = false;
 
-                if ((mode == INACCESSIBLE || mode == READONLY) && (*i)[0] == '-') {
+                if ((mode == INACCESSIBLE || mode == READONLY || mode == READWRITE) && (*i)[0] == '-') {
                         (*p)->ignore = true;
                         (*i)++;
                 }
@@ -122,8 +124,7 @@ static void drop_duplicates(BindMount *m, unsigned *n) {
                 if (previous && path_equal(f->path, previous->path))
                         continue;
 
-                t->path = f->path;
-                t->mode = f->mode;
+                *t = *f;
 
                 previous = t;
 
@@ -142,9 +143,8 @@ static int mount_dev(BindMount *m) {
                 "/dev/urandom\0"
                 "/dev/tty\0";
 
-        struct stat devnodes_stat[6] = {};
-        const char *d;
-        unsigned n = 0;
+        char temporary_mount[] = "/tmp/namespace-dev-XXXXXX";
+        const char *d, *dev = NULL, *devpts = NULL, *devshm = NULL, *devkdbus = NULL, *devhugepages = NULL, *devmqueue = NULL, *devlog = NULL, *devptmx = NULL;
         _cleanup_umask_ mode_t u;
         int r;
 
@@ -152,56 +152,124 @@ static int mount_dev(BindMount *m) {
 
         u = umask(0000);
 
-        /* First: record device mode_t and dev_t */
+        if (!mkdtemp(temporary_mount))
+                return -errno;
+
+        dev = strappenda(temporary_mount, "/dev");
+        mkdir(dev, 0755);
+        if (mount("tmpfs", dev, "tmpfs", MS_NOSUID|MS_STRICTATIME, "mode=755") < 0) {
+                r = -errno;
+                goto fail;
+        }
+
+        devpts = strappenda(temporary_mount, "/dev/pts");
+        mkdir(devpts, 0755);
+        if (mount("/dev/pts", devpts, NULL, MS_BIND, NULL) < 0) {
+                r = -errno;
+                goto fail;
+        }
+
+        devptmx = strappenda(temporary_mount, "/dev/ptmx");
+        symlink("pts/ptmx", devptmx);
+
+        devshm = strappenda(temporary_mount, "/dev/shm");
+        mkdir(devshm, 01777);
+        r = mount("/dev/shm", devshm, NULL, MS_BIND, NULL);
+        if (r < 0) {
+                r = -errno;
+                goto fail;
+        }
+
+        devmqueue = strappenda(temporary_mount, "/dev/mqueue");
+        mkdir(devmqueue, 0755);
+        mount("/dev/mqueue", devmqueue, NULL, MS_BIND, NULL);
+
+        devkdbus = strappenda(temporary_mount, "/dev/kdbus");
+        mkdir(devkdbus, 0755);
+        mount("/dev/kdbus", devkdbus, NULL, MS_BIND, NULL);
+
+        devhugepages = strappenda(temporary_mount, "/dev/hugepages");
+        mkdir(devhugepages, 0755);
+        mount("/dev/hugepages", devhugepages, NULL, MS_BIND, NULL);
+
+        devlog = strappenda(temporary_mount, "/dev/log");
+        symlink("/run/systemd/journal/dev-log", devlog);
+
         NULSTR_FOREACH(d, devnodes) {
-                r = stat(d, &devnodes_stat[n]);
+                _cleanup_free_ char *dn = NULL;
+                struct stat st;
+
+                r = stat(d, &st);
                 if (r < 0) {
-                        if (errno != ENOENT)
-                                return -errno;
-                } else {
-                        if (!S_ISBLK(devnodes_stat[n].st_mode) &&
-                            !S_ISCHR(devnodes_stat[n].st_mode))
-                                return -EINVAL;
+
+                        if (errno == ENOENT)
+                                continue;
+
+                        r = -errno;
+                        goto fail;
                 }
 
-                n++;
-        }
+                if (!S_ISBLK(st.st_mode) &&
+                    !S_ISCHR(st.st_mode)) {
+                        r = -EINVAL;
+                        goto fail;
+                }
 
-        assert(n == ELEMENTSOF(devnodes_stat));
-
-        r = mount("tmpfs", "/dev", "tmpfs", MS_NOSUID|MS_STRICTATIME, "mode=755");
-        if (r < 0)
-                return m->ignore ? 0 : -errno;
-
-
-        mkdir_p("/dev/pts", 0755);
-
-        r = mount("devpts", "/dev/pts", "devpts", MS_NOSUID|MS_NOEXEC, "newinstance,ptmxmode=0666,mode=620,gid=" STRINGIFY(TTY_GID));
-        if (r < 0)
-                return m->ignore ? 0 : -errno;
-
-        mkdir_p("/dev/shm", 0755);
-
-        r = mount("tmpfs", "/dev/shm", "tmpfs", MS_NOSUID|MS_NODEV|MS_STRICTATIME, "mode=1777");
-        if (r < 0)
-                return m->ignore ? 0 : -errno;
-
-        /* Second: actually create it */
-        n = 0;
-        NULSTR_FOREACH(d, devnodes) {
-                if (devnodes_stat[n].st_rdev == 0)
+                if (st.st_rdev == 0)
                         continue;
 
-                r = mknod(d, devnodes_stat[n].st_mode, devnodes_stat[n].st_rdev);
-                if (r < 0)
-                        return m->ignore ? 0 : -errno;
+                dn = strappend(temporary_mount, d);
+                if (!dn) {
+                        r = -ENOMEM;
+                        goto fail;
+                }
 
-                n++;
+                label_context_set(d, st.st_mode);
+                r = mknod(dn, st.st_mode, st.st_rdev);
+                label_context_clear();
+
+                if (r < 0) {
+                        r = -errno;
+                        goto fail;
+                }
         }
 
-        dev_setup(NULL);
+        dev_setup(temporary_mount);
+
+        if (mount(dev, "/dev/", NULL, MS_MOVE, NULL) < 0) {
+                r = -errno;
+                goto fail;
+        }
+
+        rmdir(dev);
+        rmdir(temporary_mount);
 
         return 0;
+
+fail:
+        if (devpts)
+                umount(devpts);
+
+        if (devshm)
+                umount(devshm);
+
+        if (devkdbus)
+                umount(devkdbus);
+
+        if (devhugepages)
+                umount(devhugepages);
+
+        if (devmqueue)
+                umount(devmqueue);
+
+        if (dev) {
+                umount(dev);
+                rmdir(dev);
+        }
+
+        rmdir(temporary_mount);
+
+        return r;
 }
 
 static int apply_mount(
@@ -216,17 +284,21 @@ static int apply_mount(
 
         switch (m->mode) {
 
-        case PRIVATE_DEV:
-                return mount_dev(m);
-
         case INACCESSIBLE:
+
+                /* First, get rid of everything that is below if there
+                 * is anything... Then, overmount it with an
+                 * inaccessible directory. */
+                umount_recursive(m->path, 0);
+
                 what = "/run/systemd/inaccessible";
                 break;
 
         case READONLY:
         case READWRITE:
-                what = m->path;
-                break;
+                /* Nothing to mount here, we just later toggle the
+                 * MS_RDONLY bit for the mount point */
+                return 0;
 
         case PRIVATE_TMP:
                 what = tmp_dir;
@@ -235,6 +307,9 @@ static int apply_mount(
         case PRIVATE_VAR_TMP:
                 what = var_tmp_dir;
                 break;
+
+        case PRIVATE_DEV:
+                return mount_dev(m);
 
         default:
                 assert_not_reached("Unknown mode");
@@ -246,7 +321,7 @@ static int apply_mount(
         if (r >= 0)
                 log_debug("Successfully mounted %s to %s", what, m->path);
         else if (m->ignore && errno == ENOENT)
-                r = 0;
+                return 0;
 
         return r;
 }
@@ -256,14 +331,17 @@ static int make_read_only(BindMount *m) {
 
         assert(m);
 
-        if (m->mode != INACCESSIBLE && m->mode != READONLY)
+        if (IN_SET(m->mode, INACCESSIBLE, READONLY))
+                r = bind_remount_recursive(m->path, true);
+        else if (IN_SET(m->mode, READWRITE, PRIVATE_TMP, PRIVATE_VAR_TMP, PRIVATE_DEV))
+                r = bind_remount_recursive(m->path, false);
+        else
+                r = 0;
+
+        if (m->ignore && r == -ENOENT)
                 return 0;
 
-        r = mount(NULL, m->path, NULL, MS_BIND|MS_REMOUNT|MS_RDONLY|MS_REC, NULL);
-        if (r < 0 && !(m->ignore && errno == ENOENT))
-                return -errno;
-
-        return 0;
+        return r;
 }
 
 int setup_namespace(
@@ -273,6 +351,8 @@ int setup_namespace(
                 char* tmp_dir,
                 char* var_tmp_dir,
                 bool private_dev,
+                ProtectHome protect_home,
+                ProtectSystem protect_system,
                 unsigned mount_flags) {
 
         BindMount *m, *mounts = NULL;
@@ -289,10 +369,13 @@ int setup_namespace(
                 strv_length(read_write_dirs) +
                 strv_length(read_only_dirs) +
                 strv_length(inaccessible_dirs) +
-                private_dev;
+                private_dev +
+                (protect_home != PROTECT_HOME_NO ? 3 : 0) +
+                (protect_system != PROTECT_SYSTEM_NO ? 2 : 0) +
+                (protect_system == PROTECT_SYSTEM_FULL ? 1 : 0);
 
         if (n > 0) {
-                m = mounts = (BindMount *) alloca(n * sizeof(BindMount));
+                m = mounts = (BindMount *) alloca0(n * sizeof(BindMount));
                 r = append_mounts(&m, read_write_dirs, READWRITE);
                 if (r < 0)
                         return r;
@@ -323,30 +406,46 @@ int setup_namespace(
                         m++;
                 }
 
+                if (protect_home != PROTECT_HOME_NO) {
+                        r = append_mounts(&m, STRV_MAKE("-/home", "-/run/user", "-/root"), protect_home == PROTECT_HOME_READ_ONLY ? READONLY : INACCESSIBLE);
+                        if (r < 0)
+                                return r;
+                }
+
+                if (protect_system != PROTECT_SYSTEM_NO) {
+                        r = append_mounts(&m, protect_system == PROTECT_SYSTEM_FULL ? STRV_MAKE("/usr", "-/boot", "/etc") : STRV_MAKE("/usr", "-/boot"), READONLY);
+                        if (r < 0)
+                                return r;
+                }
+
                 assert(mounts + n == m);
 
                 qsort(mounts, n, sizeof(BindMount), mount_path_compare);
                 drop_duplicates(mounts, &n);
         }
 
-        /* Remount / as SLAVE so that nothing now mounted in the namespace
-           shows up in the parent */
-        if (mount(NULL, "/", NULL, MS_SLAVE|MS_REC, NULL) < 0)
-                return -errno;
+        if (n > 0) {
+                /* Remount / as SLAVE so that nothing now mounted in the namespace
+                   shows up in the parent */
+                if (mount(NULL, "/", NULL, MS_SLAVE|MS_REC, NULL) < 0)
+                        return -errno;
 
-        for (m = mounts; m < mounts + n; ++m) {
-                r = apply_mount(m, tmp_dir, var_tmp_dir);
-                if (r < 0)
-                        goto fail;
+                for (m = mounts; m < mounts + n; ++m) {
+                        r = apply_mount(m, tmp_dir, var_tmp_dir);
+                        if (r < 0)
+                                goto fail;
+                }
+
+                for (m = mounts; m < mounts + n; ++m) {
+                        r = make_read_only(m);
+                        if (r < 0)
+                                goto fail;
+                }
         }
 
-        for (m = mounts; m < mounts + n; ++m) {
-                r = make_read_only(m);
-                if (r < 0)
-                        goto fail;
-        }
-
-        /* Remount / as the desired mode */
+        /* Remount / as the desired mode. Not that this will not
+         * reestablish propagation from our side to the host, since
+         * what's disconnected is disconnected. */
         if (mount(NULL, "/", NULL, mount_flags | MS_REC, NULL) < 0) {
                 r = -errno;
                 goto fail;
@@ -355,9 +454,11 @@ int setup_namespace(
         return 0;
 
 fail:
-        for (m = mounts; m < mounts + n; ++m)
-                if (m->done)
-                        umount2(m->path, MNT_DETACH);
+        if (n > 0) {
+                for (m = mounts; m < mounts + n; ++m)
+                        if (m->done)
+                                umount2(m->path, MNT_DETACH);
+        }
 
         return r;
 }
@@ -517,3 +618,19 @@ fail:
 
         return r;
 }
+
+static const char *const protect_home_table[_PROTECT_HOME_MAX] = {
+        [PROTECT_HOME_NO] = "no",
+        [PROTECT_HOME_YES] = "yes",
+        [PROTECT_HOME_READ_ONLY] = "read-only",
+};
+
+DEFINE_STRING_TABLE_LOOKUP(protect_home, ProtectHome);
+
+static const char *const protect_system_table[_PROTECT_SYSTEM_MAX] = {
+        [PROTECT_SYSTEM_NO] = "no",
+        [PROTECT_SYSTEM_YES] = "yes",
+        [PROTECT_SYSTEM_FULL] = "full",
+};
+
+DEFINE_STRING_TABLE_LOOKUP(protect_system, ProtectSystem);

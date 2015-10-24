@@ -183,13 +183,87 @@ static int device_find_escape_name(Manager *m, const char *dn, Unit **_u) {
         return 0;
 }
 
-static int device_update_unit(Manager *m, struct udev_device *dev, const char *path, bool main) {
-        const char *sysfs, *model;
-        Unit *u = NULL;
+static int device_make_description(Unit *u, struct udev_device *dev, const char *path) {
+        const char *model;
+
+        assert(u);
+        assert(dev);
+        assert(path);
+
+        model = udev_device_get_property_value(dev, "ID_MODEL_FROM_DATABASE");
+        if (!model)
+                model = udev_device_get_property_value(dev, "ID_MODEL");
+
+        if (model) {
+                const char *label;
+
+                /* Try to concatenate the device model string with a label, if there is one */
+                label = udev_device_get_property_value(dev, "ID_FS_LABEL");
+                if (!label)
+                        label = udev_device_get_property_value(dev, "ID_PART_ENTRY_NAME");
+                if (!label)
+                        label = udev_device_get_property_value(dev, "ID_PART_ENTRY_NUMBER");
+
+                if (label) {
+                        _cleanup_free_ char *j;
+
+                        j = strjoin(model, " ", label, NULL);
+                        if (j)
+                                return unit_set_description(u, j);
+                }
+
+                return unit_set_description(u, model);
+        }
+
+        return unit_set_description(u, path);
+}
+
+static int device_add_udev_wants(Unit *u, struct udev_device *dev) {
+        const char *wants;
+        const char *word, *state;
+        size_t l;
         int r;
+        const char *property;
+
+        assert(u);
+        assert(dev);
+
+        property = u->manager->running_as == SYSTEMD_USER ? "SYSTEMD_USER_WANTS" : "SYSTEMD_WANTS";
+        wants = udev_device_get_property_value(dev, property);
+        if (!wants)
+                return 0;
+
+        FOREACH_WORD_QUOTED(word, l, wants, state) {
+                _cleanup_free_ char *n = NULL;
+                char e[l+1];
+
+                memcpy(e, word, l);
+                e[l] = 0;
+
+                n = unit_name_mangle(e, MANGLE_NOGLOB);
+                if (!n)
+                        return -ENOMEM;
+
+                r = unit_add_dependency_by_name(u, UNIT_WANTS, n, NULL, true);
+                if (r < 0)
+                        return r;
+        }
+        if (!isempty(state))
+                log_warning_unit(u->id, "Property %s on %s has trailing garbage, ignoring.",
+                                 property, strna(udev_device_get_syspath(dev)));
+
+        return 0;
+}
+
+static int device_update_unit(Manager *m, struct udev_device *dev, const char *path, bool main) {
+        const char *sysfs;
+        Unit *u = NULL;
         bool delete;
+        int r;
 
         assert(m);
+        assert(dev);
+        assert(path);
 
         sysfs = udev_device_get_syspath(dev);
         if (!sysfs)
@@ -242,43 +316,15 @@ static int device_update_unit(Manager *m, struct udev_device *dev, const char *p
                         goto fail;
         }
 
-        if ((model = udev_device_get_property_value(dev, "ID_MODEL_FROM_DATABASE")) ||
-            (model = udev_device_get_property_value(dev, "ID_MODEL")))
-                r = unit_set_description(u, model);
-        else
-                r = unit_set_description(u, path);
-        if (r < 0)
-                goto fail;
+        device_make_description(u, dev, path);
 
         if (main) {
-                const char *wants;
-
                 /* The additional systemd udev properties we only
                  * interpret for the main object */
 
-                wants = udev_device_get_property_value(dev, m->running_as == SYSTEMD_USER ? "SYSTEMD_USER_WANTS" : "SYSTEMD_WANTS");
-                if (wants) {
-                        char *state, *w;
-                        size_t l;
-
-                        FOREACH_WORD_QUOTED(w, l, wants, state) {
-                                _cleanup_free_ char *n = NULL;
-                                char e[l+1];
-
-                                memcpy(e, w, l);
-                                e[l] = 0;
-
-                                n = unit_name_mangle(e, MANGLE_NOGLOB);
-                                if (!n) {
-                                        r = -ENOMEM;
-                                        goto fail;
-                                }
-
-                                r = unit_add_dependency_by_name(u, UNIT_WANTS, n, NULL, true);
-                                if (r < 0)
-                                        goto fail;
-                        }
-                }
+                r = device_add_udev_wants(u, dev);
+                if (r < 0)
+                        goto fail;
         }
 
         /* Note that this won't dispatch the load queue, the caller
@@ -349,13 +395,13 @@ static int device_process_new_device(Manager *m, struct udev_device *dev) {
          * aliases */
         alias = udev_device_get_property_value(dev, "SYSTEMD_ALIAS");
         if (alias) {
-                char *state, *w;
+                const char *word, *state;
                 size_t l;
 
-                FOREACH_WORD_QUOTED(w, l, alias, state) {
+                FOREACH_WORD_QUOTED(word, l, alias, state) {
                         char e[l+1];
 
-                        memcpy(e, w, l);
+                        memcpy(e, word, l);
                         e[l] = 0;
 
                         if (path_is_absolute(e))
@@ -363,6 +409,8 @@ static int device_process_new_device(Manager *m, struct udev_device *dev) {
                         else
                                 log_warning("SYSTEMD_ALIAS for %s is not an absolute path, ignoring: %s", sysfs, e);
                 }
+                if (!isempty(state))
+                        log_warning("SYSTEMD_ALIAS for %s has trailing garbage, ignoring.", sysfs);
         }
 
         return 0;

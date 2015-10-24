@@ -34,6 +34,8 @@
 #include "dbus-execute.h"
 #include "capability.h"
 #include "env-util.h"
+#include "af-list.h"
+#include "namespace.h"
 
 #ifdef HAVE_SECCOMP
 #include "seccomp-util.h"
@@ -42,6 +44,9 @@
 BUS_DEFINE_PROPERTY_GET_ENUM(bus_property_get_exec_output, exec_output, ExecOutput);
 
 static BUS_DEFINE_PROPERTY_GET_ENUM(property_get_exec_input, exec_input, ExecInput);
+
+static BUS_DEFINE_PROPERTY_GET_ENUM(bus_property_get_protect_home, protect_home, ProtectHome);
+static BUS_DEFINE_PROPERTY_GET_ENUM(bus_property_get_protect_system, protect_system, ProtectSystem);
 
 static int property_get_environment_files(
                 sd_bus *bus,
@@ -86,6 +91,7 @@ static int property_get_rlimit(
 
         struct rlimit *rl;
         uint64_t u;
+        rlim_t x;
 
         assert(bus);
         assert(reply);
@@ -93,7 +99,7 @@ static int property_get_rlimit(
 
         rl = *(struct rlimit**) userdata;
         if (rl)
-                u = (uint64_t) rl->rlim_max;
+                x = rl->rlim_max;
         else {
                 struct rlimit buf = {};
                 int z;
@@ -102,9 +108,13 @@ static int property_get_rlimit(
                 assert(z >= 0);
 
                 getrlimit(z, &buf);
-
-                u = (uint64_t) buf.rlim_max;
+                x = buf.rlim_max;
         }
+
+        /* rlim_t might have different sizes, let's map
+         * RLIMIT_INFINITY to (uint64_t) -1, so that it is the same on
+         * all archs */
+        u = x == RLIM_INFINITY ? (uint64_t) -1 : (uint64_t) x;
 
         return sd_bus_message_append(reply, "t", u);
 }
@@ -290,7 +300,7 @@ static int property_get_timer_slack_nsec(
         assert(reply);
         assert(c);
 
-        if (c->timer_slack_nsec != (nsec_t) -1)
+        if (c->timer_slack_nsec != NSEC_INFINITY)
                 u = (uint64_t) c->timer_slack_nsec;
         else
                 u = (uint64_t) prctl(PR_GET_TIMERSLACK);
@@ -384,11 +394,9 @@ static int property_get_syscall_filter(
                 if (!name)
                         continue;
 
-                r = strv_push(&l, name);
-                if (r < 0) {
-                        free(name);
-                        return -ENOMEM;
-                }
+                r = strv_consume(&l, name);
+                if (r < 0)
+                        return r;
         }
 #endif
 
@@ -500,6 +508,24 @@ static int property_get_apparmor_profile(
         return sd_bus_message_append(reply, "(bs)", c->apparmor_profile_ignore, c->apparmor_profile);
 }
 
+static int property_get_smack_process_label(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *error) {
+
+        ExecContext *c = userdata;
+
+        assert(bus);
+        assert(reply);
+        assert(c);
+
+        return sd_bus_message_append(reply, "(bs)", c->smack_process_label_ignore, c->smack_process_label);
+}
+
 static int property_get_personality(
                 sd_bus *bus,
                 const char *path,
@@ -516,6 +542,54 @@ static int property_get_personality(
         assert(c);
 
         return sd_bus_message_append(reply, "s", personality_to_string(c->personality));
+}
+
+static int property_get_address_families(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *error) {
+
+        ExecContext *c = userdata;
+        _cleanup_strv_free_ char **l = NULL;
+        Iterator i;
+        void *af;
+        int r;
+
+        assert(bus);
+        assert(reply);
+        assert(c);
+
+        r = sd_bus_message_open_container(reply, 'r', "bas");
+        if (r < 0)
+                return r;
+
+        r = sd_bus_message_append(reply, "b", c->address_families_whitelist);
+        if (r < 0)
+                return r;
+
+        SET_FOREACH(af, c->address_families, i) {
+                const char *name;
+
+                name = af_to_name(PTR_TO_INT(af));
+                if (!name)
+                        continue;
+
+                r = strv_extend(&l, name);
+                if (r < 0)
+                        return -ENOMEM;
+        }
+
+        strv_sort(l);
+
+        r = sd_bus_message_append_strv(reply, l);
+        if (r < 0)
+                return r;
+
+        return sd_bus_message_close_container(reply);
 }
 
 const sd_bus_vtable bus_exec_vtable[] = {
@@ -566,7 +640,6 @@ const sd_bus_vtable bus_exec_vtable[] = {
         SD_BUS_PROPERTY("User", "s", NULL, offsetof(ExecContext, user), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("Group", "s", NULL, offsetof(ExecContext, group), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("SupplementaryGroups", "as", NULL, offsetof(ExecContext, supplementary_groups), SD_BUS_VTABLE_PROPERTY_CONST),
-        SD_BUS_PROPERTY("TCPWrapName", "s", NULL, offsetof(ExecContext, tcpwrap_name), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("PAMName", "s", NULL, offsetof(ExecContext, pam_name), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("ReadWriteDirectories", "as", NULL, offsetof(ExecContext, read_write_dirs), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("ReadOnlyDirectories", "as", NULL, offsetof(ExecContext, read_only_dirs), SD_BUS_VTABLE_PROPERTY_CONST),
@@ -575,16 +648,22 @@ const sd_bus_vtable bus_exec_vtable[] = {
         SD_BUS_PROPERTY("PrivateTmp", "b", bus_property_get_bool, offsetof(ExecContext, private_tmp), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("PrivateNetwork", "b", bus_property_get_bool, offsetof(ExecContext, private_network), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("PrivateDevices", "b", bus_property_get_bool, offsetof(ExecContext, private_devices), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("ProtectHome", "s", bus_property_get_protect_home, offsetof(ExecContext, protect_home), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("ProtectSystem", "s", bus_property_get_protect_system, offsetof(ExecContext, protect_system), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("SameProcessGroup", "b", bus_property_get_bool, offsetof(ExecContext, same_pgrp), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("UtmpIdentifier", "s", NULL, offsetof(ExecContext, utmp_id), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("SELinuxContext", "(bs)", property_get_selinux_context, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("AppArmorProfile", "(bs)", property_get_apparmor_profile, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("SmackProcessLabel", "(bs)", property_get_smack_process_label, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("IgnoreSIGPIPE", "b", bus_property_get_bool, offsetof(ExecContext, ignore_sigpipe), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("NoNewPrivileges", "b", bus_property_get_bool, offsetof(ExecContext, no_new_privileges), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("SystemCallFilter", "(bas)", property_get_syscall_filter, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("SystemCallArchitectures", "as", property_get_syscall_archs, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("SystemCallErrorNumber", "i", property_get_syscall_errno, 0, SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_PROPERTY("Personality", "s", property_get_personality, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("RestrictAddressFamilies", "(bas)", property_get_address_families, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("RuntimeDirectoryMode", "u", bus_property_get_mode, offsetof(ExecContext, runtime_directory_mode), SD_BUS_VTABLE_PROPERTY_CONST),
+        SD_BUS_PROPERTY("RuntimeDirectory", "as", NULL, offsetof(ExecContext, runtime_directory), SD_BUS_VTABLE_PROPERTY_CONST),
         SD_BUS_VTABLE_END
 };
 
@@ -788,11 +867,49 @@ int bus_exec_context_set_transient_property(
                         strv_free(c->environment);
                         c->environment = e;
 
-                        joined = strv_join(c->environment, " ");
+                        joined = strv_join_quoted(c->environment);
                         if (!joined)
                                 return -ENOMEM;
 
                         unit_write_drop_in_private_format(u, mode, name, "Environment=%s\n", joined);
+                }
+
+                return 1;
+
+        } else if (rlimit_from_string(name) >= 0) {
+                uint64_t rl;
+                rlim_t x;
+
+                r = sd_bus_message_read(message, "t", &rl);
+                if (r < 0)
+                        return r;
+
+                if (rl == (uint64_t) -1)
+                        x = RLIM_INFINITY;
+                else {
+                        x = (rlim_t) rl;
+
+                        if ((uint64_t) x != rl)
+                                return -ERANGE;
+                }
+
+                if (mode != UNIT_CHECK) {
+                        int z;
+
+                        z = rlimit_from_string(name);
+
+                        if (!c->rlimit[z]) {
+                                c->rlimit[z] = new(struct rlimit, 1);
+                                if (!c->rlimit[z])
+                                        return -ENOMEM;
+                        }
+
+                        c->rlimit[z]->rlim_cur = c->rlimit[z]->rlim_max = x;
+
+                        if (x == RLIM_INFINITY)
+                                unit_write_drop_in_private_format(u, mode, name, "%s=infinity\n", name);
+                        else
+                                unit_write_drop_in_private_format(u, mode, name, "%s=%" PRIu64 "\n", name, rl);
                 }
 
                 return 1;

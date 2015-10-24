@@ -22,10 +22,9 @@ Before=getty.target
 IgnoreOnIsolate=yes
 
 [Service]
-ExecStart=-/sbin/agetty --keep-baud %I 115200,38400,9600 $TERM
+ExecStart=-/sbin/agetty --keep-baud 115200,38400,9600 %I $TERM
 Type=idle
 Restart=always
-RestartSec=0
 UtmpIdentifier=%I
 TTYPath=/dev/%I
 TTYReset=yes
@@ -33,6 +32,9 @@ TTYVHangup=yes
 KillMode=process
 IgnoreSIGPIPE=no
 SendSIGHUP=yes
+m4_ifdef(`DEFAULT_PROCESS_LABEL',
+SmackProcessLabel=systemd
+)m4_dnl
 
 [Install]
 WantedBy=getty.target

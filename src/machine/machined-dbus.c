@@ -27,7 +27,6 @@
 
 #include "sd-id128.h"
 #include "sd-messages.h"
-
 #include "strv.h"
 #include "mkdir.h"
 #include "path-util.h"
@@ -41,23 +40,6 @@
 #include "time-util.h"
 #include "cgroup-util.h"
 #include "machined.h"
-
-static bool valid_machine_name(const char *p) {
-        size_t l;
-
-        if (!filename_is_safe(p))
-                return false;
-
-        if (!ascii_is_valid(p))
-                return false;
-
-        l = strlen(p);
-
-        if (l < 1 || l> 64)
-                return false;
-
-        return true;
-}
 
 static int method_get_machine(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
         _cleanup_free_ char *p = NULL;
@@ -118,7 +100,7 @@ static int method_get_machine_by_pid(sd_bus *bus, sd_bus_message *message, void 
         if (r < 0)
                 return r;
         if (!machine)
-                return sd_bus_error_setf(error, BUS_ERROR_NO_MACHINE_FOR_PID, "PID %lu does not belong to any known machine", (unsigned long) pid);
+                return sd_bus_error_setf(error, BUS_ERROR_NO_MACHINE_FOR_PID, "PID "PID_FMT" does not belong to any known machine", pid);
 
         p = machine_bus_path(machine);
         if (!p)
@@ -169,14 +151,15 @@ static int method_list_machines(sd_bus *bus, sd_bus_message *message, void *user
         return sd_bus_send(bus, reply, NULL);
 }
 
-static int method_create_or_register_machine(Manager *manager, sd_bus_message *message, Machine **_m, sd_bus_error *error) {
+static int method_create_or_register_machine(Manager *manager, sd_bus_message *message, bool read_network, Machine **_m, sd_bus_error *error) {
         const char *name, *service, *class, *root_directory;
+        const int32_t *netif = NULL;
         MachineClass c;
         uint32_t leader;
         sd_id128_t id;
         const void *v;
         Machine *m;
-        size_t n;
+        size_t n, n_netif = 0;
         int r;
 
         assert(manager);
@@ -186,7 +169,7 @@ static int method_create_or_register_machine(Manager *manager, sd_bus_message *m
         r = sd_bus_message_read(message, "s", &name);
         if (r < 0)
                 return r;
-        if (!valid_machine_name(name))
+        if (!machine_name_is_valid(name))
                 return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid machine name");
 
         r = sd_bus_message_read_array(message, 'y', &v, &n);
@@ -202,6 +185,21 @@ static int method_create_or_register_machine(Manager *manager, sd_bus_message *m
         r = sd_bus_message_read(message, "ssus", &service, &class, &leader, &root_directory);
         if (r < 0)
                 return r;
+
+        if (read_network) {
+                size_t i;
+
+                r = sd_bus_message_read_array(message, 'i', (const void**) &netif, &n_netif);
+                if (r < 0)
+                        return r;
+
+                n_netif /= sizeof(int32_t);
+
+                for (i = 0; i < n_netif; i++) {
+                        if (netif[i] <= 0)
+                                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid network interface index %i", netif[i]);
+                }
+        }
 
         if (isempty(class))
                 c = _MACHINE_CLASS_INVALID;
@@ -258,6 +256,17 @@ static int method_create_or_register_machine(Manager *manager, sd_bus_message *m
                 }
         }
 
+        if (n_netif > 0) {
+                assert_cc(sizeof(int32_t) == sizeof(int));
+                m->netif = memdup(netif, sizeof(int32_t) * n_netif);
+                if (!m->netif) {
+                        r = -ENOMEM;
+                        goto fail;
+                }
+
+                m->n_netif = n_netif;
+        }
+
         *_m = m;
 
         return 1;
@@ -267,12 +276,12 @@ fail:
         return r;
 }
 
-static int method_create_machine(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
+static int method_create_machine_internal(sd_bus *bus, sd_bus_message *message, bool read_network, void *userdata, sd_bus_error *error) {
         Manager *manager = userdata;
         Machine *m = NULL;
         int r;
 
-        r = method_create_or_register_machine(manager, message, &m, error);
+        r = method_create_or_register_machine(manager, message, read_network, &m, error);
         if (r < 0)
                 return r;
 
@@ -292,13 +301,21 @@ fail:
         return r;
 }
 
-static int method_register_machine(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
+static int method_create_machine_with_network(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        return method_create_machine_internal(bus, message, true, userdata, error);
+}
+
+static int method_create_machine(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        return method_create_machine_internal(bus, message, false, userdata, error);
+}
+
+static int method_register_machine_internal(sd_bus *bus, sd_bus_message *message, bool read_network, void *userdata, sd_bus_error *error) {
         Manager *manager = userdata;
         _cleanup_free_ char *p = NULL;
         Machine *m = NULL;
         int r;
 
-        r = method_create_or_register_machine(manager, message, &m, error);
+        r = method_create_or_register_machine(manager, message, read_network, &m, error);
         if (r < 0)
                 return r;
 
@@ -307,6 +324,8 @@ static int method_register_machine(sd_bus *bus, sd_bus_message *message, void *u
                 r = sd_bus_error_set_errnof(error, r, "Failed to determine unit of process "PID_FMT" : %s", m->leader, strerror(-r));
                 goto fail;
         }
+
+        m->registered = true;
 
         r = machine_start(m, NULL, error);
         if (r < 0)
@@ -323,6 +342,14 @@ static int method_register_machine(sd_bus *bus, sd_bus_message *message, void *u
 fail:
         machine_add_to_gc_queue(m);
         return r;
+}
+
+static int method_register_machine_with_network(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        return method_register_machine_internal(bus, message, true, userdata, error);
+}
+
+static int method_register_machine(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        return method_register_machine_internal(bus, message, false, userdata, error);
 }
 
 static int method_terminate_machine(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
@@ -343,50 +370,70 @@ static int method_terminate_machine(sd_bus *bus, sd_bus_message *message, void *
         if (!machine)
                 return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_MACHINE, "No machine '%s' known", name);
 
-        r = machine_stop(machine);
-        if (r < 0)
-                return sd_bus_error_set_errno(error, r);
-
-        return sd_bus_reply_method_return(message, NULL);
+        return bus_machine_method_terminate(bus, message, machine, error);
 }
 
 static int method_kill_machine(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
         Manager *m = userdata;
         Machine *machine;
         const char *name;
-        const char *swho;
-        int32_t signo;
-        KillWho who;
         int r;
 
         assert(bus);
         assert(message);
         assert(m);
 
-        r = sd_bus_message_read(message, "ssi", &name, &swho, &signo);
+        r = sd_bus_message_read(message, "s", &name);
         if (r < 0)
                 return sd_bus_error_set_errno(error, r);
-
-        if (isempty(swho))
-                who = KILL_ALL;
-        else {
-                who = kill_who_from_string(swho);
-                if (who < 0)
-                        return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid kill parameter '%s'", swho);
-        }
-
-        if (signo <= 0 || signo >= _NSIG)
-                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Invalid signal %i", signo);
 
         machine = hashmap_get(m->machines, name);
         if (!machine)
                 return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_MACHINE, "No machine '%s' known", name);
 
-        r = machine_kill(machine, who, signo);
+        return bus_machine_method_kill(bus, message, machine, error);
+}
+
+static int method_get_machine_addresses(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        Manager *m = userdata;
+        Machine *machine;
+        const char *name;
+        int r;
+
+        assert(bus);
+        assert(message);
+        assert(m);
+
+        r = sd_bus_message_read(message, "s", &name);
         if (r < 0)
                 return sd_bus_error_set_errno(error, r);
 
-        return sd_bus_reply_method_return(message, NULL);
+        machine = hashmap_get(m->machines, name);
+        if (!machine)
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_MACHINE, "No machine '%s' known", name);
+
+        return bus_machine_method_get_addresses(bus, message, machine, error);
+}
+
+static int method_get_machine_os_release(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        Manager *m = userdata;
+        Machine *machine;
+        const char *name;
+        int r;
+
+        assert(bus);
+        assert(message);
+        assert(m);
+
+        r = sd_bus_message_read(message, "s", &name);
+        if (r < 0)
+                return sd_bus_error_set_errno(error, r);
+
+        machine = hashmap_get(m->machines, name);
+        if (!machine)
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_MACHINE, "No machine '%s' known", name);
+
+        return bus_machine_method_get_os_release(bus, message, machine, error);
 }
 
 const sd_bus_vtable manager_vtable[] = {
@@ -396,8 +443,12 @@ const sd_bus_vtable manager_vtable[] = {
         SD_BUS_METHOD("ListMachines", NULL, "a(ssso)", method_list_machines, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("CreateMachine", "sayssusa(sv)", "o", method_create_machine, 0),
         SD_BUS_METHOD("RegisterMachine", "sayssus", "o", method_register_machine, 0),
+        SD_BUS_METHOD("CreateMachineWithNetwork", "sayssusaia(sv)", "o", method_create_machine_with_network, 0),
+        SD_BUS_METHOD("RegisterMachineWithNetwork", "sayssusai", "o", method_register_machine_with_network, 0),
         SD_BUS_METHOD("KillMachine", "ssi", NULL, method_kill_machine, SD_BUS_VTABLE_CAPABILITY(CAP_KILL)),
         SD_BUS_METHOD("TerminateMachine", "s", NULL, method_terminate_machine, SD_BUS_VTABLE_CAPABILITY(CAP_KILL)),
+        SD_BUS_METHOD("GetMachineAddresses", "s", "a(iay)", method_get_machine_addresses, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("GetMachineOSRelease", "s", "a{ss}", method_get_machine_os_release, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_SIGNAL("MachineNew", "so", 0),
         SD_BUS_SIGNAL("MachineRemoved", "so", 0),
         SD_BUS_VTABLE_END
@@ -655,7 +706,7 @@ int manager_stop_unit(Manager *manager, const char *unit, sd_bus_error *error, c
         return 1;
 }
 
-int manager_kill_unit(Manager *manager, const char *unit, KillWho who, int signo, sd_bus_error *error) {
+int manager_kill_unit(Manager *manager, const char *unit, int signo, sd_bus_error *error) {
         assert(manager);
         assert(unit);
 
@@ -667,7 +718,7 @@ int manager_kill_unit(Manager *manager, const char *unit, KillWho who, int signo
                         "KillUnit",
                         error,
                         NULL,
-                        "ssi", unit, who == KILL_LEADER ? "main" : "all", signo);
+                        "ssi", unit, "all", signo);
 }
 
 int manager_unit_is_active(Manager *manager, const char *unit) {

@@ -41,9 +41,10 @@
 #include "special.h"
 #include "hashmap.h"
 #include "pager.h"
+#include "analyze-verify.h"
 
 #define SCALE_X (0.1 / 1000.0)   /* pixels per us */
-#define SCALE_Y 20.0
+#define SCALE_Y (20.0)
 
 #define compare(a, b) (((a) > (b))? 1 : (((b) > (a))? -1 : 0))
 
@@ -74,6 +75,7 @@ static bool arg_no_pager = false;
 static BusTransport arg_transport = BUS_TRANSPORT_LOCAL;
 static char *arg_host = NULL;
 static bool arg_user = false;
+static bool arg_man = true;
 
 struct boot_times {
         usec_t firmware_time;
@@ -98,6 +100,16 @@ struct unit_times {
         usec_t deactivated;
         usec_t deactivating;
         usec_t time;
+};
+
+struct host_info {
+        char *hostname;
+        char *kernel_name;
+        char *kernel_release;
+        char *kernel_version;
+        char *os_pretty_name;
+        char *virtualization;
+        char *architecture;
 };
 
 static void pager_open_if_enabled(void) {
@@ -168,21 +180,6 @@ static int compare_unit_time(const void *a, const void *b) {
 static int compare_unit_start(const void *a, const void *b) {
         return compare(((struct unit_times *)a)->activating,
                        ((struct unit_times *)b)->activating);
-}
-
-static int get_os_name(char **_n) {
-        char *n = NULL;
-        int r;
-
-        r = parse_env_file("/etc/os-release", NEWLINE, "PRETTY_NAME", &n, NULL);
-        if (r < 0)
-                return r;
-
-        if (!n)
-                return -ENOENT;
-
-        *_n = n;
-        return 0;
 }
 
 static void free_unit_times(struct unit_times *t, unsigned n) {
@@ -372,6 +369,63 @@ finish:
         return 0;
 }
 
+static void free_host_info(struct host_info *hi) {
+        free(hi->hostname);
+        free(hi->kernel_name);
+        free(hi->kernel_release);
+        free(hi->kernel_version);
+        free(hi->os_pretty_name);
+        free(hi->virtualization);
+        free(hi->architecture);
+        free(hi);
+}
+
+static int acquire_host_info(sd_bus *bus, struct host_info **hi) {
+        int r;
+        struct host_info *host;
+
+        static const struct bus_properties_map hostname_map[] = {
+                { "Hostname", "s", NULL, offsetof(struct host_info, hostname) },
+                { "KernelName", "s", NULL, offsetof(struct host_info, kernel_name) },
+                { "KernelRelease", "s", NULL, offsetof(struct host_info, kernel_release) },
+                { "KernelVersion", "s", NULL, offsetof(struct host_info, kernel_version) },
+                { "OperatingSystemPrettyName", "s", NULL, offsetof(struct host_info, os_pretty_name) },
+                {}
+        };
+
+        static const struct bus_properties_map manager_map[] = {
+                { "Virtualization", "s", NULL, offsetof(struct host_info, virtualization) },
+                { "Architecture",   "s", NULL, offsetof(struct host_info, architecture) },
+                {}
+        };
+
+        host = new0(struct host_info, 1);
+        if (!host)
+                return log_oom();
+
+        r = bus_map_all_properties(bus,
+                                   "org.freedesktop.hostname1",
+                                   "/org/freedesktop/hostname1",
+                                   hostname_map,
+                                   host);
+        if (r < 0)
+                goto fail;
+
+        r = bus_map_all_properties(bus,
+                                   "org.freedesktop.systemd1",
+                                   "/org/freedesktop/systemd1",
+                                   manager_map,
+                                   host);
+        if (r < 0)
+                goto fail;
+
+        *hi = host;
+        return 0;
+fail:
+        free_host_info(host);
+        return r;
+}
+
 static int pretty_boot_time(sd_bus *bus, char **_buf) {
         char ts[FORMAT_TIMESPAN_MAX];
         struct boot_times *t;
@@ -437,10 +491,10 @@ static void svg_graph_box(double height, double begin, double end) {
 static int analyze_plot(sd_bus *bus) {
         struct unit_times *times;
         struct boot_times *boot;
-        struct utsname name;
+        struct host_info *host = NULL;
         int n, m = 1, y=0;
         double width;
-        _cleanup_free_ char *pretty_times = NULL, *osname = NULL;
+        _cleanup_free_ char *pretty_times = NULL;
         struct unit_times *u;
 
         n = acquire_boot_times(bus, &boot);
@@ -451,12 +505,13 @@ static int analyze_plot(sd_bus *bus) {
         if (n < 0)
                 return n;
 
-        get_os_name(&osname);
-        assert_se(uname(&name) >= 0);
+        n = acquire_host_info(bus, &host);
+        if (n < 0)
+                return n;
 
         n = acquire_time_data(bus, &times);
         if (n <= 0)
-                return n;
+                goto out;
 
         qsort(times, n, sizeof(struct unit_times), compare_unit_start);
 
@@ -551,9 +606,14 @@ static int analyze_plot(sd_bus *bus) {
 
         svg("<rect class=\"background\" width=\"100%%\" height=\"100%%\" />\n");
         svg("<text x=\"20\" y=\"50\">%s</text>", pretty_times);
-        svg("<text x=\"20\" y=\"30\">%s %s (%s %s) %s</text>",
-            isempty(osname) ? "Linux" : osname,
-            name.nodename, name.release, name.version, name.machine);
+        svg("<text x=\"20\" y=\"30\">%s %s (%s %s %s) %s %s</text>",
+            isempty(host->os_pretty_name) ? "Linux" : host->os_pretty_name,
+            isempty(host->hostname) ? "" : host->hostname,
+            isempty(host->kernel_name) ? "" : host->kernel_name,
+            isempty(host->kernel_release) ? "" : host->kernel_release,
+            isempty(host->kernel_version) ? "" : host->kernel_version,
+            isempty(host->architecture) ? "" : host->architecture,
+            isempty(host->virtualization) ? "" : host->virtualization);
 
         svg("<g transform=\"translate(%.3f,100)\">\n", 20.0 + (SCALE_X * boot->firmware_time));
         svg_graph_box(m, -(double) boot->firmware_time, boot->finish_time);
@@ -636,7 +696,10 @@ static int analyze_plot(sd_bus *bus) {
 
         free_unit_times(times, (unsigned) n);
 
-        return 0;
+        n = 0;
+out:
+        free_host_info(host);
+        return n;
 }
 
 static int list_dependencies_print(const char *name, unsigned int level, unsigned int branches,
@@ -645,7 +708,7 @@ static int list_dependencies_print(const char *name, unsigned int level, unsigne
         char ts[FORMAT_TIMESPAN_MAX], ts2[FORMAT_TIMESPAN_MAX];
 
         for (i = level; i != 0; i--)
-                printf("%s", draw_special_char(branches & (1 << (i-1)) ? DRAW_TREE_VERT : DRAW_TREE_SPACE));
+                printf("%s", draw_special_char(branches & (1 << (i-1)) ? DRAW_TREE_VERTICAL : DRAW_TREE_SPACE));
 
         printf("%s", draw_special_char(last ? DRAW_TREE_RIGHT : DRAW_TREE_BRANCH));
 
@@ -1117,17 +1180,17 @@ static int set_log_level(sd_bus *bus, char **args) {
         return 0;
 }
 
-static int help(void) {
+static void help(void) {
 
         pager_open_if_enabled();
 
         printf("%s [OPTIONS...] {COMMAND} ...\n\n"
-               "Process systemd profiling information.\n\n"
+               "Profile systemd, show unit dependencies, check unit files.\n\n"
                "  -h --help               Show this help\n"
                "     --version            Show package version\n"
                "     --no-pager           Do not pipe output into a pager\n"
-               "     --system             Connect to system manager\n"
-               "     --user               Connect to user manager\n"
+               "     --system             Operate on system systemd instance\n"
+               "     --user               Operate on user systemd instance\n"
                "  -H --host=[USER@]HOST   Operate on remote host\n"
                "  -M --machine=CONTAINER  Operate on local container\n"
                "     --order              When generating a dependency graph, show only order\n"
@@ -1138,7 +1201,8 @@ static int help(void) {
                "     --fuzz=TIMESPAN      When printing the tree of the critical chain, print also\n"
                "                          services, which finished TIMESPAN earlier, than the\n"
                "                          latest in the branch. The unit of TIMESPAN is seconds\n"
-               "                          unless specified with a different unit, i.e. 50ms\n\n"
+               "                          unless specified with a different unit, i.e. 50ms\n"
+               "     --man[=BOOL]         Do [not] check for existence of man pages\n\n"
                "Commands:\n"
                "  time                    Print time spent in the kernel before reaching userspace\n"
                "  blame                   Print list of running units ordered by time to init\n"
@@ -1146,14 +1210,13 @@ static int help(void) {
                "  plot                    Output SVG graphic showing service initialization\n"
                "  dot                     Output dependency graph in dot(1) format\n"
                "  set-log-level LEVEL     Set logging threshold for systemd\n"
-               "  dump                    Output state serialization of service manager\n",
-               program_invocation_short_name);
+               "  dump                    Output state serialization of service manager\n"
+               "  verify FILE...          Check unit files for correctness\n"
+               , program_invocation_short_name);
 
         /* When updating this list, including descriptions, apply
-         * changes to shell-completion/bash/systemd and
-         * shell-completion/systemd-zsh-completion.zsh too. */
-
-        return 0;
+         * changes to shell-completion/bash/systemd-analyze and
+         * shell-completion/zsh/_systemd-analyze too. */
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -1166,7 +1229,8 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_DOT_FROM_PATTERN,
                 ARG_DOT_TO_PATTERN,
                 ARG_FUZZ,
-                ARG_NO_PAGER
+                ARG_NO_PAGER,
+                ARG_MAN,
         };
 
         static const struct option options[] = {
@@ -1180,6 +1244,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "to-pattern",   required_argument, NULL, ARG_DOT_TO_PATTERN   },
                 { "fuzz",         required_argument, NULL, ARG_FUZZ             },
                 { "no-pager",     no_argument,       NULL, ARG_NO_PAGER         },
+                { "man",          optional_argument, NULL, ARG_MAN              },
                 { "host",         required_argument, NULL, 'H'                  },
                 { "machine",      required_argument, NULL, 'M'                  },
                 {}
@@ -1190,12 +1255,12 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "hH:M:", options, NULL)) >= 0) {
-
+        while ((c = getopt_long(argc, argv, "hH:M:", options, NULL)) >= 0)
                 switch (c) {
 
                 case 'h':
-                        return help();
+                        help();
+                        return 0;
 
                 case ARG_VERSION:
                         puts(PACKAGE_STRING);
@@ -1250,19 +1315,31 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_host = optarg;
                         break;
 
+                case ARG_MAN:
+                        if (optarg) {
+                                r = parse_boolean(optarg);
+                                if (r < 0) {
+                                        log_error("Failed to parse --man= argument.");
+                                        return -EINVAL;
+                                }
+
+                                arg_man = !!r;
+                        } else
+                                arg_man = true;
+
+                        break;
+
                 case '?':
                         return -EINVAL;
 
                 default:
-                        assert_not_reached("Unhandled option");
+                        assert_not_reached("Unhandled option code.");
                 }
-        }
 
-        return 1;
+        return 1; /* work to do */
 }
 
 int main(int argc, char *argv[]) {
-        _cleanup_bus_unref_ sd_bus *bus = NULL;
         int r;
 
         setlocale(LC_ALL, "");
@@ -1274,28 +1351,36 @@ int main(int argc, char *argv[]) {
         if (r <= 0)
                 goto finish;
 
-        r = bus_open_transport(arg_transport, arg_host, arg_user, &bus);
-        if (r < 0) {
-                log_error("Failed to create bus connection: %s", strerror(-r));
-                goto finish;
-        }
+        if (streq_ptr(argv[optind], "verify"))
+                r = verify_units(argv+optind+1,
+                                 arg_user ? SYSTEMD_USER : SYSTEMD_SYSTEM,
+                                 arg_man);
+        else {
+                _cleanup_bus_close_unref_ sd_bus *bus = NULL;
 
-        if (!argv[optind] || streq(argv[optind], "time"))
-                r = analyze_time(bus);
-        else if (streq(argv[optind], "blame"))
-                r = analyze_blame(bus);
-        else if (streq(argv[optind], "critical-chain"))
-                r = analyze_critical_chain(bus, argv+optind+1);
-        else if (streq(argv[optind], "plot"))
-                r = analyze_plot(bus);
-        else if (streq(argv[optind], "dot"))
-                r = dot(bus, argv+optind+1);
-        else if (streq(argv[optind], "dump"))
-                r = dump(bus, argv+optind+1);
-        else if (streq(argv[optind], "set-log-level"))
-                r = set_log_level(bus, argv+optind+1);
-        else
-                log_error("Unknown operation '%s'.", argv[optind]);
+                r = bus_open_transport_systemd(arg_transport, arg_host, arg_user, &bus);
+                if (r < 0) {
+                        log_error("Failed to create bus connection: %s", strerror(-r));
+                        goto finish;
+                }
+
+                if (!argv[optind] || streq(argv[optind], "time"))
+                        r = analyze_time(bus);
+                else if (streq(argv[optind], "blame"))
+                        r = analyze_blame(bus);
+                else if (streq(argv[optind], "critical-chain"))
+                        r = analyze_critical_chain(bus, argv+optind+1);
+                else if (streq(argv[optind], "plot"))
+                        r = analyze_plot(bus);
+                else if (streq(argv[optind], "dot"))
+                        r = dot(bus, argv+optind+1);
+                else if (streq(argv[optind], "dump"))
+                        r = dump(bus, argv+optind+1);
+                else if (streq(argv[optind], "set-log-level"))
+                        r = set_log_level(bus, argv+optind+1);
+                else
+                        log_error("Unknown operation '%s'.", argv[optind]);
+        }
 
 finish:
         pager_close();

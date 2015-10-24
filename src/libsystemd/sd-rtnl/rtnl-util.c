@@ -154,18 +154,12 @@ bool rtnl_message_type_is_addr(uint16_t type) {
         }
 }
 
-int rtnl_message_link_get_ifname(sd_rtnl_message *message, const char **ret) {
-        unsigned short type;
-        void *name;
+int rtnl_log_parse_error(int r) {
+        log_error("Failed to parse netlink message: %s", strerror(-r));
+        return r;
+}
 
-        assert(rtnl_message_type_is_link(message->hdr->nlmsg_type));
-
-        while (sd_rtnl_message_read(message, &type, &name)) {
-                if (type == IFLA_IFNAME) {
-                        *ret = name;
-                        return 0;
-                }
-        }
-
-        return -ENOENT;
+int rtnl_log_create_error(int r) {
+        log_error("Failed to create netlink message: %s", strerror(-r));
+        return r;
 }

@@ -51,9 +51,6 @@ static void scope_init(Unit *u) {
 
         s->timeout_stop_usec = u->manager->default_timeout_stop_usec;
 
-        cgroup_context_init(&s->cgroup_context);
-        kill_context_init(&s->kill_context);
-
         UNIT(s)->ignore_on_isolate = true;
         UNIT(s)->ignore_on_snapshot = true;
 }
@@ -62,8 +59,6 @@ static void scope_done(Unit *u) {
         Scope *s = SCOPE(u);
 
         assert(u);
-
-        cgroup_context_done(&s->cgroup_context);
 
         free(s->controller);
 
@@ -88,7 +83,12 @@ static int scope_arm_timer(Scope *s) {
                 return sd_event_source_set_enabled(s->timer_event_source, SD_EVENT_ONESHOT);
         }
 
-        return sd_event_add_monotonic(UNIT(s)->manager->event, &s->timer_event_source, now(CLOCK_MONOTONIC) + s->timeout_stop_usec, 0, scope_dispatch_timer, s);
+        return sd_event_add_time(
+                        UNIT(s)->manager->event,
+                        &s->timer_event_source,
+                        CLOCK_MONOTONIC,
+                        now(CLOCK_MONOTONIC) + s->timeout_stop_usec, 0,
+                        scope_dispatch_timer, s);
 }
 
 static void scope_set_state(Scope *s, ScopeState state) {
@@ -156,7 +156,11 @@ static int scope_load(Unit *u) {
         if (r < 0)
                 return r;
 
-        r = unit_add_default_slice(u);
+        r = unit_patch_contexts(u);
+        if (r < 0)
+                return r;
+
+        r = unit_add_default_slice(u, &s->cgroup_context);
         if (r < 0)
                 return r;
 

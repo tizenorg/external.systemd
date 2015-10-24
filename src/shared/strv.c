@@ -201,8 +201,7 @@ int strv_extend_strv_concat(char ***a, char **b, const char *suffix) {
 }
 
 char **strv_split(const char *s, const char *separator) {
-        char *state;
-        char *w;
+        const char *word, *state;
         size_t l;
         unsigned n, i;
         char **r;
@@ -210,7 +209,7 @@ char **strv_split(const char *s, const char *separator) {
         assert(s);
 
         n = 0;
-        FOREACH_WORD_SEPARATOR(w, l, s, separator, state)
+        FOREACH_WORD_SEPARATOR(word, l, s, separator, state)
                 n++;
 
         r = new(char*, n+1);
@@ -218,8 +217,8 @@ char **strv_split(const char *s, const char *separator) {
                 return NULL;
 
         i = 0;
-        FOREACH_WORD_SEPARATOR(w, l, s, separator, state) {
-                r[i] = strndup(w, l);
+        FOREACH_WORD_SEPARATOR(word, l, s, separator, state) {
+                r[i] = strndup(word, l);
                 if (!r[i]) {
                         strv_free(r);
                         return NULL;
@@ -232,9 +231,8 @@ char **strv_split(const char *s, const char *separator) {
         return r;
 }
 
-char **strv_split_quoted(const char *s) {
-        char *state;
-        char *w;
+int strv_split_quoted(char ***t, const char *s) {
+        const char *word, *state;
         size_t l;
         unsigned n, i;
         char **r;
@@ -242,25 +240,29 @@ char **strv_split_quoted(const char *s) {
         assert(s);
 
         n = 0;
-        FOREACH_WORD_QUOTED(w, l, s, state)
+        FOREACH_WORD_QUOTED(word, l, s, state)
                 n++;
+        if (!isempty(state))
+                /* bad syntax */
+                return -EINVAL;
 
         r = new(char*, n+1);
         if (!r)
-                return NULL;
+                return -ENOMEM;
 
         i = 0;
-        FOREACH_WORD_QUOTED(w, l, s, state) {
-                r[i] = cunescape_length(w, l);
+        FOREACH_WORD_QUOTED(word, l, s, state) {
+                r[i] = cunescape_length(word, l);
                 if (!r[i]) {
                         strv_free(r);
-                        return NULL;
+                        return -ENOMEM;
                 }
                 i++;
         }
 
         r[i] = NULL;
-        return r;
+        *t = r;
+        return 0;
 }
 
 char **strv_split_newlines(const char *s) {
@@ -378,9 +380,92 @@ int strv_push(char ***l, char *value) {
         return 0;
 }
 
+int strv_push_pair(char ***l, char *a, char *b) {
+        char **c;
+        unsigned n, m;
+
+        if (!a && !b)
+                return 0;
+
+        n = strv_length(*l);
+
+        /* increase and check for overflow */
+        m = n + !!a + !!b + 1;
+        if (m < n)
+                return -ENOMEM;
+
+        c = realloc_multiply(*l, sizeof(char*), m);
+        if (!c)
+                return -ENOMEM;
+
+        if (a)
+                c[n++] = a;
+        if (b)
+                c[n++] = b;
+        c[n] = NULL;
+
+        *l = c;
+        return 0;
+}
+
+int strv_push_prepend(char ***l, char *value) {
+        char **c;
+        unsigned n, i;
+
+        if (!value)
+                return 0;
+
+        n = strv_length(*l);
+        c = new(char*, n + 2);
+        if (!c)
+                return -ENOMEM;
+
+        for (i = 0; i < n; i++)
+                c[i+1] = (*l)[i];
+
+        c[0] = value;
+        c[n+1] = NULL;
+
+        free(*l);
+        *l = c;
+
+        return 0;
+}
+
+int strv_consume(char ***l, char *value) {
+        int r;
+
+        r = strv_push(l, value);
+        if (r < 0)
+                free(value);
+
+        return r;
+}
+
+int strv_consume_pair(char ***l, char *a, char *b) {
+        int r;
+
+        r = strv_push_pair(l, a, b);
+        if (r < 0) {
+                free(a);
+                free(b);
+        }
+
+        return r;
+}
+
+int strv_consume_prepend(char ***l, char *value) {
+        int r;
+
+        r = strv_push_prepend(l, value);
+        if (r < 0)
+                free(value);
+
+        return r;
+}
+
 int strv_extend(char ***l, const char *value) {
         char *v;
-        int r;
 
         if (!value)
                 return 0;
@@ -389,11 +474,7 @@ int strv_extend(char ***l, const char *value) {
         if (!v)
                 return -ENOMEM;
 
-        r = strv_push(l, v);
-        if (r < 0)
-                free(v);
-
-        return r;
+        return strv_consume(l, v);
 }
 
 char **strv_uniq(char **l) {
@@ -521,4 +602,19 @@ void strv_print(char **l) {
 
         STRV_FOREACH(s, l)
                 puts(*s);
+}
+
+int strv_extendf(char ***l, const char *format, ...) {
+        va_list ap;
+        char *x;
+        int r;
+
+        va_start(ap, format);
+        r = vasprintf(&x, format, ap);
+        va_end(ap);
+
+        if (r < 0)
+                return -ENOMEM;
+
+        return strv_consume(l, x);
 }

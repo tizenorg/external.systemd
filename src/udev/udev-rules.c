@@ -137,7 +137,6 @@ enum token_type {
         TK_M_PARENTS_MAX,
 
         TK_M_TEST,                      /* val, mode_t */
-        TK_M_EVENT_TIMEOUT,             /* int */
         TK_M_PROGRAM,                   /* val */
         TK_M_IMPORT_FILE,               /* val */
         TK_M_IMPORT_PROG,               /* val */
@@ -201,7 +200,6 @@ struct token {
                                 uid_t uid;
                                 gid_t gid;
                                 int devlink_prio;
-                                int event_timeout;
                                 int watch;
                                 enum udev_builtin_cmd builtin_cmd;
                         };
@@ -218,8 +216,7 @@ struct rule_tmp {
 };
 
 #ifdef DEBUG
-static const char *operation_str(enum operation_type type)
-{
+static const char *operation_str(enum operation_type type) {
         static const char *operation_strs[] = {
                 [OP_UNSET] =            "UNSET",
                 [OP_MATCH] =            "match",
@@ -234,8 +231,7 @@ static const char *operation_str(enum operation_type type)
         return operation_strs[type];
 }
 
-static const char *string_glob_str(enum string_glob_type type)
-{
+static const char *string_glob_str(enum string_glob_type type) {
         static const char *string_glob_strs[] = {
                 [GL_UNSET] =            "UNSET",
                 [GL_PLAIN] =            "plain",
@@ -248,8 +244,7 @@ static const char *string_glob_str(enum string_glob_type type)
         return string_glob_strs[type];
 }
 
-static const char *token_str(enum token_type type)
-{
+static const char *token_str(enum token_type type) {
         static const char *token_strs[] = {
                 [TK_UNSET] =                    "UNSET",
                 [TK_RULE] =                     "RULE",
@@ -275,7 +270,6 @@ static const char *token_str(enum token_type type)
                 [TK_M_PARENTS_MAX] =            "M PARENTS_MAX",
 
                 [TK_M_TEST] =                   "M TEST",
-                [TK_M_EVENT_TIMEOUT] =          "M EVENT_TIMEOUT",
                 [TK_M_PROGRAM] =                "M PROGRAM",
                 [TK_M_IMPORT_FILE] =            "M IMPORT_FILE",
                 [TK_M_IMPORT_PROG] =            "M IMPORT_PROG",
@@ -314,8 +308,7 @@ static const char *token_str(enum token_type type)
         return token_strs[type];
 }
 
-static void dump_token(struct udev_rules *rules, struct token *token)
-{
+static void dump_token(struct udev_rules *rules, struct token *token) {
         enum token_type type = token->type;
         enum operation_type op = token->key.op;
         enum string_glob_type glob = token->key.glob;
@@ -409,9 +402,6 @@ static void dump_token(struct udev_rules *rules, struct token *token)
         case TK_A_SECLABEL:
                 log_debug("%s %s '%s' '%s'", token_str(type), operation_str(op), attr, value);
                 break;
-        case TK_M_EVENT_TIMEOUT:
-                log_debug("%s %u", token_str(type), token->key.event_timeout);
-                break;
         case TK_A_GOTO:
                 log_debug("%s '%s' %u", token_str(type), value, token->key.rule_goto);
                 break;
@@ -427,8 +417,7 @@ static void dump_token(struct udev_rules *rules, struct token *token)
         }
 }
 
-static void dump_rules(struct udev_rules *rules)
-{
+static void dump_rules(struct udev_rules *rules) {
         unsigned int i;
 
         log_debug("dumping %u (%zu bytes) tokens, %u (%zu bytes) strings",
@@ -444,8 +433,7 @@ static inline void dump_token(struct udev_rules *rules, struct token *token) {}
 static inline void dump_rules(struct udev_rules *rules) {}
 #endif /* DEBUG */
 
-static int add_token(struct udev_rules *rules, struct token *token)
-{
+static int add_token(struct udev_rules *rules, struct token *token) {
         /* grow buffer if needed */
         if (rules->token_cur+1 >= rules->token_max) {
                 struct token *tokens;
@@ -467,8 +455,7 @@ static int add_token(struct udev_rules *rules, struct token *token)
         return 0;
 }
 
-static uid_t add_uid(struct udev_rules *rules, const char *owner)
-{
+static uid_t add_uid(struct udev_rules *rules, const char *owner) {
         unsigned int i;
         uid_t uid;
         unsigned int off;
@@ -508,8 +495,7 @@ static uid_t add_uid(struct udev_rules *rules, const char *owner)
         return uid;
 }
 
-static gid_t add_gid(struct udev_rules *rules, const char *group)
-{
+static gid_t add_gid(struct udev_rules *rules, const char *group) {
         unsigned int i;
         gid_t gid;
         unsigned int off;
@@ -549,8 +535,7 @@ static gid_t add_gid(struct udev_rules *rules, const char *group)
         return gid;
 }
 
-static int import_property_from_string(struct udev_device *dev, char *line)
-{
+static int import_property_from_string(struct udev_device *dev, char *line) {
         char *key;
         char *val;
         size_t len;
@@ -613,8 +598,7 @@ static int import_property_from_string(struct udev_device *dev, char *line)
         return 0;
 }
 
-static int import_file_into_properties(struct udev_device *dev, const char *filename)
-{
+static int import_file_into_properties(struct udev_device *dev, const char *filename) {
         FILE *f;
         char line[UTIL_LINE_SIZE];
 
@@ -627,8 +611,9 @@ static int import_file_into_properties(struct udev_device *dev, const char *file
         return 0;
 }
 
-static int import_program_into_properties(struct udev_event *event, const char *program, const sigset_t *sigmask)
-{
+static int import_program_into_properties(struct udev_event *event,
+                                          usec_t timeout_usec,
+                                          const char *program, const sigset_t *sigmask) {
         struct udev_device *dev = event->dev;
         char **envp;
         char result[UTIL_LINE_SIZE];
@@ -636,7 +621,7 @@ static int import_program_into_properties(struct udev_event *event, const char *
         int err;
 
         envp = udev_device_get_properties_envp(dev);
-        err = udev_event_spawn(event, program, envp, sigmask, result, sizeof(result));
+        err = udev_event_spawn(event, timeout_usec, program, envp, sigmask, result, sizeof(result));
         if (err < 0)
                 return err;
 
@@ -655,8 +640,7 @@ static int import_program_into_properties(struct udev_event *event, const char *
         return 0;
 }
 
-static int import_parent_into_properties(struct udev_device *dev, const char *filter)
-{
+static int import_parent_into_properties(struct udev_device *dev, const char *filter) {
         struct udev_device *dev_parent;
         struct udev_list_entry *list_entry;
 
@@ -681,8 +665,7 @@ static int import_parent_into_properties(struct udev_device *dev, const char *fi
 }
 
 #define WAIT_LOOP_PER_SECOND                50
-static int wait_for_file(struct udev_device *dev, const char *file, int timeout)
-{
+static int wait_for_file(struct udev_device *dev, const char *file, int timeout) {
         char filepath[UTIL_PATH_SIZE];
         char devicepath[UTIL_PATH_SIZE];
         struct stat stats;
@@ -716,8 +699,7 @@ static int wait_for_file(struct udev_device *dev, const char *file, int timeout)
         return -1;
 }
 
-static int attr_subst_subdir(char *attr, size_t len)
-{
+static int attr_subst_subdir(char *attr, size_t len) {
         bool found = false;
 
         if (strstr(attr, "/*/")) {
@@ -754,8 +736,7 @@ static int attr_subst_subdir(char *attr, size_t len)
         return found;
 }
 
-static int get_key(struct udev *udev, char **line, char **key, enum operation_type *op, char **value)
-{
+static int get_key(struct udev *udev, char **line, char **key, enum operation_type *op, char **value) {
         char *linepos;
         char *temp;
 
@@ -842,8 +823,7 @@ static int get_key(struct udev *udev, char **line, char **key, enum operation_ty
 }
 
 /* extract possible KEY{attr} */
-static const char *get_key_attribute(struct udev *udev, char *str)
-{
+static const char *get_key_attribute(struct udev *udev, char *str) {
         char *pos;
         char *attr;
 
@@ -863,8 +843,7 @@ static const char *get_key_attribute(struct udev *udev, char *str)
 
 static int rule_add_key(struct rule_tmp *rule_tmp, enum token_type type,
                         enum operation_type op,
-                        const char *value, const void *data)
-{
+                        const char *value, const void *data) {
         struct token *token = &rule_tmp->token[rule_tmp->token_cur];
         const char *attr = NULL;
 
@@ -942,9 +921,6 @@ static int rule_add_key(struct rule_tmp *rule_tmp, enum token_type type,
         case TK_A_MODE_ID:
                 token->key.mode = *(mode_t *)data;
                 break;
-        case TK_M_EVENT_TIMEOUT:
-                token->key.event_timeout = *(int *)data;
-                break;
         case TK_RULE:
         case TK_M_PARENTS_MIN:
         case TK_M_PARENTS_MAX:
@@ -1008,8 +984,7 @@ static int rule_add_key(struct rule_tmp *rule_tmp, enum token_type type,
         return 0;
 }
 
-static int sort_token(struct udev_rules *rules, struct rule_tmp *rule_tmp)
-{
+static int sort_token(struct udev_rules *rules, struct rule_tmp *rule_tmp) {
         unsigned int i;
         unsigned int start = 0;
         unsigned int end = rule_tmp->token_cur;
@@ -1044,8 +1019,7 @@ static int sort_token(struct udev_rules *rules, struct rule_tmp *rule_tmp)
 }
 
 static int add_rule(struct udev_rules *rules, char *line,
-                    const char *filename, unsigned int filename_off, unsigned int lineno)
-{
+                    const char *filename, unsigned int filename_off, unsigned int lineno) {
         char *linepos;
         const char *attr;
         struct rule_tmp rule_tmp;
@@ -1142,7 +1116,7 @@ static int add_rule(struct udev_rules *rules, char *line,
                 }
 
                 if (startswith(key, "ATTR{")) {
-                        attr = get_key_attribute(rules->udev, key + sizeof("ATTR")-1);
+                        attr = get_key_attribute(rules->udev, key + strlen("ATTR"));
                         if (attr == NULL) {
                                 log_error("error parsing ATTR attribute");
                                 goto invalid;
@@ -1156,7 +1130,7 @@ static int add_rule(struct udev_rules *rules, char *line,
                 }
 
                 if (startswith(key, "SECLABEL{")) {
-                        attr = get_key_attribute(rules->udev, key + sizeof("SECLABEL")-1);
+                        attr = get_key_attribute(rules->udev, key + strlen("SECLABEL"));
                         if (!attr) {
                                 log_error("error parsing SECLABEL attribute");
                                 goto invalid;
@@ -1198,7 +1172,7 @@ static int add_rule(struct udev_rules *rules, char *line,
                                 log_error("invalid ATTRS operation");
                                 goto invalid;
                         }
-                        attr = get_key_attribute(rules->udev, key + sizeof("ATTRS")-1);
+                        attr = get_key_attribute(rules->udev, key + strlen("ATTRS"));
                         if (attr == NULL) {
                                 log_error("error parsing ATTRS attribute");
                                 goto invalid;
@@ -1223,7 +1197,7 @@ static int add_rule(struct udev_rules *rules, char *line,
                 }
 
                 if (startswith(key, "ENV{")) {
-                        attr = get_key_attribute(rules->udev, key + sizeof("ENV")-1);
+                        attr = get_key_attribute(rules->udev, key + strlen("ENV"));
                         if (attr == NULL) {
                                 log_error("error parsing ENV attribute");
                                 goto invalid;
@@ -1282,7 +1256,7 @@ static int add_rule(struct udev_rules *rules, char *line,
                 }
 
                 if (startswith(key, "IMPORT")) {
-                        attr = get_key_attribute(rules->udev, key + sizeof("IMPORT")-1);
+                        attr = get_key_attribute(rules->udev, key + strlen("IMPORT"));
                         if (attr == NULL) {
                                 log_error("IMPORT{} type missing, ignoring IMPORT %s:%u", filename, lineno);
                                 continue;
@@ -1328,7 +1302,7 @@ static int add_rule(struct udev_rules *rules, char *line,
                                 log_error("invalid TEST operation");
                                 goto invalid;
                         }
-                        attr = get_key_attribute(rules->udev, key + sizeof("TEST")-1);
+                        attr = get_key_attribute(rules->udev, key + strlen("TEST"));
                         if (attr != NULL) {
                                 mode = strtol(attr, NULL, 8);
                                 rule_add_key(&rule_tmp, TK_M_TEST, op, value, &mode);
@@ -1339,7 +1313,7 @@ static int add_rule(struct udev_rules *rules, char *line,
                 }
 
                 if (startswith(key, "RUN")) {
-                        attr = get_key_attribute(rules->udev, key + sizeof("RUN")-1);
+                        attr = get_key_attribute(rules->udev, key + strlen("RUN"));
                         if (attr == NULL)
                                 attr = "program";
 
@@ -1462,13 +1436,6 @@ static int add_rule(struct udev_rules *rules, char *line,
                                 rule_add_key(&rule_tmp, TK_A_DEVLINK_PRIO, op, NULL, &prio);
                         }
 
-                        pos = strstr(value, "event_timeout=");
-                        if (pos != NULL) {
-                                int tout = atoi(&pos[strlen("event_timeout=")]);
-
-                                rule_add_key(&rule_tmp, TK_M_EVENT_TIMEOUT, op, NULL, &tout);
-                        }
-
                         pos = strstr(value, "string_escape=");
                         if (pos != NULL) {
                                 pos = &pos[strlen("string_escape=")];
@@ -1524,8 +1491,7 @@ invalid:
         return -1;
 }
 
-static int parse_file(struct udev_rules *rules, const char *filename)
-{
+static int parse_file(struct udev_rules *rules, const char *filename) {
         FILE *f;
         unsigned int first_token;
         unsigned int filename_off;
@@ -1533,15 +1499,19 @@ static int parse_file(struct udev_rules *rules, const char *filename)
         int line_nr = 0;
         unsigned int i;
 
-        if (null_or_empty_path(filename)) {
-                log_debug("skip empty file: %s", filename);
-                return 0;
-        }
-        log_debug("read rules file: %s", filename);
-
         f = fopen(filename, "re");
-        if (f == NULL)
-                return -1;
+        if (!f) {
+                if (errno == ENOENT)
+                        return 0;
+                else
+                        return -errno;
+        }
+
+        if (null_or_empty_fd(fileno(f))) {
+                log_debug("Skipping empty file: %s", filename);
+                return 0;
+        } else
+                log_debug("Reading rules file: %s", filename);
 
         first_token = rules->token_cur;
         filename_off = rules_add_string(rules, filename);
@@ -1605,8 +1575,7 @@ static int parse_file(struct udev_rules *rules, const char *filename)
         return 0;
 }
 
-struct udev_rules *udev_rules_new(struct udev *udev, int resolve_names)
-{
+struct udev_rules *udev_rules_new(struct udev *udev, int resolve_names) {
         struct udev_rules *rules;
         struct udev_list file_list;
         struct token end_token;
@@ -1676,8 +1645,7 @@ struct udev_rules *udev_rules_new(struct udev *udev, int resolve_names)
         return rules;
 }
 
-struct udev_rules *udev_rules_unref(struct udev_rules *rules)
-{
+struct udev_rules *udev_rules_unref(struct udev_rules *rules) {
         if (rules == NULL)
                 return NULL;
         free(rules->tokens);
@@ -1688,16 +1656,14 @@ struct udev_rules *udev_rules_unref(struct udev_rules *rules)
         return NULL;
 }
 
-bool udev_rules_check_timestamp(struct udev_rules *rules)
-{
+bool udev_rules_check_timestamp(struct udev_rules *rules) {
         if (!rules)
                 return false;
 
         return paths_check_timestamp(rules_dirs, &rules->dirs_ts_usec, true);
 }
 
-static int match_key(struct udev_rules *rules, struct token *token, const char *val)
-{
+static int match_key(struct udev_rules *rules, struct token *token, const char *val) {
         char *key_value = rules_str(rules, token->key.value_off);
         char *pos;
         bool match = false;
@@ -1770,8 +1736,7 @@ static int match_key(struct udev_rules *rules, struct token *token, const char *
         return -1;
 }
 
-static int match_attr(struct udev_rules *rules, struct udev_device *dev, struct udev_event *event, struct token *cur)
-{
+static int match_attr(struct udev_rules *rules, struct udev_device *dev, struct udev_event *event, struct token *cur) {
         const char *name;
         char nbuf[UTIL_NAME_SIZE];
         const char *value;
@@ -1825,8 +1790,10 @@ enum escape_type {
         ESCAPE_REPLACE,
 };
 
-int udev_rules_apply_to_event(struct udev_rules *rules, struct udev_event *event, const sigset_t *sigmask)
-{
+int udev_rules_apply_to_event(struct udev_rules *rules,
+                              struct udev_event *event,
+                              usec_t timeout_usec,
+                              const sigset_t *sigmask) {
         struct token *cur;
         struct token *rule;
         enum escape_type esc = ESCAPE_UNSET;
@@ -2020,14 +1987,10 @@ int udev_rules_apply_to_event(struct udev_rules *rules, struct udev_event *event
                                 goto nomatch;
                         break;
                 }
-                case TK_M_EVENT_TIMEOUT:
-                        log_debug("OPTIONS event_timeout=%u", cur->key.event_timeout);
-                        event->timeout_usec = cur->key.event_timeout * 1000 * 1000;
-                        break;
                 case TK_M_PROGRAM: {
                         char program[UTIL_PATH_SIZE];
                         char **envp;
-                        char result[UTIL_PATH_SIZE];
+                        char result[UTIL_LINE_SIZE];
 
                         free(event->program_result);
                         event->program_result = NULL;
@@ -2038,7 +2001,7 @@ int udev_rules_apply_to_event(struct udev_rules *rules, struct udev_event *event
                                   rules_str(rules, rule->rule.filename_off),
                                   rule->rule.filename_line);
 
-                        if (udev_event_spawn(event, program, envp, sigmask, result, sizeof(result)) < 0) {
+                        if (udev_event_spawn(event, timeout_usec, program, envp, sigmask, result, sizeof(result)) < 0) {
                                 if (cur->key.op != OP_NOMATCH)
                                         goto nomatch;
                         } else {
@@ -2074,7 +2037,7 @@ int udev_rules_apply_to_event(struct udev_rules *rules, struct udev_event *event
                                   rules_str(rules, rule->rule.filename_off),
                                   rule->rule.filename_line);
 
-                        if (import_program_into_properties(event, import, sigmask) != 0)
+                        if (import_program_into_properties(event, timeout_usec, import, sigmask) != 0)
                                 if (cur->key.op != OP_NOMATCH)
                                         goto nomatch;
                         break;
@@ -2499,8 +2462,7 @@ int udev_rules_apply_to_event(struct udev_rules *rules, struct udev_event *event
         }
 }
 
-int udev_rules_apply_static_dev_perms(struct udev_rules *rules)
-{
+int udev_rules_apply_static_dev_perms(struct udev_rules *rules) {
         struct token *cur;
         struct token *rule;
         uid_t uid = 0;
@@ -2555,10 +2517,15 @@ int udev_rules_apply_static_dev_perms(struct udev_rules *rules)
                         struct stat stats;
 
                         /* we assure, that the permissions tokens are sorted before the static token */
+
                         if (mode == 0 && uid == 0 && gid == 0 && tags == NULL)
                                 goto next;
 
                         strscpyl(device_node, sizeof(device_node), "/dev/", rules_str(rules, cur->key.value_off), NULL);
+                        if (stat(device_node, &stats) != 0)
+                                break;
+                        if (!S_ISBLK(stats.st_mode) && !S_ISCHR(stats.st_mode))
+                                break;
 
                         /* export the tags to a directory as symlinks, allowing otherwise dead nodes to be tagged */
                         if (tags) {
@@ -2586,11 +2553,6 @@ int udev_rules_apply_static_dev_perms(struct udev_rules *rules)
 
                         /* don't touch the permissions if only the tags were set */
                         if (mode == 0 && uid == 0 && gid == 0)
-                                break;
-
-                        if (stat(device_node, &stats) != 0)
-                                break;
-                        if (!S_ISBLK(stats.st_mode) && !S_ISCHR(stats.st_mode))
                                 break;
 
                         if (mode == 0) {

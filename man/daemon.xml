@@ -74,8 +74,8 @@
 
                         <orderedlist>
                                 <listitem><para>Close all open file
-                                descriptors except stdin, stdout,
-                                stderr (i.e. the first three file
+                                descriptors except standard input, output,
+                                and error (i.e. the first three file
                                 descriptors 0, 1, 2). This ensures
                                 that no accidentally passed file
                                 descriptor stays around in the daemon
@@ -149,7 +149,7 @@
                                 write the daemon PID (as returned by
                                 <function>getpid()</function>) to a
                                 PID file, for example
-                                <filename>/var/run/foobar.pid</filename>
+                                <filename>/run/foobar.pid</filename>
                                 (for a hypothetical daemon "foobar")
                                 to ensure that the daemon cannot be
                                 started more than once. This must be
@@ -158,9 +158,7 @@
                                 it is verified at the same time that
                                 the PID previously stored in the PID
                                 file no longer exists or belongs to a
-                                foreign process. Commonly, some kind of
-                                file locking is employed to implement
-                                this logic.</para></listitem>
+                                foreign process.</para></listitem>
 
                                 <listitem><para>In the daemon process,
                                 drop privileges, if possible and
@@ -252,7 +250,7 @@
                                 detect service errors and problems. It
                                 is recommended to follow the exit code
                                 scheme as defined in the <ulink
-                                url="http://refspecs.freestandards.org/LSB_3.1.1/LSB-Core-generic/LSB-Core-generic/iniscrptact.html">LSB
+                                url="http://refspecs.linuxbase.org/LSB_3.1.1/LSB-Core-generic/LSB-Core-generic/iniscrptact.html">LSB
                                 recommendations for SysV init
                                 scripts</ulink>.</para></listitem>
 
@@ -323,29 +321,21 @@
                                 interface.</para></listitem>
 
                                 <listitem><para>Instead of using the
-                                <function>syslog()</function> call to log directly to the
-                                system syslog service, a new-style daemon may
-                                choose to simply log to standard error via
-                                <function>fprintf()</function>, which is then forwarded to
-                                syslog by the init system. If log
-                                priorities are necessary, these can be
-                                encoded by prefixing individual log
-                                lines with strings like "&lt;4&gt;"
-                                (for log priority 4 "WARNING" in the
-                                syslog priority scheme), following a
-                                similar style as the Linux kernel's
-                                <function>printk()</function> priority system. In fact,
-                                using this style of logging also
-                                enables the init system to optionally
-                                direct all application logging to the
-                                kernel log buffer (kmsg), as
-                                accessible via
-                                <citerefentry><refentrytitle>dmesg</refentrytitle><manvolnum>1</manvolnum></citerefentry>. This
-                                kind of logging may be enabled by
-                                setting
-                                <varname>StandardError=syslog</varname>
-                                in the service unit file. For details,
-                                see
+                                <function>syslog()</function> call to
+                                log directly to the system syslog
+                                service, a new-style daemon may choose
+                                to simply log to standard error via
+                                <function>fprintf()</function>, which
+                                is then forwarded to syslog by the
+                                init system. If log priorities are
+                                necessary, these can be encoded by
+                                prefixing individual log lines with
+                                strings like "&lt;4&gt;" (for log
+                                priority 4 "WARNING" in the syslog
+                                priority scheme), following a similar
+                                style as the Linux kernel's
+                                <function>printk()</function> priority
+                                system. For details, see
                                 <citerefentry><refentrytitle>sd-daemon</refentrytitle><manvolnum>3</manvolnum></citerefentry>
                                 and
                                 <citerefentry><refentrytitle>systemd.exec</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para></listitem>
@@ -354,7 +344,7 @@
 
                         <para>These recommendations are similar but
                         not identical to the <ulink
-                        url="http://developer.apple.com/mac/library/documentation/MacOSX/Conceptual/BPSystemStartup/Articles/LaunchOnDemandDaemons.html#//apple_ref/doc/uid/TP40001762-104738">Apple
+                        url="https://developer.apple.com/library/mac/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html">Apple
                         MacOS X Daemon Requirements</ulink>.</para>
                 </refsect2>
 
@@ -395,7 +385,7 @@
                         exclusively on boot (and manually by the
                         administrator) via SysV init scripts, as
                         detailed in the <ulink
-                        url="http://refspecs.freestandards.org/LSB_3.1.1/LSB-Core-generic/LSB-Core-generic/iniscrptact.html">LSB
+                        url="http://refspecs.linuxbase.org/LSB_3.1.1/LSB-Core-generic/LSB-Core-generic/iniscrptact.html">LSB
                         Linux Standard Base Core
                         Specification</ulink>. This method of
                         activation is supported ubiquitously on Linux
@@ -758,7 +748,7 @@
                         boot.</para>
 
                         <para>Packages using
-                        <citerefentry><refentrytitle>autoconf</refentrytitle><manvolnum>1</manvolnum></citerefentry>
+                        <citerefentry project='die-net'><refentrytitle>autoconf</refentrytitle><manvolnum>1</manvolnum></citerefentry>
                         are recommended to use a configure script
                         excerpt like the following to determine the
                         unit installation path during source
@@ -793,7 +783,7 @@ AM_CONDITIONAL([HAVE_SYSTEMD], [test "x$with_systemdsystemunitdir" != "xno"])</p
                         work, it is recommended to add the following
                         to the top-level <filename>Makefile.am</filename>
                         file in
-                        <citerefentry><refentrytitle>automake</refentrytitle><manvolnum>1</manvolnum></citerefentry>-based
+                        <citerefentry project='die-net'><refentrytitle>automake</refentrytitle><manvolnum>1</manvolnum></citerefentry>-based
                         projects:</para>
 
                         <programlisting>DISTCHECK_CONFIGURE_FLAGS = \
@@ -808,7 +798,7 @@ systemdsystemunit_DATA = \
 endif</programlisting>
 
                         <para>In the
-                        <citerefentry><refentrytitle>rpm</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+                        <citerefentry project='die-net'><refentrytitle>rpm</refentrytitle><manvolnum>8</manvolnum></citerefentry>
                         <filename>.spec</filename> file, use snippets
                         like the following to enable/disable the
                         service during
@@ -943,6 +933,14 @@ fi</programlisting>
         </refsect1>
 
         <refsect1>
+                <title>Placing Daemon Data</title>
+
+                <para>It is recommended to follow the general
+                guidelines for placing package files, as discussed in
+                <citerefentry><refentrytitle>file-hierarchy</refentrytitle><manvolnum>7</manvolnum></citerefentry>.</para>
+        </refsect1>
+
+        <refsect1>
                 <title>See Also</title>
                 <para>
                         <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
@@ -950,7 +948,8 @@ fi</programlisting>
                         <citerefentry><refentrytitle>sd_listen_fds</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
                         <citerefentry><refentrytitle>sd_notify</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
                         <citerefentry><refentrytitle>daemon</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
-                        <citerefentry><refentrytitle>systemd.service</refentrytitle><manvolnum>5</manvolnum></citerefentry>
+                        <citerefentry><refentrytitle>systemd.service</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
+                        <citerefentry><refentrytitle>file-hierarchy</refentrytitle><manvolnum>7</manvolnum></citerefentry>
                 </para>
         </refsect1>
 

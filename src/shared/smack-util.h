@@ -27,10 +27,13 @@
 
 #define SMACK_FLOOR_LABEL "_"
 #define SMACK_STAR_LABEL  "*"
+#define SMACK_LABEL_LEN 255
 
 bool use_smack(void);
 
 int smack_label_path(const char *path, const char *label);
+int smack_get_label_path(const char *path, char **label);
 int smack_label_fd(int fd, const char *label);
+int smack_label_apply_pid(pid_t pid, const char *label);
 int smack_label_ip_in_fd(int fd, const char *label);
 int smack_label_ip_out_fd(int fd, const char *label);

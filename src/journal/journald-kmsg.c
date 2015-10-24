@@ -25,7 +25,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 
-#include <systemd/sd-messages.h>
+#include "systemd/sd-messages.h"
 #include <libudev.h>
 
 #include "journald-server.h"
@@ -71,7 +71,7 @@ void server_forward_kmsg(
                         identifier = ident_buf;
                 }
 
-                snprintf(header_pid, sizeof(header_pid), "[%lu]: ", (unsigned long) ucred->pid);
+                snprintf(header_pid, sizeof(header_pid), "["PID_FMT"]: ", ucred->pid);
                 char_array_0(header_pid);
 
                 if (identifier)
@@ -152,7 +152,7 @@ static void dev_kmsg_record(Server *s, char *p, size_t l) {
                 /* Did we lose any? */
                 if (serial > *s->kernel_seqnum)
                         server_driver_message(s, SD_MESSAGE_JOURNAL_MISSED, "Missed %"PRIu64" kernel messages",
-                                              serial - *s->kernel_seqnum - 1);
+                                              serial - *s->kernel_seqnum);
 
                 /* Make sure we never read this one again. Note that
                  * we always store the next message serial we expect
@@ -274,6 +274,9 @@ static void dev_kmsg_record(Server *s, char *p, size_t l) {
         if (asprintf(&syslog_priority, "PRIORITY=%i", priority & LOG_PRIMASK) >= 0)
                 IOVEC_SET_STRING(iovec[n++], syslog_priority);
 
+        if (asprintf(&syslog_facility, "SYSLOG_FACILITY=%i", LOG_FAC(priority)) >= 0)
+                IOVEC_SET_STRING(iovec[n++], syslog_facility);
+
         if ((priority & LOG_FACMASK) == LOG_KERN)
                 IOVEC_SET_STRING(iovec[n++], "SYSLOG_IDENTIFIER=kernel");
         else {
@@ -295,9 +298,6 @@ static void dev_kmsg_record(Server *s, char *p, size_t l) {
                         if (syslog_pid)
                                 IOVEC_SET_STRING(iovec[n++], syslog_pid);
                 }
-
-                if (asprintf(&syslog_facility, "SYSLOG_FACILITY=%i", LOG_FAC(priority)) >= 0)
-                        IOVEC_SET_STRING(iovec[n++], syslog_facility);
         }
 
         message = cunescape_length_with_prefix(p, pl, "MESSAGE=");
@@ -428,19 +428,14 @@ int server_open_dev_kmsg(Server *s) {
         return 0;
 
 fail:
-        if (s->dev_kmsg_event_source)
-                s->dev_kmsg_event_source = sd_event_source_unref(s->dev_kmsg_event_source);
-
-        if (s->dev_kmsg_fd >= 0) {
-                close_nointr_nofail(s->dev_kmsg_fd);
-                s->dev_kmsg_fd = -1;
-        }
+        s->dev_kmsg_event_source = sd_event_source_unref(s->dev_kmsg_event_source);
+        s->dev_kmsg_fd = safe_close(s->dev_kmsg_fd);
 
         return r;
 }
 
 int server_open_kernel_seqnum(Server *s) {
-        int fd;
+        _cleanup_close_ int fd;
         uint64_t *p;
 
         assert(s);
@@ -457,18 +452,15 @@ int server_open_kernel_seqnum(Server *s) {
 
         if (posix_fallocate(fd, 0, sizeof(uint64_t)) < 0) {
                 log_error("Failed to allocate sequential number file, ignoring: %m");
-                close_nointr_nofail(fd);
                 return 0;
         }
 
         p = mmap(NULL, sizeof(uint64_t), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
         if (p == MAP_FAILED) {
                 log_error("Failed to map sequential number file, ignoring: %m");
-                close_nointr_nofail(fd);
                 return 0;
         }
 
-        close_nointr_nofail(fd);
         s->kernel_seqnum = p;
 
         return 0;

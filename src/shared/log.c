@@ -51,6 +51,8 @@ static bool syslog_is_stream = false;
 static bool show_color = false;
 static bool show_location = false;
 
+static bool upgrade_syslog_to_journal = false;
+
 /* Akin to glibc's __abort_msg; which is private and we hence cannot
  * use here. */
 static char *log_abort_msg = NULL;
@@ -62,7 +64,7 @@ void log_close_console(void) {
 
         if (getpid() == 1) {
                 if (console_fd >= 3)
-                        close_nointr_nofail(console_fd);
+                        safe_close(console_fd);
 
                 console_fd = -1;
         }
@@ -84,12 +86,7 @@ static int log_open_console(void) {
 }
 
 void log_close_kmsg(void) {
-
-        if (kmsg_fd < 0)
-                return;
-
-        close_nointr_nofail(kmsg_fd);
-        kmsg_fd = -1;
+        kmsg_fd = safe_close(kmsg_fd);
 }
 
 static int log_open_kmsg(void) {
@@ -105,12 +102,7 @@ static int log_open_kmsg(void) {
 }
 
 void log_close_syslog(void) {
-
-        if (syslog_fd < 0)
-                return;
-
-        close_nointr_nofail(syslog_fd);
-        syslog_fd = -1;
+        syslog_fd = safe_close(syslog_fd);
 }
 
 static int create_log_socket(int type) {
@@ -152,7 +144,7 @@ static int log_open_syslog(void) {
         }
 
         if (connect(syslog_fd, &sa.sa, offsetof(struct sockaddr_un, sun_path) + strlen(sa.un.sun_path)) < 0) {
-                close_nointr_nofail(syslog_fd);
+                safe_close(syslog_fd);
 
                 /* Some legacy syslog systems still use stream
                  * sockets. They really shouldn't. But what can we
@@ -180,12 +172,7 @@ fail:
 }
 
 void log_close_journal(void) {
-
-        if (journal_fd < 0)
-                return;
-
-        close_nointr_nofail(journal_fd);
-        journal_fd = -1;
+        journal_fd = safe_close(journal_fd);
 }
 
 static int log_open_journal(void) {
@@ -281,6 +268,13 @@ int log_open(void) {
 void log_set_target(LogTarget target) {
         assert(target >= 0);
         assert(target < _LOG_TARGET_MAX);
+
+        if (upgrade_syslog_to_journal) {
+                if (target == LOG_TARGET_SYSLOG)
+                        target = LOG_TARGET_JOURNAL;
+                else if (target == LOG_TARGET_SYSLOG_OR_KMSG)
+                        target = LOG_TARGET_JOURNAL_OR_KMSG;
+        }
 
         log_target = target;
 }
@@ -393,7 +387,7 @@ static int write_to_syslog(
         if (strftime(header_time, sizeof(header_time), "%h %e %T ", tm) <= 0)
                 return -EINVAL;
 
-        snprintf(header_pid, sizeof(header_pid), "[%lu]: ", (unsigned long) getpid());
+        snprintf(header_pid, sizeof(header_pid), "["PID_FMT"]: ", getpid());
         char_array_0(header_pid);
 
         IOVEC_SET_STRING(iovec[0], header_priority);
@@ -441,7 +435,7 @@ static int write_to_kmsg(
         snprintf(header_priority, sizeof(header_priority), "<%i>", level);
         char_array_0(header_priority);
 
-        snprintf(header_pid, sizeof(header_pid), "[%lu]: ", (unsigned long) getpid());
+        snprintf(header_pid, sizeof(header_pid), "["PID_FMT"]: ", getpid());
         char_array_0(header_pid);
 
         IOVEC_SET_STRING(iovec[0], header_priority);
@@ -877,41 +871,62 @@ int log_set_max_level_from_string(const char *e) {
         return 0;
 }
 
-void log_parse_environment(void) {
-        _cleanup_free_ char *line = NULL;
-        const char *e;
-        int r;
+static int parse_proc_cmdline_item(const char *key, const char *value) {
 
-        r = proc_cmdline(&line);
-        if (r < 0)
-                log_warning("Failed to read /proc/cmdline. Ignoring: %s", strerror(-r));
-        else if (r > 0) {
-                char *w, *state;
-                size_t l;
+        /*
+         * The systemd.log_xyz= settings are parsed by all tools, and
+         * so is "debug".
+         *
+         * However, "quiet" is only parsed by PID 1!
+         */
 
-                FOREACH_WORD_QUOTED(w, l, line, state) {
-                        if (l == 5 && startswith(w, "debug")) {
-                                log_set_max_level(LOG_DEBUG);
-                                break;
-                        }
-                }
+        if (streq(key, "debug") && !value)
+                log_set_max_level(LOG_DEBUG);
+
+        else if (streq(key, "systemd.log_target") && value) {
+
+                if (log_set_target_from_string(value) < 0)
+                        log_warning("Failed to parse log target '%s'. Ignoring.", value);
+
+        } else if (streq(key, "systemd.log_level") && value) {
+
+                if (log_set_max_level_from_string(value) < 0)
+                        log_warning("Failed to parse log level '%s'. Ignoring.", value);
+
+        } else if (streq(key, "systemd.log_color") && value) {
+
+                if (log_show_color_from_string(value) < 0)
+                        log_warning("Failed to parse log color setting '%s'. Ignoring.", value);
+
+        } else if (streq(key, "systemd.log_location") && value) {
+
+                if (log_show_location_from_string(value) < 0)
+                        log_warning("Failed to parse log location setting '%s'. Ignoring.", value);
         }
+
+        return 0;
+}
+
+void log_parse_environment(void) {
+        const char *e;
+
+        parse_proc_cmdline(parse_proc_cmdline_item);
 
         e = secure_getenv("SYSTEMD_LOG_TARGET");
         if (e && log_set_target_from_string(e) < 0)
-                log_warning("Failed to parse log target %s. Ignoring.", e);
+                log_warning("Failed to parse log target '%s'. Ignoring.", e);
 
         e = secure_getenv("SYSTEMD_LOG_LEVEL");
         if (e && log_set_max_level_from_string(e) < 0)
-                log_warning("Failed to parse log level %s. Ignoring.", e);
+                log_warning("Failed to parse log level '%s'. Ignoring.", e);
 
         e = secure_getenv("SYSTEMD_LOG_COLOR");
         if (e && log_show_color_from_string(e) < 0)
-                log_warning("Failed to parse bool %s. Ignoring.", e);
+                log_warning("Failed to parse bool '%s'. Ignoring.", e);
 
         e = secure_getenv("SYSTEMD_LOG_LOCATION");
         if (e && log_show_location_from_string(e) < 0)
-                log_warning("Failed to parse bool %s. Ignoring.", e);
+                log_warning("Failed to parse bool '%s'. Ignoring.", e);
 }
 
 LogTarget log_get_target(void) {
@@ -967,7 +982,7 @@ bool log_on_console(void) {
         return syslog_fd < 0 && kmsg_fd < 0 && journal_fd < 0;
 }
 
-static const char *const log_target_table[] = {
+static const char *const log_target_table[_LOG_TARGET_MAX] = {
         [LOG_TARGET_CONSOLE] = "console",
         [LOG_TARGET_KMSG] = "kmsg",
         [LOG_TARGET_JOURNAL] = "journal",
@@ -996,4 +1011,8 @@ void log_received_signal(int level, const struct signalfd_siginfo *si) {
                          "Received SIG%s.",
                          signal_to_string(si->ssi_signo));
 
+}
+
+void log_set_upgrade_syslog_to_journal(bool b) {
+        upgrade_syslog_to_journal = b;
 }

@@ -25,6 +25,7 @@
 #include "dbus-cgroup.h"
 #include "dbus-kill.h"
 #include "dbus-scope.h"
+#include "dbus.h"
 #include "bus-util.h"
 #include "bus-internal.h"
 #include "bus-errors.h"
@@ -36,6 +37,12 @@ static int bus_scope_abandon(sd_bus *bus, sd_bus_message *message, void *userdat
         assert(bus);
         assert(message);
         assert(s);
+
+        r = bus_verify_manage_unit_async(UNIT(s)->manager, message, error);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                return 1; /* No authorization for now, but the async polkit stuff will call us again when it has it */
 
         r = scope_abandon(s);
         if (sd_bus_error_is_set(error))
@@ -138,7 +145,7 @@ static int bus_scope_set_transient_property(
                         if (r < 0)
                                 return r;
 
-                        unit_write_drop_in_format(UNIT(s), mode, name, "[Scope]\nTimeoutStopSec=%lluus\n", (unsigned long long) s->timeout_stop_usec);
+                        unit_write_drop_in_format(UNIT(s), mode, name, "[Scope]\nTimeoutStopSec="USEC_FMT"us\n", s->timeout_stop_usec);
                 } else {
                         r = sd_bus_message_skip(message, "t");
                         if (r < 0)

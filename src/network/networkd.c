@@ -19,6 +19,7 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
+#include "capability.h"
 #include "sd-event.h"
 #include "sd-daemon.h"
 
@@ -26,6 +27,9 @@
 
 int main(int argc, char *argv[]) {
         _cleanup_manager_free_ Manager *m = NULL;
+        const char *user = "systemd-network";
+        uid_t uid;
+        gid_t gid;
         int r;
 
         log_set_target(LOG_TARGET_AUTO);
@@ -40,27 +44,48 @@ int main(int argc, char *argv[]) {
                 goto out;
         }
 
+        r = get_user_creds(&user, &uid, &gid, NULL, NULL);
+        if (r < 0) {
+                log_error("Cannot resolve user name %s: %s", user, strerror(-r));
+                goto out;
+        }
+
+        /* Always create the directories people can create inotify
+         * watches in. */
+        r = mkdir_safe_label("/run/systemd/netif", 0755, uid, gid);
+        if (r < 0)
+                log_error("Could not create runtime directory: %s",
+                          strerror(-r));
+
+        r = mkdir_safe_label("/run/systemd/netif/links", 0755, uid, gid);
+        if (r < 0)
+                log_error("Could not create runtime directory 'links': %s",
+                          strerror(-r));
+
+        r = mkdir_safe_label("/run/systemd/netif/leases", 0755, uid, gid);
+        if (r < 0)
+                log_error("Could not create runtime directory 'leases': %s",
+                          strerror(-r));
+
+        r = drop_privileges(uid, gid,
+                            (1ULL << CAP_NET_ADMIN) |
+                            (1ULL << CAP_NET_BIND_SERVICE) |
+                            (1ULL << CAP_NET_BROADCAST) |
+                            (1ULL << CAP_NET_RAW));
+        if (r < 0)
+                goto out;
+
+        assert_se(sigprocmask_many(SIG_BLOCK, SIGTERM, SIGINT, -1) == 0);
+
         r = manager_new(&m);
         if (r < 0) {
                 log_error("Could not create manager: %s", strerror(-r));
                 goto out;
         }
 
-        r = manager_load_config(m);
-        if (r < 0) {
-                log_error("Could not load configuration files: %s", strerror(-r));
-                goto out;
-        }
-
         r = manager_udev_listen(m);
         if (r < 0) {
                 log_error("Could not connect to udev: %s", strerror(-r));
-                goto out;
-        }
-
-        r = manager_udev_enumerate_links(m);
-        if (r < 0) {
-                log_error("Could not enumerate links: %s", strerror(-r));
                 goto out;
         }
 
@@ -76,11 +101,15 @@ int main(int argc, char *argv[]) {
                 goto out;
         }
 
-        /* write out empty resolv.conf to avoid a
-         * dangling symlink */
-        r = manager_update_resolv_conf(m);
+        r = manager_load_config(m);
         if (r < 0) {
-                log_error("Could not create resolv.conf: %s", strerror(-r));
+                log_error("Could not load configuration files: %s", strerror(-r));
+                goto out;
+        }
+
+        r = manager_rtnl_enumerate_links(m);
+        if (r < 0) {
+                log_error("Could not enumerate links: %s", strerror(-r));
                 goto out;
         }
 

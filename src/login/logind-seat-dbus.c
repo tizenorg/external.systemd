@@ -27,6 +27,7 @@
 #include "bus-util.h"
 #include "strv.h"
 #include "bus-errors.h"
+#include "bus-label.h"
 #include "logind.h"
 #include "logind-seat.h"
 
@@ -328,7 +329,7 @@ int seat_object_find(sd_bus *bus, const char *path, const char *interface, void 
                 Session *session;
                 pid_t pid;
 
-                message = sd_bus_get_current(bus);
+                message = sd_bus_get_current_message(bus);
                 if (!message)
                         return 0;
 
@@ -356,7 +357,7 @@ int seat_object_find(sd_bus *bus, const char *path, const char *interface, void 
                 if (!p)
                         return 0;
 
-                e = sd_bus_label_unescape(p);
+                e = bus_label_unescape(p);
                 if (!e)
                         return -ENOMEM;
 
@@ -374,7 +375,7 @@ char *seat_bus_path(Seat *s) {
 
         assert(s);
 
-        t = sd_bus_label_escape(s->id);
+        t = bus_label_escape(s->id);
         if (!t)
                 return NULL;
 
@@ -399,11 +400,9 @@ int seat_node_enumerator(sd_bus *bus, const char *path, void *userdata, char ***
                 if (!p)
                         return -ENOMEM;
 
-                r = strv_push(&l, p);
-                if (r < 0) {
-                        free(p);
+                r = strv_consume(&l, p);
+                if (r < 0)
                         return r;
-                }
         }
 
         *nodes = l;

@@ -25,14 +25,15 @@
 #include <string.h>
 #include <getopt.h>
 
-#include "systemd/sd-id128.h"
-#include "systemd/sd-messages.h"
+#include "sd-id128.h"
+#include "sd-messages.h"
 #include "log.h"
 #include "util.h"
 #include "strv.h"
 #include "fileio.h"
 #include "build.h"
 #include "sleep-config.h"
+#include "def.h"
 
 static char* arg_verb = NULL;
 
@@ -41,9 +42,12 @@ static int write_mode(char **modes) {
         char **mode;
 
         STRV_FOREACH(mode, modes) {
-                int k = write_string_file("/sys/power/disk", *mode);
+                int k;
+
+                k = write_string_file("/sys/power/disk", *mode);
                 if (k == 0)
                         return 0;
+
                 log_debug("Failed to write '%s' to /sys/power/disk: %s",
                           *mode, strerror(-k));
                 if (r == 0)
@@ -64,7 +68,7 @@ static int write_state(FILE **f, char **states) {
         STRV_FOREACH(state, states) {
                 int k;
 
-                k = write_string_to_file(*f, *state);
+                k = write_string_stream(*f, *state);
                 if (k == 0)
                         return 0;
                 log_debug("Failed to write '%s' to /sys/power/state: %s",
@@ -106,7 +110,7 @@ static int execute(char **modes, char **states) {
         arguments[1] = (char*) "pre";
         arguments[2] = arg_verb;
         arguments[3] = NULL;
-        execute_directory(SYSTEM_SLEEP_PATH, NULL, arguments);
+        execute_directory(SYSTEM_SLEEP_PATH, NULL, DEFAULT_TIMEOUT_USEC, arguments);
 
         log_struct(LOG_INFO,
                    MESSAGE_ID(SD_MESSAGE_SLEEP_START),
@@ -125,12 +129,12 @@ static int execute(char **modes, char **states) {
                    NULL);
 
         arguments[1] = (char*) "post";
-        execute_directory(SYSTEM_SLEEP_PATH, NULL, arguments);
+        execute_directory(SYSTEM_SLEEP_PATH, NULL, DEFAULT_TIMEOUT_USEC, arguments);
 
         return r;
 }
 
-static int help(void) {
+static void help(void) {
         printf("%s COMMAND\n\n"
                "Suspend the system, hibernate the system, or both.\n\n"
                "Commands:\n"
@@ -139,10 +143,7 @@ static int help(void) {
                "  suspend              Suspend the system\n"
                "  hibernate            Hibernate the system\n"
                "  hybrid-sleep         Both hibernate and suspend the system\n"
-               , program_invocation_short_name
-               );
-
-        return 0;
+               , program_invocation_short_name);
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -161,10 +162,11 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "+h", options, NULL)) >= 0)
+        while ((c = getopt_long(argc, argv, "h", options, NULL)) >= 0)
                 switch(c) {
                 case 'h':
-                        return help();
+                        help();
+                        return 0; /* done */
 
                 case ARG_VERSION:
                         puts(PACKAGE_STRING);

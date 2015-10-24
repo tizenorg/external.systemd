@@ -28,6 +28,7 @@
 
 #include "libudev.h"
 #include "libudev-private.h"
+#include "smack-util.h"
 
 static void udev_device_tag(struct udev_device *dev, const char *tag, bool add)
 {
@@ -154,7 +155,7 @@ int udev_device_update_db(struct udev_device *udev_device)
                 }
 
                 if (udev_device_get_usec_initialized(udev_device) > 0)
-                        fprintf(f, "I:%llu\n", (unsigned long long)udev_device_get_usec_initialized(udev_device));
+                        fprintf(f, "I:"USEC_FMT"\n", udev_device_get_usec_initialized(udev_device));
 
                 udev_list_entry_foreach(list_entry, udev_device_get_properties_list_entry(udev_device)) {
                         if (!udev_list_entry_get_num(list_entry))
@@ -172,6 +173,12 @@ int udev_device_update_db(struct udev_device *udev_device)
         r = rename(filename_tmp, filename);
         if (r < 0)
                 return -1;
+#ifdef HAVE_SMACK
+        if (smack_label_path(filename, SMACK_FLOOR_LABEL) < 0)
+                log_error("SECLABEL: failed to set SMACK label '%s'", SMACK_FLOOR_LABEL);
+        else
+                log_debug("SECLABEL: set SMACK label '%s'", SMACK_FLOOR_LABEL);
+#endif
         udev_dbg(udev, "created %s file '%s' for '%s'\n", has_info ? "db" : "empty",
              filename, udev_device_get_devpath(udev_device));
         return 0;

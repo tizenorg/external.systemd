@@ -30,6 +30,7 @@
 #include "time-util.h"
 #include "strv.h"
 #include "bus-creds.h"
+#include "bus-label.h"
 
 enum {
         CAP_OFFSET_INHERITABLE = 0,
@@ -474,7 +475,7 @@ _public_ int sd_bus_creds_get_connection_name(sd_bus_creds *c, const char **ret)
         assert(c->conn_name);
 
         if (!c->unescaped_conn_name) {
-                c->unescaped_conn_name = sd_bus_label_unescape(c->conn_name);
+                c->unescaped_conn_name = bus_label_unescape(c->conn_name);
                 if (!c->unescaped_conn_name)
                         return -ENOMEM;
         }
@@ -748,7 +749,7 @@ int bus_creds_add_more(sd_bus_creds *c, uint64_t mask, pid_t pid, pid_t tid) {
         if (tid > 0 && (missing & SD_BUS_CREDS_TID_COMM)) {
                 _cleanup_free_ char *p = NULL;
 
-                if (asprintf(&p, "/proc/%lu/task/%lu/comm", (unsigned long) pid, (unsigned long) tid) < 0)
+                if (asprintf(&p, "/proc/"PID_FMT"/task/"PID_FMT"/comm", pid, tid) < 0)
                         return -ENOMEM;
 
                 r = read_one_line_file(p, &c->tid_comm);

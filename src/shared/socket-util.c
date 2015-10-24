@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <stddef.h>
 #include <sys/ioctl.h>
+#include <netdb.h>
 
 #include "macro.h"
 #include "util.h"
@@ -425,11 +426,11 @@ bool socket_ipv6_is_supported(void) {
         _cleanup_free_ char *l = NULL;
 
         if (access("/sys/module/ipv6", F_OK) != 0)
-                return 0;
+                return false;
 
         /* If we can't check "disable" parameter, assume enabled */
         if (read_one_line_file("/sys/module/ipv6/parameters/disable", &l) < 0)
-                return 1;
+                return true;
 
         /* If module was loaded with disable=1 no IPv6 available */
         return l[0] == '0';
@@ -574,13 +575,12 @@ int sockaddr_pretty(const struct sockaddr *_sa, socklen_t salen, bool translate_
 
 int getpeername_pretty(int fd, char **ret) {
         union sockaddr_union sa;
-        socklen_t salen;
+        socklen_t salen = sizeof(sa);
         int r;
 
         assert(fd >= 0);
         assert(ret);
 
-        salen = sizeof(sa);
         if (getpeername(fd, &sa.sa, &salen) < 0)
                 return -errno;
 
@@ -594,7 +594,7 @@ int getpeername_pretty(int fd, char **ret) {
                 if (r < 0)
                         return r;
 
-                if (asprintf(ret, "PID %lu/UID %lu", (unsigned long) ucred.pid, (unsigned long) ucred.uid) < 0)
+                if (asprintf(ret, "PID "PID_FMT"/UID "UID_FMT, ucred.pid, ucred.uid) < 0)
                         return -ENOMEM;
 
                 return 0;
@@ -608,12 +608,11 @@ int getpeername_pretty(int fd, char **ret) {
 
 int getsockname_pretty(int fd, char **ret) {
         union sockaddr_union sa;
-        socklen_t salen;
+        socklen_t salen = sizeof(sa);
 
         assert(fd >= 0);
         assert(ret);
 
-        salen = sizeof(sa);
         if (getsockname(fd, &sa.sa, &salen) < 0)
                 return -errno;
 
@@ -623,6 +622,64 @@ int getsockname_pretty(int fd, char **ret) {
          * IPv6 matters. */
 
         return sockaddr_pretty(&sa.sa, salen, false, ret);
+}
+
+int socknameinfo_pretty(union sockaddr_union *sa, socklen_t salen, char **_ret) {
+        int r;
+        char host[NI_MAXHOST], *ret;
+
+        assert(_ret);
+
+        r = getnameinfo(&sa->sa, salen, host, sizeof(host), NULL, 0,
+                        NI_IDN|NI_IDN_USE_STD3_ASCII_RULES);
+        if (r != 0) {
+                _cleanup_free_ char *sockname = NULL;
+                int saved_errno = errno;
+
+                r = sockaddr_pretty(&sa->sa, salen, true, &sockname);
+                if (r < 0)
+                        log_error("sockadd_pretty() failed: %s", strerror(-r));
+                else
+                        log_error("getnameinfo(%s) failed: %s", sockname, strerror(-r));
+                return -saved_errno;
+        }
+
+        ret = strdup(host);
+        if (!ret)
+                return log_oom();
+
+        *_ret = ret;
+        return 0;
+}
+
+int getnameinfo_pretty(int fd, char **ret) {
+        union sockaddr_union sa;
+        socklen_t salen = sizeof(sa);
+
+        assert(fd >= 0);
+        assert(ret);
+
+        if (getsockname(fd, &sa.sa, &salen) < 0) {
+                log_error("getsockname(%d) failed: %m", fd);
+                return -errno;
+        }
+
+        return socknameinfo_pretty(&sa, salen, ret);
+}
+
+int socket_address_unlink(SocketAddress *a) {
+        assert(a);
+
+        if (socket_address_family(a) != AF_UNIX)
+                return 0;
+
+        if (a->sockaddr.un.sun_path[0] == 0)
+                return 0;
+
+        if (unlink(a->sockaddr.un.sun_path) < 0)
+                return -errno;
+
+        return 1;
 }
 
 static const char* const netlink_family_table[] = {
@@ -654,3 +711,38 @@ static const char* const socket_address_bind_ipv6_only_table[_SOCKET_ADDRESS_BIN
 };
 
 DEFINE_STRING_TABLE_LOOKUP(socket_address_bind_ipv6_only, SocketAddressBindIPv6Only);
+
+bool sockaddr_equal(const union sockaddr_union *a, const union sockaddr_union *b) {
+        assert(a);
+        assert(b);
+
+        if (a->sa.sa_family != b->sa.sa_family)
+                return false;
+
+        if (a->sa.sa_family == AF_INET)
+                return a->in.sin_addr.s_addr == b->in.sin_addr.s_addr;
+
+        if (a->sa.sa_family == AF_INET6)
+                return memcmp(&a->in6.sin6_addr, &b->in6.sin6_addr, sizeof(a->in6.sin6_addr)) == 0;
+
+        return false;
+}
+
+char* ether_addr_to_string(const struct ether_addr *addr, char buffer[ETHER_ADDR_TO_STRING_MAX]) {
+        assert(addr);
+        assert(buffer);
+
+        /* Like ether_ntoa() but uses %02x instead of %x to print
+         * ethernet addresses, which makes them look less funny. Also,
+         * doesn't use a static buffer. */
+
+        sprintf(buffer, "%02x:%02x:%02x:%02x:%02x:%02x",
+                addr->ether_addr_octet[0],
+                addr->ether_addr_octet[1],
+                addr->ether_addr_octet[2],
+                addr->ether_addr_octet[3],
+                addr->ether_addr_octet[4],
+                addr->ether_addr_octet[5]);
+
+        return buffer;
+}

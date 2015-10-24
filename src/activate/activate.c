@@ -27,7 +27,7 @@
 #include <sys/wait.h>
 #include <getopt.h>
 
-#include <systemd/sd-daemon.h>
+#include "systemd/sd-daemon.h"
 
 #include "socket-util.h"
 #include "build.h"
@@ -57,25 +57,6 @@ static int add_epoll(int epoll_fd, int fd) {
         }
 
         return 0;
-}
-
-static int make_socket_fd(const char* address, int flags) {
-        SocketAddress a;
-        int fd, r;
-
-        r = socket_address_parse(&a, address);
-        if (r < 0) {
-                log_error("Failed to parse socket: %s", strerror(-r));
-                return r;
-        }
-
-        fd = socket_address_listen(&a, flags, SOMAXCONN, SOCKET_ADDRESS_DEFAULT, NULL, false, false, 0755, 0644, NULL);
-        if (fd < 0) {
-                log_error("Failed to listen: %s", strerror(-r));
-                return fd;
-        }
-
-        return fd;
 }
 
 static int open_sockets(int *epoll_fd, bool accept) {
@@ -119,7 +100,7 @@ static int open_sockets(int *epoll_fd, bool accept) {
 
         STRV_FOREACH(address, arg_listen) {
 
-                fd = make_socket_fd(*address, SOCK_STREAM | (arg_accept*SOCK_CLOEXEC));
+                fd = make_socket_fd(LOG_DEBUG, *address, SOCK_STREAM | (arg_accept*SOCK_CLOEXEC));
                 if (fd < 0) {
                         log_open();
                         log_error("Failed to open '%s': %s", *address, strerror(-fd));
@@ -298,7 +279,7 @@ static int install_chld_handler(void) {
         return r;
 }
 
-static int help(void) {
+static void help(void) {
         printf("%s [OPTIONS...]\n\n"
                "Listen on sockets and launch child on connection.\n\n"
                "Options:\n"
@@ -309,10 +290,7 @@ static int help(void) {
                "  --version                Print version string and exit\n"
                "\n"
                "Note: file descriptors from sd_listen_fds() will be passed through.\n"
-               , program_invocation_short_name
-               );
-
-        return 0;
+               , program_invocation_short_name);
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -338,7 +316,8 @@ static int parse_argv(int argc, char *argv[]) {
         while ((c = getopt_long(argc, argv, "+hl:aE:", options, NULL)) >= 0)
                 switch(c) {
                 case 'h':
-                        return help();
+                        help();
+                        return 0;
 
                 case ARG_VERSION:
                         puts(PACKAGE_STRING);
@@ -373,7 +352,7 @@ static int parse_argv(int argc, char *argv[]) {
                 }
 
         if (optind == argc) {
-                log_error("Usage: %s [OPTION...] PROGRAM [OPTION...]",
+                log_error("%s: command to execute is missing.",
                           program_invocation_short_name);
                 return -EINVAL;
         }

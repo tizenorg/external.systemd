@@ -63,8 +63,13 @@ typedef struct MountPoint {
 
 /* The first three entries we might need before SELinux is up. The
  * fourth (securityfs) is needed by IMA to load a custom policy. The
- * other ones we can delay until SELinux and IMA are loaded. */
+ * other ones we can delay until SELinux and IMA are loaded. When
+ * SMACK is enabled we need smackfs, too, so it's a fifth one. */
+#ifdef HAVE_SMACK
 #define N_EARLY_MOUNT 5
+#else
+#define N_EARLY_MOUNT 4
+#endif
 
 static const MountPoint mount_table[] = {
         { "sysfs",      "/sys",                      "sysfs",      NULL, MS_NOSUID|MS_NOEXEC|MS_NODEV,
@@ -86,19 +91,17 @@ static const MountPoint mount_table[] = {
         { "devpts",     "/dev/pts",                  "devpts",     "mode=620,gid=" STRINGIFY(TTY_GID), MS_NOSUID|MS_NOEXEC,
           NULL,       MNT_IN_CONTAINER },
 #ifdef HAVE_SMACK
-        { "tmpfs",      "/run",                      "tmpfs",      "mode=755,smackfsroot=*", MS_NOSUID|MS_NODEV|MS_STRICTATIME,
+        { "tmpfs",      "/run",                      "tmpfs",      "mode=775,smackfsroot=*,gid=" STRINGIFY(RUN_GID), MS_NOSUID|MS_NODEV|MS_STRICTATIME,
           use_smack,  MNT_FATAL },
 #endif
-        { "tmpfs",      "/run",                      "tmpfs",      "mode=755", MS_NOSUID|MS_NODEV|MS_STRICTATIME,
+        { "tmpfs",      "/run",                      "tmpfs",      "mode=775,gid=" STRINGIFY(RUN_GID), MS_NOSUID|MS_NODEV|MS_STRICTATIME,
           NULL,       MNT_FATAL|MNT_IN_CONTAINER },
         { "tmpfs",      "/sys/fs/cgroup",            "tmpfs",      "mode=755", MS_NOSUID|MS_NOEXEC|MS_NODEV|MS_STRICTATIME,
-          NULL,       MNT_IN_CONTAINER },
-#ifdef HAVE_XATTR
+          NULL,       MNT_FATAL|MNT_IN_CONTAINER },
         { "cgroup",     "/sys/fs/cgroup/systemd",    "cgroup",     "none,name=systemd,xattr", MS_NOSUID|MS_NOEXEC|MS_NODEV,
           NULL,       MNT_IN_CONTAINER },
-#endif
         { "cgroup",     "/sys/fs/cgroup/systemd",    "cgroup",     "none,name=systemd", MS_NOSUID|MS_NOEXEC|MS_NODEV,
-          NULL,       MNT_IN_CONTAINER },
+          NULL,       MNT_FATAL|MNT_IN_CONTAINER },
         { "pstore",     "/sys/fs/pstore",            "pstore",     NULL, MS_NOSUID|MS_NOEXEC|MS_NODEV,
           NULL,       MNT_NONE },
 #ifdef ENABLE_EFI
@@ -188,7 +191,7 @@ static int mount_one(const MountPoint *p, bool relabel) {
                   p->type,
                   p->flags,
                   p->options) < 0) {
-                log_full((p->mode & MNT_FATAL) ? LOG_ERR : LOG_DEBUG, "Failed to mount %s: %m", p->where);
+                log_full((p->mode & MNT_FATAL) ? LOG_ERR : LOG_DEBUG, "Failed to mount %s at %s: %m", p->type, p->where);
                 return (p->mode & MNT_FATAL) ? -errno : 0;
         }
 
@@ -219,10 +222,10 @@ int mount_setup_early(void) {
 }
 
 int mount_cgroup_controllers(char ***join_controllers) {
-        int r;
-        char buf[LINE_MAX];
         _cleanup_set_free_free_ Set *controllers = NULL;
         _cleanup_fclose_ FILE *f;
+        char buf[LINE_MAX];
+        int r;
 
         /* Mount all available cgroup controllers that are built into the kernel. */
 
@@ -265,6 +268,7 @@ int mount_cgroup_controllers(char ***join_controllers) {
         }
 
         for (;;) {
+                _cleanup_free_ char *options = NULL, *controller = NULL, *where = NULL;
                 MountPoint p = {
                         .what = "cgroup",
                         .type = "cgroup",
@@ -272,7 +276,6 @@ int mount_cgroup_controllers(char ***join_controllers) {
                         .mode = MNT_IN_CONTAINER,
                 };
                 char ***k = NULL;
-                _cleanup_free_ char *options = NULL, *controller;
 
                 controller = set_steal_first(controllers);
                 if (!controller)
@@ -289,7 +292,7 @@ int mount_cgroup_controllers(char ***join_controllers) {
                         for (i = *k, j = *k; *i; i++) {
 
                                 if (!streq(*i, controller)) {
-                                        char _cleanup_free_ *t;
+                                        _cleanup_free_ char *t;
 
                                         t = set_remove(controllers, *i);
                                         if (!t) {
@@ -311,7 +314,11 @@ int mount_cgroup_controllers(char ***join_controllers) {
                         controller = NULL;
                 }
 
-                p.where = strappenda("/sys/fs/cgroup/", options);
+                where = strappend("/sys/fs/cgroup/", options);
+                if (!where)
+                        return log_oom();
+
+                p.where = where;
                 p.options = options;
 
                 r = mount_one(&p, true);
@@ -322,7 +329,11 @@ int mount_cgroup_controllers(char ***join_controllers) {
                         char **i;
 
                         for (i = *k; *i; i++) {
-                                char *t = strappenda("/sys/fs/cgroup/", *i);
+                                _cleanup_free_ char *t = NULL;
+
+                                t = strappend("/sys/fs/cgroup/", *i);
+                                if (!t)
+                                        return log_oom();
 
                                 r = symlink(options, t);
                                 if (r < 0 && errno != EEXIST) {
@@ -332,6 +343,12 @@ int mount_cgroup_controllers(char ***join_controllers) {
                         }
                 }
         }
+
+#ifndef CONFIG_TIZEN_WIP
+        /* Now that we mounted everything, let's make the tmpfs the
+         * cgroup file systems are mounted into read-only. */
+        mount("tmpfs", "/sys/fs/cgroup", "tmpfs", MS_REMOUNT|MS_NOSUID|MS_NOEXEC|MS_NODEV|MS_STRICTATIME|MS_RDONLY, "mode=755");
+#endif
 
         return 0;
 }

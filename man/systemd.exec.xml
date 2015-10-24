@@ -103,7 +103,7 @@
                                 directory path. Sets the root
                                 directory for executed processes, with
                                 the
-                                <citerefentry><refentrytitle>chroot</refentrytitle><manvolnum>2</manvolnum></citerefentry>
+                                <citerefentry project='man-pages'><refentrytitle>chroot</refentrytitle><manvolnum>2</manvolnum></citerefentry>
                                 system call. If this is used, it must
                                 be ensured that the process and all
                                 its auxiliary files are available in
@@ -304,7 +304,7 @@
 
                                 <para>
                                 See
-                                <citerefentry><refentrytitle>environ</refentrytitle><manvolnum>7</manvolnum></citerefentry>
+                                <citerefentry project='man-pages'><refentrytitle>environ</refentrytitle><manvolnum>7</manvolnum></citerefentry>
                                 for details about environment variables.</para></listitem>
                         </varlistentry>
                         <varlistentry>
@@ -340,9 +340,14 @@
 
                                 <para>The files listed with this
                                 directive will be read shortly before
-                                the process is executed. Settings from
-                                these files override settings made
-                                with
+                                the process is executed (more
+                                specifically, after all
+                                processes from a previous unit state
+                                terminated. This means you can
+                                generate these files in one unit
+                                state, and read it with this option in
+                                the next). Settings from these files
+                                override settings made with
                                 <varname>Environment=</varname>. If
                                 the same variable is set twice from
                                 these files, the files will be read in
@@ -360,39 +365,47 @@
                                 <option>tty</option>,
                                 <option>tty-force</option>,
                                 <option>tty-fail</option> or
-                                <option>socket</option>. If
-                                <option>null</option> is selected,
-                                standard input will be connected to
+                                <option>socket</option>.</para>
+
+                                <para>If <option>null</option> is
+                                selected, standard input will be
+                                connected to
                                 <filename>/dev/null</filename>,
                                 i.e. all read attempts by the process
-                                will result in immediate EOF. If
-                                <option>tty</option> is selected,
-                                standard input is connected to a TTY
-                                (as configured by
+                                will result in immediate EOF.</para>
+
+                                <para>If <option>tty</option> is
+                                selected, standard input is connected
+                                to a TTY (as configured by
                                 <varname>TTYPath=</varname>, see
                                 below) and the executed process
                                 becomes the controlling process of the
                                 terminal. If the terminal is already
-                                being controlled by another process, the
-                                executed process waits until the current
-                                controlling process releases the
-                                terminal.
-                                <option>tty-force</option>
-                                is similar to <option>tty</option>,
-                                but the executed process is forcefully
-                                and immediately made the controlling
+                                being controlled by another process,
+                                the executed process waits until the
+                                current controlling process releases
+                                the terminal.</para>
+
+                                <para><option>tty-force</option> is similar
+                                to <option>tty</option>, but the
+                                executed process is forcefully and
+                                immediately made the controlling
                                 process of the terminal, potentially
                                 removing previous controlling
                                 processes from the
-                                terminal. <option>tty-fail</option> is
+                                terminal.</para>
+
+                                <para><option>tty-fail</option> is
                                 similar to <option>tty</option> but if
                                 the terminal already has a controlling
                                 process start-up of the executed
-                                process fails.  The
-                                <option>socket</option> option is only
-                                valid in socket-activated services,
-                                and only when the socket configuration
-                                file (see
+                                process fails.</para>
+
+                                <para>The <option>socket</option>
+                                option is only valid in
+                                socket-activated services, and only
+                                when the socket configuration file
+                                (see
                                 <citerefentry><refentrytitle>systemd.socket</refentrytitle><manvolnum>5</manvolnum></citerefentry>
                                 for details) specifies a single socket
                                 only. If this option is set, standard
@@ -402,7 +415,9 @@
                                 with daemons designed for use with the
                                 traditional
                                 <citerefentry><refentrytitle>inetd</refentrytitle><manvolnum>8</manvolnum></citerefentry>
-                                daemon. This setting defaults to
+                                daemon.</para>
+
+                                <para>This setting defaults to
                                 <option>null</option>.</para></listitem>
                         </varlistentry>
                         <varlistentry>
@@ -413,56 +428,84 @@
                                 of <option>inherit</option>,
                                 <option>null</option>,
                                 <option>tty</option>,
+                                <option>journal</option>,
                                 <option>syslog</option>,
                                 <option>kmsg</option>,
-                                <option>journal</option>,
+                                <option>journal+console</option>,
                                 <option>syslog+console</option>,
-                                <option>kmsg+console</option>,
-                                <option>journal+console</option> or
-                                <option>socket</option>. If set to
-                                <option>inherit</option>, the file
-                                descriptor of standard input is
-                                duplicated for standard output. If set
-                                to <option>null</option>, standard
-                                output will be connected to
+                                <option>kmsg+console</option> or
+                                <option>socket</option>.</para>
+
+                                <para><option>inherit</option>
+                                duplicates the file descriptor of
+                                standard input for standard
+                                output.</para>
+
+                                <para><option>null</option> connects
+                                standard output to
                                 <filename>/dev/null</filename>,
                                 i.e. everything written to it will be
-                                lost. If set to <option>tty</option>,
-                                standard output will be connected to a
-                                tty (as configured via
+                                lost.</para>
+
+                                <para><option>tty</option> connects
+                                standard output to a tty (as
+                                configured via
                                 <varname>TTYPath=</varname>, see
                                 below). If the TTY is used for output
                                 only, the executed process will not
                                 become the controlling process of the
                                 terminal, and will not fail or wait
                                 for other processes to release the
-                                terminal. <option>syslog</option>
-                                connects standard output to the
-                                <citerefentry><refentrytitle>syslog</refentrytitle><manvolnum>3</manvolnum></citerefentry>
-                                system syslog
-                                service. <option>kmsg</option>
-                                connects it with the kernel log buffer
-                                which is accessible via
-                                <citerefentry><refentrytitle>dmesg</refentrytitle><manvolnum>1</manvolnum></citerefentry>. <option>journal</option>
-                                connects it with the journal which is
-                                accessible via
-                                <citerefentry><refentrytitle>journalctl</refentrytitle><manvolnum>1</manvolnum></citerefentry>
-                                (Note that everything that is written
-                                to syslog or kmsg is implicitly stored
-                                in the journal as well, those options
-                                are hence supersets of this
-                                one). <option>syslog+console</option>,
-                                <option>journal+console</option> and
-                                <option>kmsg+console</option> work
-                                similarly but copy the output to the
-                                system console as
-                                well. <option>socket</option> connects
-                                standard output to a socket from
-                                socket activation, semantics are
-                                similar to the respective option of
-                                <varname>StandardInput=</varname>.
-                                This setting defaults to the value set
-                                with
+                                terminal.</para>
+
+                                <para><option>journal</option>
+                                connects standard output with the
+                                journal which is accessible via
+                                <citerefentry><refentrytitle>journalctl</refentrytitle><manvolnum>1</manvolnum></citerefentry>.
+                                Note that everything that is written
+                                to syslog or kmsg (see below) is
+                                implicitly stored in the journal as
+                                well, the specific two options listed
+                                below are hence supersets of this
+                                one.</para>
+
+                                <para><option>syslog</option> connects
+                                standard output to the <citerefentry
+                                project='man-pages'><refentrytitle>syslog</refentrytitle><manvolnum>3</manvolnum></citerefentry>
+                                system syslog service, in addition to
+                                the journal. Note that the journal
+                                daemon is usually configured to
+                                forward everything it receives to
+                                syslog anyway, in which case this
+                                option is no different from
+                                <option>journal</option>.</para>
+
+                                <para><option>kmsg</option> connects
+                                standard output with the kernel log
+                                buffer which is accessible via
+                                <citerefentry
+                                project='man-pages'><refentrytitle>dmesg</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
+                                in addition to the journal. The
+                                journal daemon might be configured to
+                                send all logs to kmsg anyway, in which
+                                case this option is no different from
+                                <option>journal</option>.</para>
+
+                                <para><option>journal+console</option>,
+                                <option>syslog+console</option> and
+                                <option>kmsg+console</option> work in
+                                a similar way as the three options
+                                above but copy the output to the
+                                system console as well.</para>
+
+                                <para><option>socket</option> connects
+                                standard output to a socket acquired
+                                via socket activation. The semantics
+                                are similar to the same option of
+                                <varname>StandardInput=</varname>.</para>
+
+                                <para>This setting defaults to the
+                                value set with
                                 <option>DefaultStandardOutput=</option>
                                 in
                                 <citerefentry><refentrytitle>systemd-system.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
@@ -563,7 +606,7 @@
                                 <option>local5</option>,
                                 <option>local6</option> or
                                 <option>local7</option>. See
-                                <citerefentry><refentrytitle>syslog</refentrytitle><manvolnum>3</manvolnum></citerefentry>
+                                <citerefentry project='man-pages'><refentrytitle>syslog</refentrytitle><manvolnum>3</manvolnum></citerefentry>
                                 for details. This option is only
                                 useful when
                                 <varname>StandardOutput=</varname> or
@@ -585,7 +628,7 @@
                                 <option>notice</option>,
                                 <option>info</option>,
                                 <option>debug</option>. See
-                                <citerefentry><refentrytitle>syslog</refentrytitle><manvolnum>3</manvolnum></citerefentry>
+                                <citerefentry project='man-pages'><refentrytitle>syslog</refentrytitle><manvolnum>3</manvolnum></citerefentry>
                                 for details. This option is only
                                 useful when
                                 <varname>StandardOutput=</varname> or
@@ -682,33 +725,8 @@
                                 <varname>User=</varname> setting. If
                                 not set, no PAM session will be opened
                                 for the executed processes. See
-                                <citerefentry><refentrytitle>pam</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+                                <citerefentry project='man-pages'><refentrytitle>pam</refentrytitle><manvolnum>8</manvolnum></citerefentry>
                                 for details.</para></listitem>
-                        </varlistentry>
-
-                        <varlistentry>
-                                <term><varname>TCPWrapName=</varname></term>
-                                <listitem><para>If this is a
-                                socket-activated service, this sets the
-                                tcpwrap service name to check the
-                                permission for the current connection
-                                with. This is only useful in
-                                conjunction with socket-activated
-                                services, and stream sockets (TCP) in
-                                particular. It has no effect on other
-                                socket types (e.g. datagram/UDP) and
-                                on processes unrelated to socket-based
-                                activation. If the tcpwrap
-                                verification fails, daemon start-up
-                                will fail and the connection is
-                                terminated. See
-                                <citerefentry><refentrytitle>tcpd</refentrytitle><manvolnum>8</manvolnum></citerefentry>
-                                for details. Note that this option may
-                                be used to do access control checks
-                                only. Shell commands and commands
-                                described in
-                                <citerefentry><refentrytitle>hosts_options</refentrytitle><manvolnum>5</manvolnum></citerefentry>
-                                are not supported.</para></listitem>
                         </varlistentry>
 
                         <varlistentry>
@@ -718,7 +736,7 @@
                                 capabilities to include in the
                                 capability bounding set for the
                                 executed process. See
-                                <citerefentry><refentrytitle>capabilities</refentrytitle><manvolnum>7</manvolnum></citerefentry>
+                                <citerefentry project='man-pages'><refentrytitle>capabilities</refentrytitle><manvolnum>7</manvolnum></citerefentry>
                                 for details. Takes a whitespace-separated
                                 list of capability names as read by
                                 <citerefentry><refentrytitle>cap_from_name</refentrytitle><manvolnum>3</manvolnum></citerefentry>,
@@ -759,7 +777,7 @@
                                 <term><varname>SecureBits=</varname></term>
                                 <listitem><para>Controls the secure
                                 bits set for the executed process. See
-                                <citerefentry><refentrytitle>capabilities</refentrytitle><manvolnum>7</manvolnum></citerefentry>
+                                <citerefentry project='man-pages'><refentrytitle>capabilities</refentrytitle><manvolnum>7</manvolnum></citerefentry>
                                 for details. Takes a list of strings:
                                 <option>keep-caps</option>,
                                 <option>keep-caps-locked</option>,
@@ -777,14 +795,14 @@
                         <varlistentry>
                                 <term><varname>Capabilities=</varname></term>
                                 <listitem><para>Controls the
-                                <citerefentry><refentrytitle>capabilities</refentrytitle><manvolnum>7</manvolnum></citerefentry>
+                                <citerefentry project='man-pages'><refentrytitle>capabilities</refentrytitle><manvolnum>7</manvolnum></citerefentry>
                                 set for the executed process. Take a
                                 capability string describing the
                                 effective, permitted and inherited
                                 capability sets as documented in
                                 <citerefentry><refentrytitle>cap_from_text</refentrytitle><manvolnum>3</manvolnum></citerefentry>.
                                 Note that these capability sets are
-                                usually influenced by the capabilities
+                                usually influenced (and filtered) by the capabilities
                                 attached to the executed file. Due to
                                 that
                                 <varname>CapabilityBoundingSet=</varname>
@@ -797,8 +815,8 @@
                                 <term><varname>ReadOnlyDirectories=</varname></term>
                                 <term><varname>InaccessibleDirectories=</varname></term>
 
-                                <listitem><para>Sets up a new
-                                file system namespace for executed
+                                <listitem><para>Sets up a new file
+                                system namespace for executed
                                 processes. These options may be used
                                 to limit access a process might have
                                 to the main file system
@@ -819,16 +837,14 @@
                                 processes inside the namespace. Note
                                 that restricting access with these
                                 options does not extend to submounts
-                                of a directory. You must list
-                                submounts separately in these settings
-                                to ensure the same limited
-                                access. These options may be specified
+                                of a directory that are created later
+                                on. These options may be specified
                                 more than once in which case all
                                 directories listed will have limited
                                 access from within the namespace. If
                                 the empty string is assigned to this
-                                option, the specific list is reset, and
-                                all prior assignments have no
+                                option, the specific list is reset,
+                                and all prior assignments have no
                                 effect.</para>
                                 <para>Paths in
                                 <varname>ReadOnlyDirectories=</varname>
@@ -837,7 +853,15 @@
                                 may be prefixed with
                                 <literal>-</literal>, in which case
                                 they will be ignored when they do not
-                                exist.</para></listitem>
+                                exist. Note that using this
+                                setting will disconnect propagation of
+                                mounts from the service to the host
+                                (propagation in the opposite direction
+                                continues to work). This means that
+                                this setting may not be used for
+                                services which shall be able to
+                                install mount points in the main mount
+                                namespace.</para></listitem>
                         </varlistentry>
 
                         <varlistentry>
@@ -857,18 +881,61 @@
                                 processes via
                                 <filename>/tmp</filename> or
                                 <filename>/var/tmp</filename>
-                                impossible. All temporary data created
-                                by service will be removed after
-                                the service is stopped. Defaults to
-                                false. Note that it is possible to run
-                                two or more units within the same
-                                private <filename>/tmp</filename> and
+                                impossible. If this is enabled, all
+                                temporary files created by a service
+                                in these directories will be removed
+                                after the service is stopped. Defaults
+                                to false. It is possible to run two or
+                                more units within the same private
+                                <filename>/tmp</filename> and
                                 <filename>/var/tmp</filename>
                                 namespace by using the
                                 <varname>JoinsNamespaceOf=</varname>
                                 directive, see
                                 <citerefentry><refentrytitle>systemd.unit</refentrytitle><manvolnum>5</manvolnum></citerefentry>
-                                for details.</para></listitem>
+                                for details. Note that using this
+                                setting will disconnect propagation of
+                                mounts from the service to the host
+                                (propagation in the opposite direction
+                                continues to work). This means that
+                                this setting may not be used for
+                                services which shall be able to install
+                                mount points in the main mount
+                                namespace.</para></listitem>
+                        </varlistentry>
+
+                        <varlistentry>
+                                <term><varname>PrivateDevices=</varname></term>
+
+                                <listitem><para>Takes a boolean
+                                argument. If true, sets up a new /dev
+                                namespace for the executed processes
+                                and only adds API pseudo devices such
+                                as <filename>/dev/null</filename>,
+                                <filename>/dev/zero</filename> or
+                                <filename>/dev/random</filename> (as
+                                well as the pseudo TTY subsystem) to
+                                it, but no physical devices such as
+                                <filename>/dev/sda</filename>. This is
+                                useful to securely turn off physical
+                                device access by the executed
+                                process. Defaults to false. Enabling
+                                this option will also remove
+                                <constant>CAP_MKNOD</constant> from
+                                the capability bounding set for the
+                                unit (see above), and set
+                                <varname>DevicePolicy=closed</varname>
+                                (see
+                                <citerefentry><refentrytitle>systemd.resource-control</refentrytitle><manvolnum>5</manvolnum></citerefentry>
+                                for details). Note that using this
+                                setting will disconnect propagation of
+                                mounts from the service to the host
+                                (propagation in the opposite direction
+                                continues to work). This means that
+                                this setting may not be used for
+                                services which shall be able to
+                                install mount points in the main mount
+                                namespace.</para></listitem>
                         </varlistentry>
 
                         <varlistentry>
@@ -884,32 +951,84 @@
                                 available to the executed process.
                                 This is useful to securely turn off
                                 network access by the executed
-                                process. Defaults to false. Note that
-                                it is possible to run two or more
-                                units within the same private network
+                                process. Defaults to false. It is
+                                possible to run two or more units
+                                within the same private network
                                 namespace by using the
                                 <varname>JoinsNamespaceOf=</varname>
                                 directive, see
                                 <citerefentry><refentrytitle>systemd.unit</refentrytitle><manvolnum>5</manvolnum></citerefentry>
-                                for details.</para></listitem>
+                                for details. Note that this option
+                                will disconnect all socket families
+                                from the host, this includes
+                                AF_NETLINK and AF_UNIX. The latter has
+                                the effect that AF_UNIX sockets in the
+                                abstract socket namespace will become
+                                unavailable to the processes (however,
+                                those located in the file system will
+                                continue to be
+                                accessible).</para></listitem>
                         </varlistentry>
 
                         <varlistentry>
-                                <term><varname>PrivateDevices=</varname></term>
+                                <term><varname>ProtectSystem=</varname></term>
 
                                 <listitem><para>Takes a boolean
-                                argument. If true, sets up a new /dev
-                                namespace for the executed processes
-                                and only adds API pseudo devices such
-                                as <filename>/dev/null</filename>,
-                                <filename>/dev/zero</filename> or
-                                <filename>/dev/random</filename> to
-                                it, but no physical devices such as
-                                <filename>/dev/sda</filename>. This is
-                                useful to securely turn off physical
-                                device access by the executed
-                                process. Defaults to
-                                false.</para></listitem>
+                                argument or
+                                <literal>full</literal>. If true,
+                                mounts the <filename>/usr</filename>
+                                directory read-only for processes
+                                invoked by this unit. If set to
+                                <literal>full</literal>, the
+                                <filename>/etc</filename> directory is mounted
+                                read-only, too. This setting ensures
+                                that any modification of the vendor
+                                supplied operating system (and
+                                optionally its configuration) is
+                                prohibited for the service. It is
+                                recommended to enable this setting for
+                                all long-running services, unless they
+                                are involved with system updates or
+                                need to modify the operating system in
+                                other ways. Note however that
+                                processes retaining the CAP_SYS_ADMIN
+                                capability can undo the effect of this
+                                setting. This setting is hence
+                                particularly useful for daemons which
+                                have this capability removed, for
+                                example with
+                                <varname>CapabilityBoundingSet=</varname>. Defaults
+                                to off.</para></listitem>
+                        </varlistentry>
+
+                        <varlistentry>
+                                <term><varname>ProtectHome=</varname></term>
+
+                                <listitem><para>Takes a boolean
+                                argument or
+                                <literal>read-only</literal>. If true,
+                                the directories
+                                <filename>/home</filename> and
+                                <filename>/run/user</filename> are
+                                made inaccessible and empty for
+                                processes invoked by this unit. If set
+                                to <literal>read-only</literal>, the
+                                two directories are made read-only
+                                instead. It is recommended to enable
+                                this setting for all long-running
+                                services (in particular network-facing
+                                ones), to ensure they cannot get access
+                                to private user data, unless the
+                                services actually require access to
+                                the user's private data. Note however
+                                that processes retaining the
+                                CAP_SYS_ADMIN capability can undo the
+                                effect of this setting. This setting
+                                is hence particularly useful for
+                                daemons which have this capability
+                                removed, for example with
+                                <varname>CapabilityBoundingSet=</varname>. Defaults
+                                to off.</para></listitem>
                         </varlistentry>
 
                         <varlistentry>
@@ -920,13 +1039,45 @@
                                 <option>shared</option>,
                                 <option>slave</option> or
                                 <option>private</option>, which
-                                control whether the file system
-                                namespace set up for this unit's
-                                processes will receive or propagate
-                                new mounts. See
+                                control whether mounts in the file
+                                system namespace set up for this
+                                unit's processes will receive or
+                                propagate mounts or unmounts. See
                                 <citerefentry><refentrytitle>mount</refentrytitle><manvolnum>2</manvolnum></citerefentry>
-                                for details. Default to
-                                <option>shared</option>.</para></listitem>
+                                for details. Defaults to
+                                <option>shared</option>. Use
+                                <option>shared</option> to ensure that
+                                mounts and unmounts are propagated
+                                from the host to the container and
+                                vice versa. Use <option>slave</option>
+                                to run processes so that none of their
+                                mounts and unmounts will propagate to
+                                the host. Use <option>private</option>
+                                to also ensure that no mounts and
+                                unmounts from the host will propagate
+                                into the unit processes'
+                                namespace. Note that
+                                <option>slave</option> means that file
+                                systems mounted on the host might stay
+                                mounted continously in the unit's
+                                namespace, and thus keep the device
+                                busy. Note that the file system
+                                namespace related options
+                                (<varname>PrivateTmp=</varname>,
+                                <varname>PrivateDevices=</varname>,
+                                <varname>ProtectSystem=</varname>,
+                                <varname>ProtectHome=</varname>,
+                                <varname>ReadOnlyDirectories=</varname>,
+                                <varname>InaccessibleDirectories=</varname>
+                                and
+                                <varname>ReadWriteDirectories=</varname>)
+                                require that mount and unmount
+                                propagation from the unit's file
+                                system namespace is disabled, and
+                                hence downgrade
+                                <option>shared</option> to
+                                <option>slave</option>.
+                                </para></listitem>
                         </varlistentry>
 
                         <varlistentry>
@@ -970,7 +1121,7 @@
                         <varlistentry>
                                 <term><varname>AppArmorProfile=</varname></term>
 
-                                <listitem><para>Take a profile name as argument.
+                                <listitem><para>Takes a profile name as argument.
                                 The process executed by the unit will switch to
                                 this profile when started. Profiles must already
                                 be loaded in the kernel, or the unit will fail.
@@ -978,6 +1129,35 @@
                                 enabled. If prefixed by <literal>-</literal>, all errors
                                 will be ignored.
                                 </para></listitem>
+                        </varlistentry>
+
+                        <varlistentry>
+                                <term><varname>SmackProcessLabel=</varname></term>
+
+                                <listitem><para>Takes a
+                                <option>SMACK64</option> security
+                                label as argument. The process
+                                executed by the unit will be started
+                                under this label and SMACK will decide
+                                whether the processes is allowed to
+                                run or not based on it. The process
+                                will continue to run under the label
+                                specified here unless the executable
+                                has its own
+                                <option>SMACK64EXEC</option> label, in
+                                which case the process will transition
+                                to run under that label. When not
+                                specified, the label that systemd is
+                                running under is used. This directive
+                                is ignored if SMACK is
+                                disabled.</para>
+
+                                <para>The value may be prefixed by
+                                <literal>-</literal>, in which case
+                                all errors will be ignored. An empty
+                                value may be specified to unset
+                                previous assignments.</para>
+                                </listitem>
                         </varlistentry>
 
                         <varlistentry>
@@ -1010,8 +1190,8 @@
                         <varlistentry>
                                 <term><varname>SystemCallFilter=</varname></term>
 
-                                <listitem><para>Takes a space-separated
-                                list of system call
+                                <listitem><para>Takes a
+                                space-separated list of system call
                                 names. If this setting is used, all
                                 system calls executed by the unit
                                 processes except for the listed ones
@@ -1023,12 +1203,13 @@
                                 the effect is inverted: only the
                                 listed system calls will result in
                                 immediate process termination
-                                (blacklisting). If this option is used,
+                                (blacklisting). If running in user
+                                mode and this option is used,
                                 <varname>NoNewPrivileges=yes</varname>
-                                is implied. This feature makes use of
-                                the Secure Computing Mode 2 interfaces
-                                of the kernel ('seccomp filtering')
-                                and is useful for enforcing a minimal
+                                is implied. This feature makes use of the
+                                Secure Computing Mode 2 interfaces of
+                                the kernel ('seccomp filtering') and
+                                is useful for enforcing a minimal
                                 sandboxing environment. Note that the
                                 <function>execve</function>,
                                 <function>rt_sigreturn</function>,
@@ -1096,29 +1277,84 @@
                                 <constant>x86</constant>,
                                 <constant>x86-64</constant>,
                                 <constant>x32</constant>,
-                                <constant>arm</constant> as well as the
-                                special identifier
-                                <constant>native</constant>. Only system
-                                calls of the specified architectures
-                                will be permitted to processes of this
-                                unit. This is an effective way to
-                                disable compatibility with non-native
-                                architectures for processes, for
-                                example to prohibit execution of
-                                32-bit x86 binaries on 64-bit x86-64
-                                systems. The special
+                                <constant>arm</constant> as well as
+                                the special identifier
+                                <constant>native</constant>. Only
+                                system calls of the specified
+                                architectures will be permitted to
+                                processes of this unit. This is an
+                                effective way to disable compatibility
+                                with non-native architectures for
+                                processes, for example to prohibit
+                                execution of 32-bit x86 binaries on
+                                64-bit x86-64 systems. The special
                                 <constant>native</constant> identifier
                                 implicitly maps to the native
                                 architecture of the system (or more
                                 strictly: to the architecture the
-                                system manager is compiled for). Note
-                                that setting this option to a
-                                non-empty list implies that
-                                <constant>native</constant> is included
-                                too. By default, this option is set to
-                                the empty list, i.e. no architecture
-                                system call filtering is
+                                system manager is compiled for). If
+                                running in user mode and this option
+                                is used,
+                                <varname>NoNewPrivileges=yes</varname>
+                                is implied. Note that setting this
+                                option to a non-empty list implies
+                                that <constant>native</constant> is
+                                included too. By default, this option
+                                is set to the empty list, i.e. no
+                                architecture system call filtering is
                                 applied.</para></listitem>
+                        </varlistentry>
+
+                        <varlistentry>
+                                <term><varname>RestrictAddressFamilies=</varname></term>
+
+                                <listitem><para>Restricts the set of
+                                socket address families accessible to
+                                the processes of this unit. Takes a
+                                space-separated list of address family
+                                names to whitelist, such as
+                                <constant>AF_UNIX</constant>,
+                                <constant>AF_INET</constant> or
+                                <constant>AF_INET6</constant>. When
+                                prefixed with <constant>~</constant>
+                                the listed address families will be
+                                applied as blacklist, otherwise as
+                                whitelist. Note that this restricts
+                                access to the
+                                <citerefentry><refentrytitle>socket</refentrytitle><manvolnum>2</manvolnum></citerefentry>
+                                system call only. Sockets passed into
+                                the process by other means (for
+                                example, by using socket activation
+                                with socket units, see
+                                <citerefentry><refentrytitle>systemd.socket</refentrytitle><manvolnum>5</manvolnum></citerefentry>)
+                                are unaffected. Also, sockets created
+                                with <function>socketpair()</function>
+                                (which creates connected AF_UNIX
+                                sockets only) are unaffected. Note
+                                that this option has no effect on
+                                32-bit x86 and is ignored (but works
+                                correctly on x86-64). If running in user
+                                mode and this option is used,
+                                <varname>NoNewPrivileges=yes</varname>
+                                is implied. By default, no
+                                restriction applies, all address
+                                families are accessible to
+                                processes. If assigned the empty
+                                string, any previous list changes are
+                                undone.</para>
+
+                                <para>Use this option to limit
+                                exposure of processes to remote
+                                systems, in particular via exotic
+                                network protocols. Note that in most
+                                cases, the local
+                                <constant>AF_UNIX</constant> address
+                                family should be included in the
+                                configured whitelist as it is
+                                frequently used for local
+                                communication, including for
+                                <citerefentry><refentrytitle>syslog</refentrytitle><manvolnum>2</manvolnum></citerefentry>
+                                logging.</para></listitem>
                         </varlistentry>
 
                         <varlistentry>
@@ -1131,13 +1367,54 @@
                                 processes. Takes one of
                                 <constant>x86</constant> and
                                 <constant>x86-64</constant>. This is
-                                useful when running 32bit services on
-                                a 64bit host system. If not specified
+                                useful when running 32-bit services on
+                                a 64-bit host system. If not specified,
                                 the personality is left unmodified and
                                 thus reflects the personality of the
                                 host system's
                                 kernel.</para></listitem>
                         </varlistentry>
+
+                        <varlistentry>
+                                <term><varname>RuntimeDirectory=</varname></term>
+                                <term><varname>RuntimeDirectoryMode=</varname></term>
+
+                                <listitem><para>Takes a list of
+                                directory names. If set, one or more
+                                directories by the specified names
+                                will be created below
+                                <filename>/run</filename> (for system
+                                services) or below
+                                <varname>$XDG_RUNTIME_DIR</varname>
+                                (for user services) when the unit is
+                                started, and removed when the unit is
+                                stopped. The directories will have the
+                                access mode specified in
+                                <varname>RuntimeDirectoryMode=</varname>,
+                                and will be owned by the user and
+                                group specified in
+                                <varname>User=</varname> and
+                                <varname>Group=</varname>. Use this to
+                                manage one or more runtime directories
+                                of the unit and bind their lifetime to
+                                the daemon runtime. The specified
+                                directory names must be relative, and
+                                may not include a
+                                <literal>/</literal>, i.e. must refer
+                                to simple directories to create or
+                                remove. This is particularly useful
+                                for unprivileged daemons that cannot
+                                create runtime directories in
+                                <filename>/run</filename> due to lack
+                                of privileges, and to make sure the
+                                runtime directory is cleaned up
+                                automatically after use. For runtime
+                                directories that require more complex
+                                or different configuration or lifetime
+                                guarantees, please consider using
+                                <citerefentry><refentrytitle>tmpfiles.d</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para></listitem>
+                        </varlistentry>
+
                 </variablelist>
         </refsect1>
 
@@ -1262,7 +1539,7 @@
                                 or
                                 <varname>StandardError=tty</varname>).
                                 See
-                                <citerefentry><refentrytitle>termcap</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
+                                <citerefentry project='man-pages'><refentrytitle>termcap</refentrytitle><manvolnum>5</manvolnum></citerefentry>.
                                 </para></listitem>
                         </varlistentry>
                 </variablelist>
@@ -1278,7 +1555,7 @@
                 <varname>systemd.setenv=</varname> (see
                 <citerefentry><refentrytitle>systemd</refentrytitle><manvolnum>1</manvolnum></citerefentry>). Additional
                 variables may also be set through PAM,
-                c.f. <citerefentry><refentrytitle>pam_env</refentrytitle><manvolnum>8</manvolnum></citerefentry>.</para>
+                cf. <citerefentry project='man-pages'><refentrytitle>pam_env</refentrytitle><manvolnum>8</manvolnum></citerefentry>.</para>
         </refsect1>
 
         <refsect1>
@@ -1295,7 +1572,8 @@
                           <citerefentry><refentrytitle>systemd.kill</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
                           <citerefentry><refentrytitle>systemd.resource-control</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
                           <citerefentry><refentrytitle>systemd.directives</refentrytitle><manvolnum>7</manvolnum></citerefentry>,
-                          <citerefentry><refentrytitle>exec</refentrytitle><manvolnum>3</manvolnum></citerefentry>
+                          <citerefentry><refentrytitle>tmpfiles.d</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
+                          <citerefentry project='man-pages'><refentrytitle>exec</refentrytitle><manvolnum>3</manvolnum></citerefentry>
                   </para>
         </refsect1>
 

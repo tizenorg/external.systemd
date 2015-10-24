@@ -43,14 +43,14 @@
 #include "def.h"
 
 static const char *arg_icon = NULL;
+static const char *arg_id = NULL;
 static const char *arg_message = NULL;
 static bool arg_use_tty = true;
 static usec_t arg_timeout = DEFAULT_TIMEOUT_USEC;
 static bool arg_accept_cached = false;
 static bool arg_multiple = false;
 
-static int help(void) {
-
+static void help(void) {
         printf("%s [OPTIONS...] MESSAGE\n\n"
                "Query the user for a system passphrase, via the TTY or an UI agent.\n\n"
                "  -h --help          Show this help\n"
@@ -58,10 +58,9 @@ static int help(void) {
                "     --timeout=SEC   Timeout in sec\n"
                "     --no-tty        Ask question via agent even on TTY\n"
                "     --accept-cached Accept cached passwords\n"
-               "     --multiple      List multiple passwords if available\n",
-               program_invocation_short_name);
-
-        return 0;
+               "     --multiple      List multiple passwords if available\n"
+               "     --id=ID         Query identifier (e.g. cryptsetup:/dev/sda5)\n"
+               , program_invocation_short_name);
 }
 
 static int parse_argv(int argc, char *argv[]) {
@@ -71,7 +70,8 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_TIMEOUT,
                 ARG_NO_TTY,
                 ARG_ACCEPT_CACHED,
-                ARG_MULTIPLE
+                ARG_MULTIPLE,
+                ARG_ID
         };
 
         static const struct option options[] = {
@@ -81,6 +81,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "no-tty",        no_argument,       NULL, ARG_NO_TTY        },
                 { "accept-cached", no_argument,       NULL, ARG_ACCEPT_CACHED },
                 { "multiple",      no_argument,       NULL, ARG_MULTIPLE      },
+                { "id",            required_argument, NULL, ARG_ID            },
                 {}
         };
 
@@ -89,12 +90,13 @@ static int parse_argv(int argc, char *argv[]) {
         assert(argc >= 0);
         assert(argv);
 
-        while ((c = getopt_long(argc, argv, "h", options, NULL)) >= 0) {
+        while ((c = getopt_long(argc, argv, "h", options, NULL)) >= 0)
 
                 switch (c) {
 
                 case 'h':
-                        return help();
+                        help();
+                        return 0;
 
                 case ARG_ICON:
                         arg_icon = optarg;
@@ -119,16 +121,19 @@ static int parse_argv(int argc, char *argv[]) {
                         arg_multiple = true;
                         break;
 
+                case ARG_ID:
+                        arg_id = optarg;
+                        break;
+
                 case '?':
                         return -EINVAL;
 
                 default:
                         assert_not_reached("Unhandled option");
                 }
-        }
 
-        if (optind != argc-1) {
-                help();
+        if (optind != argc - 1) {
+                log_error("%s: required argument missing.", program_invocation_short_name);
                 return -EINVAL;
         }
 
@@ -143,7 +148,8 @@ int main(int argc, char *argv[]) {
         log_parse_environment();
         log_open();
 
-        if ((r = parse_argv(argc, argv)) <= 0)
+        r = parse_argv(argc, argv);
+        if (r <= 0)
                 goto finish;
 
         if (arg_timeout > 0)
@@ -162,7 +168,7 @@ int main(int argc, char *argv[]) {
         } else {
                 char **l;
 
-                if ((r = ask_password_agent(arg_message, arg_icon, timeout, arg_accept_cached, &l)) >= 0) {
+                if ((r = ask_password_agent(arg_message, arg_icon, arg_id, timeout, arg_accept_cached, &l)) >= 0) {
                         char **p;
 
                         STRV_FOREACH(p, l) {

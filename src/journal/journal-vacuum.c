@@ -24,10 +24,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
-
-#ifdef HAVE_XATTR
-#include <attr/xattr.h>
-#endif
+#include <sys/xattr.h>
 
 #include "journal-def.h"
 #include "journal-file.h"
@@ -79,11 +76,8 @@ static void patch_realtime(
                 unsigned long long *realtime) {
 
         usec_t x;
-
-#ifdef HAVE_XATTR
         uint64_t crtime;
         _cleanup_free_ const char *path = NULL;
-#endif
 
         /* The timestamp was determined by the file name, but let's
          * see if the file might actually be older than the file name
@@ -95,18 +89,17 @@ static void patch_realtime(
         assert(realtime);
 
         x = timespec_load(&st->st_ctim);
-        if (x > 0 && x != (usec_t) -1 && x < *realtime)
+        if (x > 0 && x != USEC_INFINITY && x < *realtime)
                 *realtime = x;
 
         x = timespec_load(&st->st_atim);
-        if (x > 0 && x != (usec_t) -1 && x < *realtime)
+        if (x > 0 && x != USEC_INFINITY && x < *realtime)
                 *realtime = x;
 
         x = timespec_load(&st->st_mtim);
-        if (x > 0 && x != (usec_t) -1 && x < *realtime)
+        if (x > 0 && x != USEC_INFINITY && x < *realtime)
                 *realtime = x;
 
-#ifdef HAVE_XATTR
         /* Let's read the original creation time, if possible. Ideally
          * we'd just query the creation time the FS might provide, but
          * unfortunately there's currently no sane API to query
@@ -125,7 +118,6 @@ static void patch_realtime(
                 if (crtime > 0 && crtime != (uint64_t) -1 && crtime < *realtime)
                         *realtime = crtime;
         }
-#endif
 }
 
 static int journal_file_empty(int dir_fd, const char *name) {
@@ -300,13 +292,6 @@ int journal_directory_vacuum(
         qsort_safe(list, n_list, sizeof(struct vacuum_info), vacuum_compare);
 
         for (i = 0; i < n_list; i++) {
-                struct statvfs ss;
-
-                if (fstatvfs(dirfd(d), &ss) < 0) {
-                        r = -errno;
-                        goto finish;
-                }
-
                 if ((max_retention_usec <= 0 || list[i].realtime >= retention_limit) &&
                     (max_use <= 0 || sum <= max_use))
                         break;

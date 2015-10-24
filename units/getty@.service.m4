@@ -39,6 +39,9 @@ TTYVTDisallocate=yes
 KillMode=process
 IgnoreSIGPIPE=no
 SendSIGHUP=yes
+m4_ifdef(`DEFAULT_PROCESS_LABEL',
+SmackProcessLabel=systemd
+)m4_dnl
 
 # Unset locale for the console getty since the console has problems
 # displaying some internationalized messages.
@@ -46,3 +49,4 @@ Environment=LANG= LANGUAGE= LC_CTYPE= LC_NUMERIC= LC_TIME= LC_COLLATE= LC_MONETA
 
 [Install]
 WantedBy=getty.target
+DefaultInstance=tty1

@@ -27,8 +27,12 @@
 #include "utf8.h"
 #include "ctype.h"
 
-int write_string_to_file(FILE *f, const char *line) {
+int write_string_stream(FILE *f, const char *line) {
+        assert(f);
+        assert(line);
+
         errno = 0;
+
         fputs(line, f);
         if (!endswith(line, "\n"))
                 fputc('\n', f);
@@ -51,7 +55,29 @@ int write_string_file(const char *fn, const char *line) {
         if (!f)
                 return -errno;
 
-        return write_string_to_file(f, line);
+        return write_string_stream(f, line);
+}
+
+int write_string_file_no_create(const char *fn, const char *line) {
+        _cleanup_fclose_ FILE *f = NULL;
+        int fd;
+
+        assert(fn);
+        assert(line);
+
+        /* We manually build our own version of fopen(..., "we") that
+         * without O_CREAT */
+        fd = open(fn, O_WRONLY|O_CLOEXEC|O_NOCTTY);
+        if (fd < 0)
+                return -errno;
+
+        f = fdopen(fd, "we");
+        if (!f) {
+                safe_close(fd);
+                return -errno;
+        }
+
+        return write_string_stream(f, line);
 }
 
 int write_string_file_atomic(const char *fn, const char *line) {
@@ -189,29 +215,33 @@ ssize_t sendfile_full(int out_fd, const char *fn) {
         return (ssize_t) l;
 }
 
-int read_full_file(const char *fn, char **contents, size_t *size) {
-        _cleanup_fclose_ FILE *f = NULL;
+int read_full_stream(FILE *f, char **contents, size_t *size) {
         size_t n, l;
         _cleanup_free_ char *buf = NULL;
         struct stat st;
 
-        assert(fn);
+        assert(f);
         assert(contents);
-
-        f = fopen(fn, "re");
-        if (!f)
-                return -errno;
 
         if (fstat(fileno(f), &st) < 0)
                 return -errno;
 
-        /* Safety check */
-        if (st.st_size > 4*1024*1024)
-                return -E2BIG;
+        n = LINE_MAX;
 
-        n = st.st_size > 0 ? st.st_size : LINE_MAX;
+        if (S_ISREG(st.st_mode)) {
+
+                /* Safety check */
+                if (st.st_size > 4*1024*1024)
+                        return -E2BIG;
+
+                /* Start with the right file size, but be prepared for
+                 * files from /proc which generally report a file size
+                 * of 0 */
+                if (st.st_size > 0)
+                        n = st.st_size;
+        }
+
         l = 0;
-
         for (;;) {
                 char *t;
                 size_t k;
@@ -248,7 +278,21 @@ int read_full_file(const char *fn, char **contents, size_t *size) {
         return 0;
 }
 
+int read_full_file(const char *fn, char **contents, size_t *size) {
+        _cleanup_fclose_ FILE *f = NULL;
+
+        assert(fn);
+        assert(contents);
+
+        f = fopen(fn, "re");
+        if (!f)
+                return -errno;
+
+        return read_full_stream(f, contents, size);
+}
+
 static int parse_env_file_internal(
+                FILE *f,
                 const char *fname,
                 const char *newline,
                 int (*push) (const char *filename, unsigned line,
@@ -275,10 +319,12 @@ static int parse_env_file_internal(
                 COMMENT_ESCAPE
         } state = PRE_KEY;
 
-        assert(fname);
         assert(newline);
 
-        r = read_full_file(fname, &contents, NULL);
+        if (f)
+                r = read_full_stream(f, &contents, NULL);
+        else
+                r = read_full_file(fname, &contents, NULL);
         if (r < 0)
                 return r;
 
@@ -294,7 +340,7 @@ static int parse_env_file_internal(
                                 state = KEY;
                                 last_key_whitespace = (size_t) -1;
 
-                                if (!greedy_realloc((void**) &key, &key_alloc, n_key+2)) {
+                                if (!GREEDY_REALLOC(key, key_alloc, n_key+2)) {
                                         r = -ENOMEM;
                                         goto fail;
                                 }
@@ -317,7 +363,7 @@ static int parse_env_file_internal(
                                 else if (last_key_whitespace == (size_t) -1)
                                          last_key_whitespace = n_key;
 
-                                if (!greedy_realloc((void**) &key, &key_alloc, n_key+2)) {
+                                if (!GREEDY_REALLOC(key, key_alloc, n_key+2)) {
                                         r = -ENOMEM;
                                         goto fail;
                                 }
@@ -357,7 +403,7 @@ static int parse_env_file_internal(
                         else if (!strchr(WHITESPACE, c)) {
                                 state = VALUE;
 
-                                if (!greedy_realloc((void**) &value, &value_alloc, n_value+2)) {
+                                if (!GREEDY_REALLOC(value, value_alloc, n_value+2)) {
                                         r = -ENOMEM;
                                         goto fail;
                                 }
@@ -402,7 +448,7 @@ static int parse_env_file_internal(
                                 else if (last_value_whitespace == (size_t) -1)
                                         last_value_whitespace = n_value;
 
-                                if (!greedy_realloc((void**) &value, &value_alloc, n_value+2)) {
+                                if (!GREEDY_REALLOC(value, value_alloc, n_value+2)) {
                                         r = -ENOMEM;
                                         goto fail;
                                 }
@@ -417,7 +463,7 @@ static int parse_env_file_internal(
 
                         if (!strchr(newline, c)) {
                                 /* Escaped newlines we eat up entirely */
-                                if (!greedy_realloc((void**) &value, &value_alloc, n_value+2)) {
+                                if (!GREEDY_REALLOC(value, value_alloc, n_value+2)) {
                                         r = -ENOMEM;
                                         goto fail;
                                 }
@@ -432,7 +478,7 @@ static int parse_env_file_internal(
                         else if (c == '\\')
                                 state = SINGLE_QUOTE_VALUE_ESCAPE;
                         else {
-                                if (!greedy_realloc((void**) &value, &value_alloc, n_value+2)) {
+                                if (!GREEDY_REALLOC(value, value_alloc, n_value+2)) {
                                         r = -ENOMEM;
                                         goto fail;
                                 }
@@ -446,7 +492,7 @@ static int parse_env_file_internal(
                         state = SINGLE_QUOTE_VALUE;
 
                         if (!strchr(newline, c)) {
-                                if (!greedy_realloc((void**) &value, &value_alloc, n_value+2)) {
+                                if (!GREEDY_REALLOC(value, value_alloc, n_value+2)) {
                                         r = -ENOMEM;
                                         goto fail;
                                 }
@@ -461,7 +507,7 @@ static int parse_env_file_internal(
                         else if (c == '\\')
                                 state = DOUBLE_QUOTE_VALUE_ESCAPE;
                         else {
-                                if (!greedy_realloc((void**) &value, &value_alloc, n_value+2)) {
+                                if (!GREEDY_REALLOC(value, value_alloc, n_value+2)) {
                                         r = -ENOMEM;
                                         goto fail;
                                 }
@@ -475,7 +521,7 @@ static int parse_env_file_internal(
                         state = DOUBLE_QUOTE_VALUE;
 
                         if (!strchr(newline, c)) {
-                                if (!greedy_realloc((void**) &value, &value_alloc, n_value+2)) {
+                                if (!GREEDY_REALLOC(value, value_alloc, n_value+2)) {
                                         r = -ENOMEM;
                                         goto fail;
                                 }
@@ -532,25 +578,27 @@ fail:
         return r;
 }
 
-static int parse_env_file_push(const char *filename, unsigned line,
-                               const char *key, char *value, void *userdata) {
+static int parse_env_file_push(
+                const char *filename, unsigned line,
+                const char *key, char *value,
+                void *userdata) {
 
         const char *k;
         va_list aq, *ap = userdata;
 
         if (!utf8_is_valid(key)) {
-                _cleanup_free_ char *p = utf8_escape_invalid(key);
+                _cleanup_free_ char *p;
 
-                log_error("%s:%u: invalid UTF-8 in key '%s', ignoring.",
-                          filename, line, p);
+                p = utf8_escape_invalid(key);
+                log_error("%s:%u: invalid UTF-8 in key '%s', ignoring.", strna(filename), line, p);
                 return -EINVAL;
         }
 
         if (value && !utf8_is_valid(value)) {
-                _cleanup_free_ char *p = utf8_escape_invalid(value);
+                _cleanup_free_ char *p;
 
-                log_error("%s:%u: invalid UTF-8 value for key %s: '%s', ignoring.",
-                          filename, line, key, p);
+                p = utf8_escape_invalid(value);
+                log_error("%s:%u: invalid UTF-8 value for key %s: '%s', ignoring.", strna(filename), line, key, p);
                 return -EINVAL;
         }
 
@@ -571,6 +619,7 @@ static int parse_env_file_push(const char *filename, unsigned line,
 
         va_end(aq);
         free(value);
+
         return 0;
 }
 
@@ -585,28 +634,31 @@ int parse_env_file(
                 newline = NEWLINE;
 
         va_start(ap, newline);
-        r = parse_env_file_internal(fname, newline, parse_env_file_push, &ap);
+        r = parse_env_file_internal(NULL, fname, newline, parse_env_file_push, &ap);
         va_end(ap);
 
         return r;
 }
 
-static int load_env_file_push(const char *filename, unsigned line,
-                              const char *key, char *value, void *userdata) {
+static int load_env_file_push(
+                const char *filename, unsigned line,
+                const char *key, char *value,
+                void *userdata) {
         char ***m = userdata;
         char *p;
         int r;
 
         if (!utf8_is_valid(key)) {
-                log_error("%s:%u: invalid UTF-8 for key '%s', ignoring.",
-                          filename, line, key);
+                _cleanup_free_ char *t = utf8_escape_invalid(key);
+
+                log_error("%s:%u: invalid UTF-8 for key '%s', ignoring.", strna(filename), line, t);
                 return -EINVAL;
         }
 
         if (value && !utf8_is_valid(value)) {
-                /* FIXME: filter UTF-8 */
-                log_error("%s:%u: invalid UTF-8 value for key %s: '%s', ignoring.",
-                          filename, line, key, value);
+                _cleanup_free_ char *t = utf8_escape_invalid(value);
+
+                log_error("%s:%u: invalid UTF-8 value for key %s: '%s', ignoring.", strna(filename), line, key, t);
                 return -EINVAL;
         }
 
@@ -614,24 +666,77 @@ static int load_env_file_push(const char *filename, unsigned line,
         if (!p)
                 return -ENOMEM;
 
-        r = strv_push(m, p);
-        if (r < 0) {
-                free(p);
+        r = strv_consume(m, p);
+        if (r < 0)
                 return r;
-        }
 
         free(value);
         return 0;
 }
 
-int load_env_file(const char *fname, const char *newline, char ***rl) {
+int load_env_file(FILE *f, const char *fname, const char *newline, char ***rl) {
         char **m = NULL;
         int r;
 
         if (!newline)
                 newline = NEWLINE;
 
-        r = parse_env_file_internal(fname, newline, load_env_file_push, &m);
+        r = parse_env_file_internal(f, fname, newline, load_env_file_push, &m);
+        if (r < 0) {
+                strv_free(m);
+                return r;
+        }
+
+        *rl = m;
+        return 0;
+}
+
+static int load_env_file_push_pairs(
+                const char *filename, unsigned line,
+                const char *key, char *value,
+                void *userdata) {
+        char ***m = userdata;
+        int r;
+
+        if (!utf8_is_valid(key)) {
+                _cleanup_free_ char *t = utf8_escape_invalid(key);
+
+                log_error("%s:%u: invalid UTF-8 for key '%s', ignoring.", strna(filename), line, t);
+                return -EINVAL;
+        }
+
+        if (value && !utf8_is_valid(value)) {
+                _cleanup_free_ char *t = utf8_escape_invalid(value);
+
+                log_error("%s:%u: invalid UTF-8 value for key %s: '%s', ignoring.", strna(filename), line, key, t);
+                return -EINVAL;
+        }
+
+        r = strv_extend(m, key);
+        if (r < 0)
+                return -ENOMEM;
+
+        if (!value) {
+                r = strv_extend(m, "");
+                if (r < 0)
+                        return -ENOMEM;
+        } else {
+                r = strv_push(m, value);
+                if (r < 0)
+                        return r;
+        }
+
+        return 0;
+}
+
+int load_env_file_pairs(FILE *f, const char *fname, const char *newline, char ***rl) {
+        char **m = NULL;
+        int r;
+
+        if (!newline)
+                newline = NEWLINE;
+
+        r = parse_env_file_internal(f, fname, newline, load_env_file_push_pairs, &m);
         if (r < 0) {
                 strv_free(m);
                 return r;
@@ -655,11 +760,11 @@ static void write_env_var(FILE *f, const char *v) {
         p++;
         fwrite(v, 1, p-v, f);
 
-        if (string_has_cc(p) || chars_intersect(p, WHITESPACE "\'\"\\`$")) {
+        if (string_has_cc(p, NULL) || chars_intersect(p, WHITESPACE SHELL_NEED_QUOTES)) {
                 fputc('\"', f);
 
                 for (; *p; p++) {
-                        if (strchr("\'\"\\`$", *p))
+                        if (strchr(SHELL_NEED_ESCAPE, *p))
                                 fputc('\\', f);
 
                         fputc(*p, f);
@@ -673,10 +778,12 @@ static void write_env_var(FILE *f, const char *v) {
 }
 
 int write_env_file(const char *fname, char **l) {
-        char **i;
-        _cleanup_free_ char *p = NULL;
         _cleanup_fclose_ FILE *f = NULL;
+        _cleanup_free_ char *p = NULL;
+        char **i;
         int r;
+
+        assert(fname);
 
         r = fopen_temporary(fname, &f, &p);
         if (r < 0)
@@ -684,30 +791,24 @@ int write_env_file(const char *fname, char **l) {
 
         fchmod_umask(fileno(f), 0644);
 
-        errno = 0;
         STRV_FOREACH(i, l)
                 write_env_var(f, *i);
 
-        fflush(f);
+        r = fflush_and_check(f);
+        if (r >= 0) {
+                if (rename(p, fname) >= 0)
+                        return 0;
 
-        if (ferror(f))
-                r = errno ? -errno : -EIO;
-        else {
-                if (rename(p, fname) < 0)
-                        r = -errno;
-                else
-                        r = 0;
+                r = -errno;
         }
 
-        if (r < 0)
-                unlink(p);
-
+        unlink(p);
         return r;
 }
 
 int executable_is_script(const char *path, char **interpreter) {
         int r;
-        char _cleanup_free_ *line = NULL;
+        _cleanup_free_ char *line = NULL;
         int len;
         char *ans;
 

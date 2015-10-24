@@ -101,7 +101,7 @@ int main(int argc, char *argv[]) {
         assert_se(sd_bus_error_has_name(&error, SD_BUS_ERROR_SERVICE_UNKNOWN));
         assert_se(r == -EHOSTUNREACH);
 
-        r = sd_bus_add_match(b, "interface='waldo.com',member='Piep'", NULL, NULL);
+        r = sd_bus_add_match(b, NULL, "interface='waldo.com',member='Piep'", NULL, NULL);
         assert_se(r >= 0);
 
         r = sd_bus_emit_signal(a, "/foo/bar/waldo", "waldo.com", "Piep", "sss", "I am a string", "/this/is/a/path", "and.this.a.domain.name");
@@ -137,14 +137,12 @@ int main(int argc, char *argv[]) {
 
         assert_se(write(pipe_fds[1], "x", 1) == 1);
 
-        close_nointr_nofail(pipe_fds[1]);
-        pipe_fds[1] = -1;
+        pipe_fds[1] = safe_close(pipe_fds[1]);
 
         r = sd_bus_message_append(m, "h", pipe_fds[0]);
         assert_se(r >= 0);
 
-        close_nointr_nofail(pipe_fds[0]);
-        pipe_fds[0] = -1;
+        pipe_fds[0] = safe_close(pipe_fds[0]);
 
         r = sd_bus_send(b, m, NULL);
         assert_se(r >= 0);

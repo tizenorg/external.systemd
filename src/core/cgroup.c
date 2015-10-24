@@ -20,11 +20,14 @@
 ***/
 
 #include <fcntl.h>
+#include <fnmatch.h>
 
 #include "path-util.h"
 #include "special.h"
 #include "cgroup-util.h"
 #include "cgroup.h"
+
+#define CGROUP_CPU_QUOTA_PERIOD_USEC ((usec_t) 100 * USEC_PER_MSEC)
 
 void cgroup_context_init(CGroupContext *c) {
         assert(c);
@@ -32,9 +35,13 @@ void cgroup_context_init(CGroupContext *c) {
         /* Initialize everything to the kernel defaults, assuming the
          * structure is preinitialized to 0 */
 
-        c->cpu_shares = 1024;
+        c->cpu_shares = (unsigned long) -1;
+        c->startup_cpu_shares = (unsigned long) -1;
         c->memory_limit = (uint64_t) -1;
-        c->blockio_weight = 1000;
+        c->blockio_weight = (unsigned long) -1;
+        c->startup_blockio_weight = (unsigned long) -1;
+
+        c->cpu_quota_per_sec_usec = USEC_INFINITY;
 }
 
 void cgroup_context_free_device_allow(CGroupContext *c, CGroupDeviceAllow *a) {
@@ -81,6 +88,7 @@ void cgroup_context_dump(CGroupContext *c, FILE* f, const char *prefix) {
         CGroupBlockIODeviceBandwidth *b;
         CGroupBlockIODeviceWeight *w;
         CGroupDeviceAllow *a;
+        char u[FORMAT_TIMESPAN_MAX];
 
         assert(c);
         assert(f);
@@ -92,14 +100,20 @@ void cgroup_context_dump(CGroupContext *c, FILE* f, const char *prefix) {
                 "%sBlockIOAccounting=%s\n"
                 "%sMemoryAccounting=%s\n"
                 "%sCPUShares=%lu\n"
+                "%sStartupCPUShares=%lu\n"
+                "%sCPUQuotaPerSecSec=%s\n"
                 "%sBlockIOWeight=%lu\n"
+                "%sStartupBlockIOWeight=%lu\n"
                 "%sMemoryLimit=%" PRIu64 "\n"
                 "%sDevicePolicy=%s\n",
                 prefix, yes_no(c->cpu_accounting),
                 prefix, yes_no(c->blockio_accounting),
                 prefix, yes_no(c->memory_accounting),
                 prefix, c->cpu_shares,
+                prefix, c->startup_cpu_shares,
+                prefix, strna(format_timespan(u, sizeof(u), c->cpu_quota_per_sec_usec, 1)),
                 prefix, c->blockio_weight,
+                prefix, c->startup_blockio_weight,
                 prefix, c->memory_limit,
                 prefix, cgroup_device_policy_to_string(c->device_policy));
 
@@ -186,7 +200,7 @@ static int whitelist_device(const char *path, const char *node, const char *acc)
 
         r = cg_set_attribute("devices", path, "devices.allow", buf);
         if (r < 0)
-                log_warning("Failed to set devices.allow on %s: %s", path, strerror(-r));
+                log_full(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, "Failed to set devices.allow on %s: %s", path, strerror(-r));
 
         return r;
 }
@@ -246,7 +260,8 @@ static int whitelist_major(const char *path, const char *name, char type, const 
 
                 w++;
                 w += strspn(w, WHITESPACE);
-                if (!streq(w, name))
+
+                if (fnmatch(name, w, 0) != 0)
                         continue;
 
                 sprintf(buf,
@@ -257,7 +272,7 @@ static int whitelist_major(const char *path, const char *name, char type, const 
 
                 r = cg_set_attribute("devices", path, "devices.allow", buf);
                 if (r < 0)
-                        log_warning("Failed to set devices.allow on %s: %s", path, strerror(-r));
+                        log_full(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, "Failed to set devices.allow on %s: %s", path, strerror(-r));
         }
 
         return 0;
@@ -267,7 +282,7 @@ fail:
         return -errno;
 }
 
-void cgroup_context_apply(CGroupContext *c, CGroupControllerMask mask, const char *path) {
+void cgroup_context_apply(CGroupContext *c, CGroupControllerMask mask, const char *path, ManagerState state) {
         bool is_root;
         int r;
 
@@ -282,12 +297,27 @@ void cgroup_context_apply(CGroupContext *c, CGroupControllerMask mask, const cha
         is_root = isempty(path) || path_equal(path, "/");
 
         if ((mask & CGROUP_CPU) && !is_root) {
-                char buf[DECIMAL_STR_MAX(unsigned long) + 1];
+                char buf[MAX(DECIMAL_STR_MAX(unsigned long), DECIMAL_STR_MAX(usec_t)) + 1];
 
-                sprintf(buf, "%lu\n", c->cpu_shares);
+                sprintf(buf, "%lu\n",
+                        state == MANAGER_STARTING && c->startup_cpu_shares != (unsigned long) -1 ? c->startup_cpu_shares :
+                        c->cpu_shares != (unsigned long) -1 ? c->cpu_shares : 1024);
                 r = cg_set_attribute("cpu", path, "cpu.shares", buf);
                 if (r < 0)
-                        log_warning("Failed to set cpu.shares on %s: %s", path, strerror(-r));
+                        log_full(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, "Failed to set cpu.shares on %s: %s", path, strerror(-r));
+
+                sprintf(buf, USEC_FMT "\n", CGROUP_CPU_QUOTA_PERIOD_USEC);
+                r = cg_set_attribute("cpu", path, "cpu.cfs_period_us", buf);
+                if (r < 0)
+                        log_full(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, "Failed to set cpu.cfs_period_us on %s: %s", path, strerror(-r));
+
+                if (c->cpu_quota_per_sec_usec != USEC_INFINITY) {
+                        sprintf(buf, USEC_FMT "\n", c->cpu_quota_per_sec_usec * CGROUP_CPU_QUOTA_PERIOD_USEC / USEC_PER_SEC);
+                        r = cg_set_attribute("cpu", path, "cpu.cfs_quota_us", buf);
+                } else
+                        r = cg_set_attribute("cpu", path, "cpu.cfs_quota_us", "-1");
+                if (r < 0)
+                        log_full(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, "Failed to set cpu.cfs_quota_us on %s: %s", path, strerror(-r));
         }
 
         if (mask & CGROUP_BLKIO) {
@@ -298,10 +328,11 @@ void cgroup_context_apply(CGroupContext *c, CGroupControllerMask mask, const cha
                 CGroupBlockIODeviceBandwidth *b;
 
                 if (!is_root) {
-                        sprintf(buf, "%lu\n", c->blockio_weight);
+                        sprintf(buf, "%lu\n", state == MANAGER_STARTING && c->startup_blockio_weight != (unsigned long) -1 ? c->startup_blockio_weight :
+                                c->blockio_weight != (unsigned long) -1 ? c->blockio_weight : 1000);
                         r = cg_set_attribute("blkio", path, "blkio.weight", buf);
                         if (r < 0)
-                                log_warning("Failed to set blkio.weight on %s: %s", path, strerror(-r));
+                                log_full(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, "Failed to set blkio.weight on %s: %s", path, strerror(-r));
 
                         /* FIXME: no way to reset this list */
                         LIST_FOREACH(device_weights, w, c->blockio_device_weights) {
@@ -314,7 +345,7 @@ void cgroup_context_apply(CGroupContext *c, CGroupControllerMask mask, const cha
                                 sprintf(buf, "%u:%u %lu", major(dev), minor(dev), w->weight);
                                 r = cg_set_attribute("blkio", path, "blkio.weight_device", buf);
                                 if (r < 0)
-                                        log_error("Failed to set blkio.weight_device on %s: %s", path, strerror(-r));
+                                        log_full(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, "Failed to set blkio.weight_device on %s: %s", path, strerror(-r));
                         }
                 }
 
@@ -332,7 +363,7 @@ void cgroup_context_apply(CGroupContext *c, CGroupControllerMask mask, const cha
                         sprintf(buf, "%u:%u %" PRIu64 "\n", major(dev), minor(dev), b->bandwidth);
                         r = cg_set_attribute("blkio", path, a, buf);
                         if (r < 0)
-                                log_error("Failed to set %s on %s: %s", a, path, strerror(-r));
+                                log_full(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, "Failed to set %s on %s: %s", a, path, strerror(-r));
                 }
         }
 
@@ -346,7 +377,7 @@ void cgroup_context_apply(CGroupContext *c, CGroupControllerMask mask, const cha
                         r = cg_set_attribute("memory", path, "memory.limit_in_bytes", "-1");
 
                 if (r < 0)
-                        log_error("Failed to set memory.limit_in_bytes on %s: %s", path, strerror(-r));
+                        log_full(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, "Failed to set memory.limit_in_bytes on %s: %s", path, strerror(-r));
         }
 
         if ((mask & CGROUP_DEVICE) && !is_root) {
@@ -357,21 +388,27 @@ void cgroup_context_apply(CGroupContext *c, CGroupControllerMask mask, const cha
                 else
                         r = cg_set_attribute("devices", path, "devices.allow", "a");
                 if (r < 0)
-                        log_warning("Failed to reset devices.list on %s: %s", path, strerror(-r));
+                        log_full(r == -ENOENT ? LOG_DEBUG : LOG_WARNING, "Failed to reset devices.list on %s: %s", path, strerror(-r));
 
                 if (c->device_policy == CGROUP_CLOSED ||
                     (c->device_policy == CGROUP_AUTO && c->device_allow)) {
                         static const char auto_devices[] =
-                                "/dev/null\0" "rw\0"
-                                "/dev/zero\0" "rw\0"
-                                "/dev/full\0" "rw\0"
-                                "/dev/random\0" "rw\0"
-                                "/dev/urandom\0" "rw\0";
+                                "/dev/null\0" "rwm\0"
+                                "/dev/zero\0" "rwm\0"
+                                "/dev/full\0" "rwm\0"
+                                "/dev/random\0" "rwm\0"
+                                "/dev/urandom\0" "rwm\0"
+                                "/dev/tty\0" "rwm\0"
+                                "/dev/pts/ptmx\0" "rw\0"; /* /dev/pts/ptmx may not be duplicated, but accessed */
 
                         const char *x, *y;
 
                         NULSTR_FOREACH_PAIR(x, y, auto_devices)
                                 whitelist_device(path, x, y);
+
+                        whitelist_major(path, "pts", 'c', "rw");
+                        whitelist_major(path, "kdbus", 'c', "rw");
+                        whitelist_major(path, "kdbus/*", 'c', "rw");
                 }
 
                 LIST_FOREACH(device_allow, a, c->device_allow) {
@@ -407,11 +444,15 @@ CGroupControllerMask cgroup_context_get_mask(CGroupContext *c) {
 
         /* Figure out which controllers we need */
 
-        if (c->cpu_accounting || c->cpu_shares != 1024)
+        if (c->cpu_accounting ||
+            c->cpu_shares != (unsigned long) -1 ||
+            c->startup_cpu_shares != (unsigned long) -1 ||
+            c->cpu_quota_per_sec_usec != USEC_INFINITY)
                 mask |= CGROUP_CPUACCT | CGROUP_CPU;
 
         if (c->blockio_accounting ||
-            c->blockio_weight != 1000 ||
+            c->blockio_weight != (unsigned long) -1 ||
+            c->startup_blockio_weight != (unsigned long) -1 ||
             c->blockio_device_weights ||
             c->blockio_device_bandwidths)
                 mask |= CGROUP_BLKIO;
@@ -467,18 +508,12 @@ CGroupControllerMask unit_get_members_mask(Unit *u) {
 }
 
 CGroupControllerMask unit_get_siblings_mask(Unit *u) {
-        CGroupControllerMask m;
-
         assert(u);
 
         if (UNIT_ISSET(u->slice))
-                m = unit_get_members_mask(UNIT_DEREF(u->slice));
-        else
-                m = unit_get_cgroup_mask(u) | unit_get_members_mask(u);
+                return unit_get_members_mask(UNIT_DEREF(u->slice));
 
-        /* Sibling propagation is only relevant for weight-based
-         * controllers, so let's mask out everything else */
-        return m & (CGROUP_CPU|CGROUP_BLKIO|CGROUP_CPUACCT);
+        return unit_get_cgroup_mask(u) | unit_get_members_mask(u);
 }
 
 CGroupControllerMask unit_get_target_mask(Unit *u) {
@@ -608,7 +643,7 @@ static bool unit_has_mask_realized(Unit *u, CGroupControllerMask mask) {
  * If not, create paths, move processes over, and set attributes.
  *
  * Returns 0 on success and < 0 on failure. */
-static int unit_realize_cgroup_now(Unit *u) {
+static int unit_realize_cgroup_now(Unit *u, ManagerState state) {
         CGroupControllerMask mask;
         int r;
 
@@ -626,7 +661,7 @@ static int unit_realize_cgroup_now(Unit *u) {
 
         /* First, realize parents */
         if (UNIT_ISSET(u->slice)) {
-                r = unit_realize_cgroup_now(UNIT_DEREF(u->slice));
+                r = unit_realize_cgroup_now(UNIT_DEREF(u->slice), state);
                 if (r < 0)
                         return r;
         }
@@ -637,7 +672,7 @@ static int unit_realize_cgroup_now(Unit *u) {
                 return r;
 
         /* Finally, apply the necessary attributes. */
-        cgroup_context_apply(unit_get_cgroup_context(u), mask, u->cgroup_path);
+        cgroup_context_apply(unit_get_cgroup_context(u), mask, u->cgroup_path, state);
 
         return 0;
 }
@@ -652,14 +687,17 @@ static void unit_add_to_cgroup_queue(Unit *u) {
 }
 
 unsigned manager_dispatch_cgroup_queue(Manager *m) {
-        Unit *i;
+        ManagerState state;
         unsigned n = 0;
+        Unit *i;
         int r;
+
+        state = manager_state(m);
 
         while ((i = m->cgroup_queue)) {
                 assert(i->in_cgroup_queue);
 
-                r = unit_realize_cgroup_now(i);
+                r = unit_realize_cgroup_now(i, state);
                 if (r < 0)
                         log_warning("Failed to realize cgroups for queued unit %s: %s", i->id, strerror(-r));
 
@@ -731,7 +769,7 @@ int unit_realize_cgroup(Unit *u) {
         unit_queue_siblings(u);
 
         /* And realize this one now (and apply the values) */
-        return unit_realize_cgroup_now(u);
+        return unit_realize_cgroup_now(u, manager_state(u->manager));
 }
 
 void unit_destroy_cgroup(Unit *u) {
@@ -794,16 +832,9 @@ pid_t unit_search_main_pid(Unit *u) {
 
 int manager_setup_cgroup(Manager *m) {
         _cleanup_free_ char *path = NULL;
-        char *e;
         int r;
 
         assert(m);
-
-        /* 0. Be nice to Ingo Molnar #628004 */
-        if (path_is_mount_point("/sys/fs/cgroup/systemd", false) <= 0) {
-                log_warning("No control group support available, not creating root group.");
-                return 0;
-        }
 
         /* 1. Determine hierarchy */
         free(m->cgroup_root);
@@ -819,6 +850,8 @@ int manager_setup_cgroup(Manager *m) {
          * off. This is to support live upgrades from older systemd
          * versions where PID 1 was moved there. */
         if (m->running_as == SYSTEMD_SYSTEM) {
+                char *e;
+
                 e = endswith(m->cgroup_root, "/" SPECIAL_SYSTEM_SLICE);
                 if (!e)
                         e = endswith(m->cgroup_root, "/system");
@@ -840,40 +873,41 @@ int manager_setup_cgroup(Manager *m) {
         }
 
         log_debug("Using cgroup controller " SYSTEMD_CGROUP_CONTROLLER ". File system hierarchy is at %s.", path);
+        if (!m->test_run) {
 
-        /* 3. Install agent */
-        if (m->running_as == SYSTEMD_SYSTEM) {
-                r = cg_install_release_agent(SYSTEMD_CGROUP_CONTROLLER, SYSTEMD_CGROUP_AGENT_PATH);
-                if (r < 0)
-                        log_warning("Failed to install release agent, ignoring: %s", strerror(-r));
-                else if (r > 0)
-                        log_debug("Installed release agent.");
-                else
-                        log_debug("Release agent already installed.");
+                /* 3. Install agent */
+                if (m->running_as == SYSTEMD_SYSTEM) {
+                        r = cg_install_release_agent(SYSTEMD_CGROUP_CONTROLLER, SYSTEMD_CGROUP_AGENT_PATH);
+                        if (r < 0)
+                                log_warning("Failed to install release agent, ignoring: %s", strerror(-r));
+                        else if (r > 0)
+                                log_debug("Installed release agent.");
+                        else
+                                log_debug("Release agent already installed.");
+                }
+
+                /* 4. Make sure we are in the root cgroup */
+                r = cg_create_and_attach(SYSTEMD_CGROUP_CONTROLLER, m->cgroup_root, 0);
+                if (r < 0) {
+                        log_error("Failed to create root cgroup hierarchy: %s", strerror(-r));
+                        return r;
+                }
+
+                /* 5. And pin it, so that it cannot be unmounted */
+                safe_close(m->pin_cgroupfs_fd);
+
+                m->pin_cgroupfs_fd = open(path, O_RDONLY|O_CLOEXEC|O_DIRECTORY|O_NOCTTY|O_NONBLOCK);
+                if (m->pin_cgroupfs_fd < 0) {
+                        log_error("Failed to open pin file: %m");
+                        return -errno;
+                }
+
+                /* 6.  Always enable hierarchial support if it exists... */
+                cg_set_attribute("memory", "/", "memory.use_hierarchy", "1");
         }
 
-        /* 4. Make sure we are in the root cgroup */
-        r = cg_create_and_attach(SYSTEMD_CGROUP_CONTROLLER, m->cgroup_root, 0);
-        if (r < 0) {
-                log_error("Failed to create root cgroup hierarchy: %s", strerror(-r));
-                return r;
-        }
-
-        /* 5. And pin it, so that it cannot be unmounted */
-        if (m->pin_cgroupfs_fd >= 0)
-                close_nointr_nofail(m->pin_cgroupfs_fd);
-
-        m->pin_cgroupfs_fd = open(path, O_RDONLY|O_CLOEXEC|O_DIRECTORY|O_NOCTTY|O_NONBLOCK);
-        if (r < 0) {
-                log_error("Failed to open pin file: %m");
-                return -errno;
-        }
-
-        /* 6. Figure out which controllers are supported */
+        /* 7. Figure out which controllers are supported */
         m->cgroup_supported = cg_mask_supported();
-
-        /* 7.  Always enable hierarchial support if it exists... */
-        cg_set_attribute("memory", "/", "memory.use_hierarchy", "1");
 
         return 0;
 }
@@ -886,10 +920,7 @@ void manager_shutdown_cgroup(Manager *m, bool delete) {
         if (delete && m->cgroup_root)
                 cg_trim(SYSTEMD_CGROUP_CONTROLLER, m->cgroup_root, false);
 
-        if (m->pin_cgroupfs_fd >= 0) {
-                close_nointr_nofail(m->pin_cgroupfs_fd);
-                m->pin_cgroupfs_fd = -1;
-        }
+        m->pin_cgroupfs_fd = safe_close(m->pin_cgroupfs_fd);
 
         free(m->cgroup_root);
         m->cgroup_root = NULL;

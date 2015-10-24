@@ -31,12 +31,14 @@
 #include <time.h>
 #include <getopt.h>
 #include <dirent.h>
+#include <sys/file.h>
 #include <sys/time.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/signalfd.h>
 #include <sys/epoll.h>
+#include <sys/mount.h>
 #include <sys/poll.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
@@ -45,6 +47,7 @@
 #include <sys/utsname.h>
 
 #include "udev.h"
+#include "udev-util.h"
 #include "sd-daemon.h"
 #include "cgroup-util.h"
 #include "dev-setup.h"
@@ -54,13 +57,11 @@ static bool debug;
 
 void udev_main_log(struct udev *udev, int priority,
                    const char *file, int line, const char *fn,
-                   const char *format, va_list args)
-{
+                   const char *format, va_list args) {
         log_metav(priority, file, line, fn, format, args);
 }
 
 static struct udev_rules *rules;
-static struct udev_queue_export *udev_queue_export;
 static struct udev_ctrl *udev_ctrl;
 static struct udev_monitor *monitor;
 static int worker_watch[2] = { -1, -1 };
@@ -72,6 +73,7 @@ static bool reload;
 static int children;
 static int children_max;
 static int exec_delay;
+static usec_t event_timeout_usec = 30 * USEC_PER_SEC;
 static sigset_t sigmask_orig;
 static UDEV_LIST(event_list);
 static UDEV_LIST(worker_list);
@@ -103,8 +105,7 @@ struct event {
 #endif
 };
 
-static inline struct event *node_to_event(struct udev_list_node *node)
-{
+static inline struct event *node_to_event(struct udev_list_node *node) {
         return container_of(node, struct event, node);
 }
 
@@ -134,39 +135,29 @@ struct worker_message {
         int exitcode;
 };
 
-static inline struct worker *node_to_worker(struct udev_list_node *node)
-{
+static inline struct worker *node_to_worker(struct udev_list_node *node) {
         return container_of(node, struct worker, node);
 }
 
-static void event_queue_delete(struct event *event, bool export)
-{
+static void event_queue_delete(struct event *event) {
         udev_list_node_remove(&event->node);
-
-        if (export) {
-                udev_queue_export_device_finished(udev_queue_export, event->dev);
-                log_debug("seq %llu done with %i", udev_device_get_seqnum(event->dev), event->exitcode);
-        }
         udev_device_unref(event->dev);
         free(event);
 }
 
-static struct worker *worker_ref(struct worker *worker)
-{
+static struct worker *worker_ref(struct worker *worker) {
         worker->refcount++;
         return worker;
 }
 
-static void worker_cleanup(struct worker *worker)
-{
+static void worker_cleanup(struct worker *worker) {
         udev_list_node_remove(&worker->node);
         udev_monitor_unref(worker->monitor);
         children--;
         free(worker);
 }
 
-static void worker_unref(struct worker *worker)
-{
+static void worker_unref(struct worker *worker) {
         worker->refcount--;
         if (worker->refcount > 0)
                 return;
@@ -174,8 +165,7 @@ static void worker_unref(struct worker *worker)
         worker_cleanup(worker);
 }
 
-static void worker_list_cleanup(struct udev *udev)
-{
+static void worker_list_cleanup(struct udev *udev) {
         struct udev_list_node *loop, *tmp;
 
         udev_list_node_foreach_safe(loop, tmp, &worker_list) {
@@ -185,8 +175,7 @@ static void worker_list_cleanup(struct udev *udev)
         }
 }
 
-static void worker_new(struct event *event)
-{
+static void worker_new(struct event *event) {
         struct udev *udev = event->udev;
         struct worker *worker;
         struct udev_monitor *worker_monitor;
@@ -225,7 +214,6 @@ static void worker_new(struct event *event)
                 free(worker);
                 worker_list_cleanup(udev);
                 event_queue_cleanup(udev, EVENT_UNDEF);
-                udev_queue_export_unref(udev_queue_export);
                 udev_monitor_unref(monitor);
                 udev_ctrl_unref(udev_ctrl);
                 close(fd_signal);
@@ -272,7 +260,8 @@ static void worker_new(struct event *event)
                 for (;;) {
                         struct udev_event *udev_event;
                         struct worker_message msg;
-                        int err;
+                        int fd_lock = -1;
+                        int err = 0;
 
                         log_debug("seq %llu running", udev_device_get_seqnum(dev));
                         udev_event = udev_event_new(dev);
@@ -287,25 +276,54 @@ static void worker_new(struct event *event)
                         if (exec_delay > 0)
                                 udev_event->exec_delay = exec_delay;
 
-                        /* apply rules, create node, symlinks */
-                        err = udev_event_execute_rules(udev_event, rules, &sigmask_orig);
+                        /*
+                         * Take a shared lock on the device node; this establishes
+                         * a concept of device "ownership" to serialize device
+                         * access. External processes holding an exclusive lock will
+                         * cause udev to skip the event handling; in the case udev
+                         * acquired the lock, the external process can block until
+                         * udev has finished its event handling.
+                         */
+                        if (!streq_ptr(udev_device_get_action(dev), "remove") &&
+                            streq_ptr("block", udev_device_get_subsystem(dev)) &&
+                            !startswith(udev_device_get_sysname(dev), "dm-") &&
+                            !startswith(udev_device_get_sysname(dev), "md")) {
+                                struct udev_device *d = dev;
 
-                        if (err == 0)
-                                udev_event_execute_run(udev_event, &sigmask_orig);
+                                if (streq_ptr("partition", udev_device_get_devtype(d)))
+                                        d = udev_device_get_parent(d);
+
+                                if (d) {
+                                        fd_lock = open(udev_device_get_devnode(d), O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
+                                        if (fd_lock >= 0 && flock(fd_lock, LOCK_SH|LOCK_NB) < 0) {
+                                                log_debug("Unable to flock(%s), skipping event handling: %m", udev_device_get_devnode(d));
+                                                err = -EWOULDBLOCK;
+                                                fd_lock = safe_close(fd_lock);
+                                                goto skip;
+                                        }
+                                }
+                        }
+
+                        /* apply rules, create node, symlinks */
+                        udev_event_execute_rules(udev_event, event_timeout_usec, rules, &sigmask_orig);
+
+                        udev_event_execute_run(udev_event, event_timeout_usec, &sigmask_orig);
 
                         /* apply/restore inotify watch */
-                        if (err == 0 && udev_event->inotify_watch) {
+                        if (udev_event->inotify_watch) {
                                 udev_watch_begin(udev, dev);
                                 udev_device_update_db(dev);
                         }
 
+                        safe_close(fd_lock);
+
                         /* send processed event back to libudev listeners */
                         udev_monitor_send_device(worker_monitor, NULL, dev);
 
+skip:
                         /* send udevd the result of the event execution */
                         memzero(&msg, sizeof(struct worker_message));
-                        if (err != 0)
-                                msg.exitcode = err;
+                        msg.exitcode = err;
                         msg.pid = getpid();
                         send(worker_watch[WRITE_END], &msg, sizeof(struct worker_message), 0);
 
@@ -356,10 +374,8 @@ static void worker_new(struct event *event)
                 }
 out:
                 udev_device_unref(dev);
-                if (fd_signal >= 0)
-                        close(fd_signal);
-                if (fd_ep >= 0)
-                        close(fd_ep);
+                safe_close(fd_signal);
+                safe_close(fd_ep);
                 close(fd_inotify);
                 close(worker_watch[WRITE_END]);
                 udev_rules_unref(rules);
@@ -391,8 +407,7 @@ out:
         }
 }
 
-static void event_run(struct event *event)
-{
+static void event_run(struct event *event) {
         struct udev_list_node *loop;
 
         udev_list_node_foreach(loop, &worker_list) {
@@ -427,8 +442,7 @@ static void event_run(struct event *event)
         worker_new(event);
 }
 
-static int event_queue_insert(struct udev_device *dev)
-{
+static int event_queue_insert(struct udev_device *dev) {
         struct event *event;
 
         event = new0(struct event, 1);
@@ -449,7 +463,6 @@ static int event_queue_insert(struct udev_device *dev)
                 event->nodelay = true;
 #endif
 
-        udev_queue_export_device_queued(udev_queue_export, dev);
         log_debug("seq %llu queued, '%s' '%s'", udev_device_get_seqnum(dev),
              udev_device_get_action(dev), udev_device_get_subsystem(dev));
 
@@ -458,8 +471,7 @@ static int event_queue_insert(struct udev_device *dev)
         return 0;
 }
 
-static void worker_kill(struct udev *udev)
-{
+static void worker_kill(struct udev *udev) {
         struct udev_list_node *loop;
 
         udev_list_node_foreach(loop, &worker_list) {
@@ -474,8 +486,7 @@ static void worker_kill(struct udev *udev)
 }
 
 /* lookup event for identical, parent, child device */
-static bool is_devpath_busy(struct event *event)
-{
+static bool is_devpath_busy(struct event *event) {
         struct udev_list_node *loop;
         size_t common;
 
@@ -552,8 +563,7 @@ static bool is_devpath_busy(struct event *event)
         return false;
 }
 
-static void event_queue_start(struct udev *udev)
-{
+static void event_queue_start(struct udev *udev) {
         struct udev_list_node *loop;
 
         udev_list_node_foreach(loop, &event_list) {
@@ -570,8 +580,7 @@ static void event_queue_start(struct udev *udev)
         }
 }
 
-static void event_queue_cleanup(struct udev *udev, enum event_state match_type)
-{
+static void event_queue_cleanup(struct udev *udev, enum event_state match_type) {
         struct udev_list_node *loop, *tmp;
 
         udev_list_node_foreach_safe(loop, tmp, &event_list) {
@@ -580,12 +589,11 @@ static void event_queue_cleanup(struct udev *udev, enum event_state match_type)
                 if (match_type != EVENT_UNDEF && match_type != event->state)
                         continue;
 
-                event_queue_delete(event, false);
+                event_queue_delete(event);
         }
 }
 
-static void worker_returned(int fd_worker)
-{
+static void worker_returned(int fd_worker) {
         for (;;) {
                 struct worker_message msg;
                 ssize_t size;
@@ -605,7 +613,7 @@ static void worker_returned(int fd_worker)
                         /* worker returned */
                         if (worker->event) {
                                 worker->event->exitcode = msg.exitcode;
-                                event_queue_delete(worker->event, true);
+                                event_queue_delete(worker->event);
                                 worker->event = NULL;
                         }
                         if (worker->state != WORKER_KILLED)
@@ -617,8 +625,7 @@ static void worker_returned(int fd_worker)
 }
 
 /* receive the udevd message from userspace */
-static struct udev_ctrl_connection *handle_ctrl_msg(struct udev_ctrl *uctrl)
-{
+static struct udev_ctrl_connection *handle_ctrl_msg(struct udev_ctrl *uctrl) {
         struct udev *udev = udev_ctrl_get_udev(uctrl);
         struct udev_ctrl_connection *ctrl_conn;
         struct udev_ctrl_msg *ctrl_msg = NULL;
@@ -703,20 +710,124 @@ out:
         return udev_ctrl_connection_unref(ctrl_conn);
 }
 
-/* read inotify messages */
-static int handle_inotify(struct udev *udev)
-{
+static int synthesize_change(struct udev_device *dev) {
+        char filename[UTIL_PATH_SIZE];
+        int r;
+
+        if (streq_ptr("block", udev_device_get_subsystem(dev)) &&
+            streq_ptr("disk", udev_device_get_devtype(dev)) &&
+            !startswith(udev_device_get_sysname(dev), "dm-")) {
+                bool part_table_read = false;
+                bool has_partitions = false;
+                int fd;
+                struct udev *udev = udev_device_get_udev(dev);
+                _cleanup_udev_enumerate_unref_ struct udev_enumerate *e = NULL;
+                struct udev_list_entry *item;
+
+                /*
+                 * Try to re-read the partition table. This only succeeds if
+                 * none of the devices is busy. The kernel returns 0 if no
+                 * partition table is found, and we will not get an event for
+                 * the disk.
+                 */
+                fd = open(udev_device_get_devnode(dev), O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
+                if (fd >= 0) {
+                        r = flock(fd, LOCK_EX|LOCK_NB);
+                        if (r >= 0)
+                                r = ioctl(fd, BLKRRPART, 0);
+
+                        close(fd);
+                        if (r >= 0)
+                                part_table_read = true;
+                }
+
+                /* search for partitions */
+                e = udev_enumerate_new(udev);
+                if (!e)
+                        return -ENOMEM;
+
+                r = udev_enumerate_add_match_parent(e, dev);
+                if (r < 0)
+                        return r;
+
+                r = udev_enumerate_add_match_subsystem(e, "block");
+                if (r < 0)
+                        return r;
+
+                r = udev_enumerate_scan_devices(e);
+                if (r < 0)
+                        return r;
+
+                udev_list_entry_foreach(item, udev_enumerate_get_list_entry(e)) {
+                        _cleanup_udev_device_unref_ struct udev_device *d = NULL;
+
+                        d = udev_device_new_from_syspath(udev, udev_list_entry_get_name(item));
+                        if (!d)
+                                continue;
+
+                        if (!streq_ptr("partition", udev_device_get_devtype(d)))
+                                continue;
+
+                        has_partitions = true;
+                        break;
+                }
+
+                /*
+                 * We have partitions and re-read the table, the kernel already sent
+                 * out a "change" event for the disk, and "remove/add" for all
+                 * partitions.
+                 */
+                if (part_table_read && has_partitions)
+                        return 0;
+
+                /*
+                 * We have partitions but re-reading the partition table did not
+                 * work, synthesize "change" for the disk and all partitions.
+                 */
+                log_debug("device %s closed, synthesising 'change'", udev_device_get_devnode(dev));
+                strscpyl(filename, sizeof(filename), udev_device_get_syspath(dev), "/uevent", NULL);
+                write_string_file(filename, "change");
+
+                udev_list_entry_foreach(item, udev_enumerate_get_list_entry(e)) {
+                        _cleanup_udev_device_unref_ struct udev_device *d = NULL;
+
+                        d = udev_device_new_from_syspath(udev, udev_list_entry_get_name(item));
+                        if (!d)
+                                continue;
+
+                        if (!streq_ptr("partition", udev_device_get_devtype(d)))
+                                continue;
+
+                        log_debug("device %s closed, synthesising partition '%s' 'change'",
+                                  udev_device_get_devnode(dev), udev_device_get_devnode(d));
+                        strscpyl(filename, sizeof(filename), udev_device_get_syspath(d), "/uevent", NULL);
+                        write_string_file(filename, "change");
+                }
+
+                return 0;
+        }
+
+        log_debug("device %s closed, synthesising 'change'", udev_device_get_devnode(dev));
+        strscpyl(filename, sizeof(filename), udev_device_get_syspath(dev), "/uevent", NULL);
+        write_string_file(filename, "change");
+
+        return 0;
+}
+
+static int handle_inotify(struct udev *udev) {
         int nbytes, pos;
         char *buf;
         struct inotify_event *ev;
+        int r;
 
-        if ((ioctl(fd_inotify, FIONREAD, &nbytes) < 0) || (nbytes <= 0))
-                return 0;
+        r = ioctl(fd_inotify, FIONREAD, &nbytes);
+        if (r < 0 || nbytes <= 0)
+                return -errno;
 
         buf = malloc(nbytes);
-        if (buf == NULL) {
+        if (!buf) {
                 log_error("error getting buffer for inotify");
-                return -1;
+                return -ENOMEM;
         }
 
         nbytes = read(fd_inotify, buf, nbytes);
@@ -726,35 +837,23 @@ static int handle_inotify(struct udev *udev)
 
                 ev = (struct inotify_event *)(buf + pos);
                 dev = udev_watch_lookup(udev, ev->wd);
-                if (dev != NULL) {
-                        log_debug("inotify event: %x for %s", ev->mask, udev_device_get_devnode(dev));
-                        if (ev->mask & IN_CLOSE_WRITE) {
-                                char filename[UTIL_PATH_SIZE];
-                                int fd;
+                if (!dev)
+                        continue;
 
-                                log_debug("device %s closed, synthesising 'change'", udev_device_get_devnode(dev));
-                                strscpyl(filename, sizeof(filename), udev_device_get_syspath(dev), "/uevent", NULL);
-                                fd = open(filename, O_WRONLY|O_CLOEXEC);
-                                if (fd >= 0) {
-                                        if (write(fd, "change", 6) < 0)
-                                                log_debug("error writing uevent: %m");
-                                        close(fd);
-                                }
-                        }
-                        if (ev->mask & IN_IGNORED)
-                                udev_watch_end(udev, dev);
+                log_debug("inotify event: %x for %s", ev->mask, udev_device_get_devnode(dev));
+                if (ev->mask & IN_CLOSE_WRITE)
+                        synthesize_change(dev);
+                else if (ev->mask & IN_IGNORED)
+                        udev_watch_end(udev, dev);
 
-                        udev_device_unref(dev);
-                }
-
+                udev_device_unref(dev);
         }
 
         free(buf);
         return 0;
 }
 
-static void handle_signal(struct udev *udev, int signo)
-{
+static void handle_signal(struct udev *udev, int signo) {
         switch (signo) {
         case SIGINT:
         case SIGTERM:
@@ -797,7 +896,8 @@ static void handle_signal(struct udev *udev, int signo)
                                                 log_error("worker [%u] failed while handling '%s'",
                                                           pid, worker->event->devpath);
                                                 worker->event->exitcode = -32;
-                                                event_queue_delete(worker->event, true);
+                                                event_queue_delete(worker->event);
+
                                                 /* drop reference taken for state 'running' */
                                                 worker_unref(worker);
                                         }
@@ -813,8 +913,7 @@ static void handle_signal(struct udev *udev, int signo)
         }
 }
 
-static int systemd_fds(struct udev *udev, int *rctrl, int *rnetlink)
-{
+static int systemd_fds(struct udev *udev, int *rctrl, int *rnetlink) {
         int ctrl = -1, netlink = -1;
         int fd, n;
 
@@ -855,10 +954,9 @@ static int systemd_fds(struct udev *udev, int *rctrl, int *rnetlink)
  *   udev.children-max=<number of workers>  events are fully serialized if set to 1
  *   udev.exec-delay=<number of seconds>    delay execution of every executed program
  */
-static void kernel_cmdline_options(struct udev *udev)
-{
+static void kernel_cmdline_options(struct udev *udev) {
         _cleanup_free_ char *line = NULL;
-        char *w, *state;
+        const char *word, *state;
         size_t l;
         int r;
 
@@ -868,10 +966,10 @@ static void kernel_cmdline_options(struct udev *udev)
         if (r <= 0)
                 return;
 
-        FOREACH_WORD_QUOTED(w, l, line, state) {
+        FOREACH_WORD_QUOTED(word, l, line, state) {
                 char *s, *opt;
 
-                s = strndup(w, l);
+                s = strndup(word, l);
                 if (!s)
                         break;
 
@@ -891,14 +989,15 @@ static void kernel_cmdline_options(struct udev *udev)
                         children_max = strtoul(opt + 18, NULL, 0);
                 } else if (startswith(opt, "udev.exec-delay=")) {
                         exec_delay = strtoul(opt + 16, NULL, 0);
+                } else if (startswith(opt, "udev.event-timeout=")) {
+                        event_timeout_usec = strtoul(opt + 16, NULL, 0) * USEC_PER_SEC;
                 }
 
                 free(s);
         }
 }
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
         struct udev *udev;
         sigset_t mask;
         int daemonize = false;
@@ -908,6 +1007,7 @@ int main(int argc, char *argv[])
                 { "debug", no_argument, NULL, 'D' },
                 { "children-max", required_argument, NULL, 'c' },
                 { "exec-delay", required_argument, NULL, 'e' },
+                { "event-timeout", required_argument, NULL, 't' },
                 { "resolve-names", required_argument, NULL, 'N' },
                 { "help", no_argument, NULL, 'h' },
                 { "version", no_argument, NULL, 'V' },
@@ -951,6 +1051,9 @@ int main(int argc, char *argv[])
                 case 'e':
                         exec_delay = strtoul(optarg, NULL, 0);
                         break;
+                case 't':
+                        event_timeout_usec = strtoul(optarg, NULL, 0) * USEC_PER_SEC;
+                        break;
                 case 'D':
                         debug = true;
                         log_set_max_level(LOG_DEBUG);
@@ -975,6 +1078,7 @@ int main(int argc, char *argv[])
                                "  --debug\n"
                                "  --children-max=<maximum number of workers>\n"
                                "  --exec-delay=<seconds to wait before executing RUN=>\n"
+                               "  --event-timeout=<seconds to wait before terminating an event>\n"
                                "  --resolve-names=early|late|never\n"
                                "  --version\n"
                                "  --help\n"
@@ -1076,14 +1180,7 @@ int main(int argc, char *argv[])
                 goto exit;
         }
 
-        udev_monitor_set_receive_buffer_size(monitor, 128*1024*1024);
-
-        /* create queue file before signalling 'ready', to make sure we block 'settle' */
-        udev_queue_export = udev_queue_export_new(udev);
-        if (udev_queue_export == NULL) {
-                log_error("error creating queue file");
-                goto exit;
-        }
+        udev_monitor_set_receive_buffer_size(monitor, 128 * 1024 * 1024);
 
         if (daemonize) {
                 pid_t pid;
@@ -1241,12 +1338,12 @@ int main(int argc, char *argv[])
                         worker_kill(udev);
 
                         /* exit after all has cleaned up */
-                        if (udev_list_node_is_empty(&event_list) && udev_list_node_is_empty(&worker_list))
+                        if (udev_list_node_is_empty(&event_list) && children == 0)
                                 break;
 
                         /* timeout at exit for workers to finish */
-                        timeout = 30 * 1000;
-                } else if (udev_list_node_is_empty(&event_list) && !children) {
+                        timeout = 30 * MSEC_PER_SEC;
+                } else if (udev_list_node_is_empty(&event_list) && children == 0) {
                         /* we are idle */
                         timeout = -1;
 
@@ -1255,8 +1352,20 @@ int main(int argc, char *argv[])
                                 cg_kill(SYSTEMD_CGROUP_CONTROLLER, udev_cgroup, SIGKILL, false, true, NULL);
                 } else {
                         /* kill idle or hanging workers */
-                        timeout = 3 * 1000;
+                        timeout = 3 * MSEC_PER_SEC;
                 }
+
+                /* tell settle that we are busy or idle */
+                if (!udev_list_node_is_empty(&event_list)) {
+                        int fd;
+
+                        fd = open("/run/udev/queue", O_WRONLY|O_CREAT|O_CLOEXEC|O_TRUNC|O_NOFOLLOW, 0444);
+                        if (fd >= 0)
+                                close(fd);
+                } else {
+                        unlink("/run/udev/queue");
+                }
+
                 fdcount = epoll_wait(fd_ep, ev, ELEMENTSOF(ev), timeout);
                 if (fdcount < 0)
                         continue;
@@ -1283,20 +1392,17 @@ int main(int argc, char *argv[])
                                 if (worker->state != WORKER_RUNNING)
                                         continue;
 
-                                if ((now(CLOCK_MONOTONIC) - worker->event_start_usec) > 30 * 1000 * 1000) {
-                                        log_error("worker [%u] %s timeout; kill it", worker->pid,
-                                            worker->event ? worker->event->devpath : "<idle>");
+                                if ((now(CLOCK_MONOTONIC) - worker->event_start_usec) > event_timeout_usec) {
+                                        log_error("worker [%u] %s timeout; kill it", worker->pid, worker->event->devpath);
                                         kill(worker->pid, SIGKILL);
                                         worker->state = WORKER_KILLED;
+
                                         /* drop reference taken for state 'running' */
                                         worker_unref(worker);
-                                        if (worker->event) {
-                                                log_error("seq %llu '%s' killed",
-                                                          udev_device_get_seqnum(worker->event->dev), worker->event->devpath);
-                                                worker->event->exitcode = -64;
-                                                event_queue_delete(worker->event, true);
-                                                worker->event = NULL;
-                                        }
+                                        log_error("seq %llu '%s' killed", udev_device_get_seqnum(worker->event->dev), worker->event->devpath);
+                                        worker->event->exitcode = -64;
+                                        event_queue_delete(worker->event);
+                                        worker->event = NULL;
                                 }
                         }
 
@@ -1317,7 +1423,7 @@ int main(int argc, char *argv[])
                 }
 
                 /* check for changed config, every 3 seconds at most */
-                if ((now(CLOCK_MONOTONIC) - last_usec) > 3 * 1000 * 1000) {
+                if ((now(CLOCK_MONOTONIC) - last_usec) > 3 * USEC_PER_SEC) {
                         if (udev_rules_check_timestamp(rules))
                                 reload = true;
                         if (udev_builtin_validate(udev))
@@ -1390,8 +1496,8 @@ int main(int argc, char *argv[])
 
         rc = EXIT_SUCCESS;
 exit:
-        udev_queue_export_cleanup(udev_queue_export);
         udev_ctrl_cleanup(udev_ctrl);
+        unlink("/run/udev/queue");
 exit_daemonize:
         if (fd_ep >= 0)
                 close(fd_ep);
@@ -1406,7 +1512,6 @@ exit_daemonize:
         if (worker_watch[WRITE_END] >= 0)
                 close(worker_watch[WRITE_END]);
         udev_monitor_unref(monitor);
-        udev_queue_export_unref(udev_queue_export);
         udev_ctrl_connection_unref(ctrl_conn);
         udev_ctrl_unref(udev_ctrl);
         label_finish();

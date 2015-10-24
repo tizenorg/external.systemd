@@ -20,6 +20,7 @@
 ***/
 
 #include "time-util.h"
+#include "strv.h"
 
 static void test_parse_sec(void) {
         usec_t u;
@@ -84,7 +85,7 @@ static void test_format_timespan_one(usec_t x, usec_t accuracy) {
         char l[FORMAT_TIMESPAN_MAX];
         usec_t y;
 
-        log_info("%llu     (at accuracy %llu)", (unsigned long long) x, (unsigned long long) accuracy);
+        log_info(USEC_FMT"     (at accuracy "USEC_FMT")", x, accuracy);
 
         r = format_timespan(l, sizeof(l), x, accuracy);
         assert_se(r);
@@ -93,7 +94,7 @@ static void test_format_timespan_one(usec_t x, usec_t accuracy) {
 
         assert_se(parse_sec(l, &y) >= 0);
 
-        log_info(" = %llu", (unsigned long long) y);
+        log_info(" = "USEC_FMT, y);
 
         if (accuracy <= 0)
                 accuracy = 1;
@@ -126,11 +127,33 @@ static void test_format_timespan(usec_t accuracy) {
         test_format_timespan_one(9*USEC_PER_YEAR/5 - 23, accuracy);
 }
 
+static void test_timezone_is_valid(void) {
+        assert_se(timezone_is_valid("Europe/Berlin"));
+        assert_se(timezone_is_valid("Australia/Sydney"));
+        assert_se(!timezone_is_valid("Europe/Do not exist"));
+}
+
+static void test_get_timezones(void) {
+        _cleanup_strv_free_ char **zones = NULL;
+        int r;
+        char **zone;
+
+        r = get_timezones(&zones);
+        assert_se(r == 0);
+
+        STRV_FOREACH(zone, zones) {
+                assert_se(timezone_is_valid(*zone));
+        }
+}
+
 int main(int argc, char *argv[]) {
         test_parse_sec();
         test_parse_nsec();
         test_format_timespan(1);
         test_format_timespan(USEC_PER_MSEC);
         test_format_timespan(USEC_PER_SEC);
+        test_timezone_is_valid();
+        test_get_timezones();
+
         return 0;
 }
